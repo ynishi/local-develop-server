@@ -1,3 +1,10 @@
+//! Git operations backed by [`git2`], with session-scoped write safety.
+//!
+//! Read operations (status, log, diff) are always available. Write
+//! operations (commit, merge, worktree add/remove) are restricted to
+//! worktrees created by the current session — preventing one agent from
+//! destroying another's work.
+
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -5,10 +12,11 @@ use std::sync::Arc;
 use anyhow::{bail, Result};
 use lds_core::Session;
 
-/// Git module with write-scope tracking.
-/// Read operations (log/diff/status) are always available.
-/// Write operations (commit/merge/worktree_add/remove) are scoped
-/// to worktrees created by this session.
+/// Git module instance, tied to a [`Session`].
+///
+/// Tracks which worktrees were created by this session via
+/// `owned_worktrees`. Write operations check ownership before
+/// proceeding; read operations bypass the check entirely.
 #[derive(Debug)]
 pub struct GitModule {
     session: Arc<Session>,

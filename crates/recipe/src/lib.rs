@@ -1,3 +1,15 @@
+//! Justfile recipe execution with hierarchical resolve chain.
+//!
+//! Discovers justfiles at two levels — Global (`~/.config/lds/`) and
+//! Project (`{root}/`) — merges their recipes (project wins on name
+//! collision), and tags each recipe with [`ResolveInfo`] so callers
+//! know which justfile it came from. Adding a level (e.g. Worktree)
+//! is one enum variant + one path probe.
+//!
+//! Execution applies [`Session`] timeout and output truncation, and
+//! injects `content` args as `TASK_MCP_CONTENT_{KEY}` environment
+//! variables for the recipe process.
+
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

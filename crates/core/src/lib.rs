@@ -1,3 +1,10 @@
+//! Core session state shared across all lds modules.
+//!
+//! Every module (git, recipe, sandbox) receives an `Arc<Session>` that
+//! anchors operations to a single project root. Shared concerns — timeout,
+//! output truncation, global recipe dir — live here so modules don't
+//! duplicate configuration.
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -7,6 +14,8 @@ use anyhow::{bail, Result};
 const DEFAULT_TIMEOUT_SECS: u64 = 60;
 const DEFAULT_MAX_OUTPUT: usize = 102_400; // 100KB
 
+/// Configuration passed to [`Session::new`]. Optional fields fall back
+/// to sensible defaults (60s timeout, 100KB output limit).
 pub struct SessionConfig {
     pub root: PathBuf,
     pub timeout_secs: Option<u64>,
@@ -14,6 +23,10 @@ pub struct SessionConfig {
     pub global_recipe_dir: Option<PathBuf>,
 }
 
+/// Immutable session state created by `session_start`.
+///
+/// Cloned (via `Arc`) into each module. Holds the project root and
+/// cross-cutting concerns that every module may need.
 #[derive(Debug, Clone)]
 pub struct Session {
     root: PathBuf,
@@ -70,6 +83,10 @@ impl Session {
     }
 }
 
+/// Top-level mutable state for the MCP server.
+///
+/// Holds the current [`Session`] (if started). The MCP handler wraps
+/// this in `Arc<RwLock<LdsState>>` for concurrent tool access.
 #[derive(Debug, Clone)]
 pub struct LdsState {
     session: Option<Arc<Session>>,
@@ -99,6 +116,11 @@ impl Default for LdsState {
     }
 }
 
+/// Truncate byte output to `max` bytes, splitting into head + tail halves.
+///
+/// Returns `(output_string, was_truncated)`. When truncated, inserts a
+/// marker line between the halves showing the original size. Splits are
+/// aligned to UTF-8 character boundaries so the result is always valid.
 pub fn truncate_output(raw: &[u8], max: usize) -> (String, bool) {
     if raw.len() <= max {
         return (String::from_utf8_lossy(raw).into_owned(), false);
