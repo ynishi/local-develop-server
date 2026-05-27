@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -54,6 +55,40 @@ struct GitLogReq {
 
 fn default_max_count() -> usize {
     20
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct GitCommitReq {
+    working_dir: String,
+    message: String,
+    #[serde(default)]
+    paths: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct GitWorktreeAddReq {
+    name: String,
+    branch: String,
+    #[serde(default)]
+    base_branch: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct GitWorktreeRemoveReq {
+    name: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct GitMergeReq {
+    branch: String,
+    into_branch: String,
+    #[serde(default)]
+    working_dir: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct GitBranchDeleteReq {
+    branch: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -130,6 +165,108 @@ impl LdsServer {
             .ok_or_else(|| McpError::internal_error("no session", None))?;
         let out = git
             .diff()
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(out)]))
+    }
+
+    #[tool(description = "List git worktrees with session ownership annotation")]
+    async fn git_worktree_list(&self) -> Result<CallToolResult, McpError> {
+        let inner = self.state.read().await;
+        let git = inner
+            .git
+            .as_ref()
+            .ok_or_else(|| McpError::internal_error("no session", None))?;
+        let out = git
+            .worktree_list()
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(out)]))
+    }
+
+    #[tool(description = "Create a git worktree under .worktrees/ with a new branch")]
+    async fn git_worktree_add(
+        &self,
+        Parameters(req): Parameters<GitWorktreeAddReq>,
+    ) -> Result<CallToolResult, McpError> {
+        let mut inner = self.state.write().await;
+        let git = inner
+            .git
+            .as_mut()
+            .ok_or_else(|| McpError::internal_error("no session", None))?;
+        let out = git
+            .worktree_add(&req.name, &req.branch, req.base_branch.as_deref())
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(out)]))
+    }
+
+    #[tool(description = "Remove a session-owned git worktree")]
+    async fn git_worktree_remove(
+        &self,
+        Parameters(req): Parameters<GitWorktreeRemoveReq>,
+    ) -> Result<CallToolResult, McpError> {
+        let mut inner = self.state.write().await;
+        let git = inner
+            .git
+            .as_mut()
+            .ok_or_else(|| McpError::internal_error("no session", None))?;
+        let out = git
+            .worktree_remove(&req.name)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(out)]))
+    }
+
+    #[tool(description = "Stage and commit changes in a session-owned working directory")]
+    async fn git_commit(
+        &self,
+        Parameters(req): Parameters<GitCommitReq>,
+    ) -> Result<CallToolResult, McpError> {
+        let inner = self.state.read().await;
+        let git = inner
+            .git
+            .as_ref()
+            .ok_or_else(|| McpError::internal_error("no session", None))?;
+        let working_dir = PathBuf::from(&req.working_dir);
+        let out = git
+            .commit(&working_dir, &req.message, req.paths.as_deref())
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(out)]))
+    }
+
+    #[tool(description = "Merge a branch into another in a session-owned working directory")]
+    async fn git_merge(
+        &self,
+        Parameters(req): Parameters<GitMergeReq>,
+    ) -> Result<CallToolResult, McpError> {
+        let inner = self.state.read().await;
+        let git = inner
+            .git
+            .as_ref()
+            .ok_or_else(|| McpError::internal_error("no session", None))?;
+        let session = inner
+            .lds
+            .session()
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        let working_dir = req
+            .working_dir
+            .map(PathBuf::from)
+            .unwrap_or_else(|| session.root().to_path_buf());
+        let out = git
+            .merge(&req.branch, &req.into_branch, &working_dir)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(out)]))
+    }
+
+    #[tool(description = "Delete a session-owned branch")]
+    async fn git_branch_delete(
+        &self,
+        Parameters(req): Parameters<GitBranchDeleteReq>,
+    ) -> Result<CallToolResult, McpError> {
+        let inner = self.state.read().await;
+        let git = inner
+            .git
+            .as_ref()
+            .ok_or_else(|| McpError::internal_error("no session", None))?;
+        let out = git
+            .branch_delete(&req.branch)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         Ok(CallToolResult::success(vec![Content::text(out)]))
     }
