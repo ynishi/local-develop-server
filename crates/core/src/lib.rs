@@ -11,6 +11,7 @@ pub struct SessionConfig {
     pub root: PathBuf,
     pub timeout_secs: Option<u64>,
     pub max_output: Option<usize>,
+    pub global_recipe_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone)]
@@ -19,6 +20,7 @@ pub struct Session {
     session_id: String,
     timeout: Duration,
     max_output: usize,
+    global_recipe_dir: Option<PathBuf>,
 }
 
 impl Session {
@@ -37,11 +39,13 @@ impl Session {
             max_output,
             "session started"
         );
+        let global_recipe_dir = config.global_recipe_dir;
         Ok(Self {
             root,
             session_id,
             timeout,
             max_output,
+            global_recipe_dir,
         })
     }
 
@@ -59,6 +63,10 @@ impl Session {
 
     pub fn max_output(&self) -> usize {
         self.max_output
+    }
+
+    pub fn global_recipe_dir(&self) -> Option<&Path> {
+        self.global_recipe_dir.as_deref()
     }
 }
 

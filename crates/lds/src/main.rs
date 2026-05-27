@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -41,6 +42,8 @@ struct SessionStartReq {
     timeout_secs: Option<u64>,
     #[serde(default)]
     max_output: Option<usize>,
+    #[serde(default)]
+    global_recipe_dir: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -58,6 +61,8 @@ struct RecipeRunReq {
     recipe: String,
     #[serde(default)]
     args: Vec<String>,
+    #[serde(default)]
+    content: HashMap<String, String>,
 }
 
 #[tool_router]
@@ -72,6 +77,7 @@ impl LdsServer {
             root: req.root.into(),
             timeout_secs: req.timeout_secs,
             max_output: req.max_output,
+            global_recipe_dir: req.global_recipe_dir.map(Into::into),
         };
         let session = inner
             .lds
@@ -156,7 +162,7 @@ impl LdsServer {
             .ok_or_else(|| McpError::internal_error("no session", None))?;
         let args_refs: Vec<&str> = req.args.iter().map(|s| s.as_str()).collect();
         let output = recipe
-            .run(&req.recipe, &args_refs)
+            .run(&req.recipe, &args_refs, &req.content)
             .await
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         let json = serde_json::to_string_pretty(&output)

@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{bail, Result};
@@ -8,6 +8,19 @@ use serde::Deserialize;
 
 const ALLOW_AGENT_GROUP: &str = "allow-agent";
 const LEGACY_ALLOW_AGENT_DOC: &str = "[allow-agent]";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResolveLevel {
+    Global,
+    Project,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ResolveInfo {
+    pub level: ResolveLevel,
+    pub source_path: PathBuf,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RecipeMode {
@@ -24,7 +37,7 @@ impl Default for RecipeMode {
 #[derive(Debug)]
 pub struct RecipeModule {
     session: Arc<Session>,
-    justfile_path: Option<PathBuf>,
+    resolve_chain: Vec<(ResolveLevel, PathBuf)>,
     mode: RecipeMode,
 }
 
@@ -34,30 +47,30 @@ impl RecipeModule {
     }
 
     pub fn with_mode(session: Arc<Session>, mode: RecipeMode) -> Self {
-        let justfile_path = find_justfile(session.root());
-        if let Some(ref p) = justfile_path {
-            tracing::info!(justfile = %p.display(), ?mode, "recipe module: justfile found");
-        } else {
-            tracing::warn!("recipe module: no justfile found in {}", session.root().display());
+        let resolve_chain = build_resolve_chain(session.root(), session.global_recipe_dir());
+        for (level, path) in &resolve_chain {
+            tracing::info!(level = ?level, justfile = %path.display(), "recipe module: justfile found");
+        }
+        if resolve_chain.is_empty() {
+            tracing::warn!("recipe module: no justfile found");
         }
         Self {
             session,
-            justfile_path,
+            resolve_chain,
             mode,
         }
     }
 
     pub async fn list(&self) -> Result<Vec<RecipeInfo>> {
-        let recipes = self.dump_recipes().await?;
-        Ok(recipes)
+        self.merged_recipes().await
     }
 
-    pub async fn run(&self, recipe: &str, args: &[&str]) -> Result<RecipeOutput> {
-        let justfile = self.require_justfile()?;
+    pub async fn run(&self, recipe: &str, args: &[&str], content: &HashMap<String, String>) -> Result<RecipeOutput> {
+        let resolved = self.merged_recipes().await?;
+        let recipe_info = resolved.iter().find(|r| r.name == recipe);
 
         if self.mode == RecipeMode::AgentOnly {
-            let allowed = self.dump_recipes().await?;
-            if !allowed.iter().any(|r| r.name == recipe) {
+            if recipe_info.is_none() {
                 bail!(
                     "recipe '{}' is not in the allow-agent group — not available in agent-only mode",
                     recipe
@@ -65,13 +78,23 @@ impl RecipeModule {
             }
         }
 
+        let source_path = recipe_info
+            .map(|r| r.source.source_path.clone())
+            .ok_or_else(|| anyhow::anyhow!("recipe '{}' not found", recipe))?;
+
         let mut cmd = tokio::process::Command::new("just");
         cmd.arg("--justfile")
-            .arg(justfile)
-            .current_dir(self.session.root())
+            .arg(&source_path)
+            .arg("--working-directory")
+            .arg(self.session.root())
             .arg(recipe);
         for arg in args {
             cmd.arg(arg);
+        }
+
+        for (key, value) in content {
+            let env_key = format!("TASK_MCP_CONTENT_{}", key.to_uppercase());
+            cmd.env(&env_key, value);
         }
 
         let timeout = self.session.timeout();
@@ -101,60 +124,103 @@ impl RecipeModule {
         }
     }
 
-    async fn dump_recipes(&self) -> Result<Vec<RecipeInfo>> {
-        let justfile = self.require_justfile()?;
-        let output = tokio::process::Command::new("just")
-            .arg("--justfile")
-            .arg(justfile)
-            .arg("--dump")
-            .arg("--dump-format")
-            .arg("json")
-            .output()
-            .await?;
+    async fn merged_recipes(&self) -> Result<Vec<RecipeInfo>> {
+        let mut merged: HashMap<String, RecipeInfo> = HashMap::new();
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            bail!("just --dump failed: {stderr}");
+        // Iterate from lowest priority (Global) to highest (Project).
+        // Higher priority overwrites on name collision.
+        for (level, justfile_path) in &self.resolve_chain {
+            let recipes = dump_justfile(justfile_path).await?;
+            for r in recipes {
+                if r.private {
+                    continue;
+                }
+                if self.mode == RecipeMode::AgentOnly && !is_allow_agent(&r) {
+                    continue;
+                }
+                merged.insert(
+                    r.name.clone(),
+                    RecipeInfo {
+                        name: r.name,
+                        description: r.doc.unwrap_or_default(),
+                        parameters: r.parameters.into_iter().map(|p| p.name).collect(),
+                        source: ResolveInfo {
+                            level: *level,
+                            source_path: justfile_path.clone(),
+                        },
+                    },
+                );
+            }
         }
 
-        let dump: JustDump = serde_json::from_slice(&output.stdout)?;
-        let mut recipes: Vec<RecipeInfo> = dump
-            .recipes
-            .into_values()
-            .filter(|r| !r.private)
-            .filter(|r| self.mode == RecipeMode::Unrestricted || is_allow_agent(r))
-            .map(|r| RecipeInfo {
-                name: r.name,
-                description: r.doc.unwrap_or_default(),
-                parameters: r
-                    .parameters
-                    .into_iter()
-                    .map(|p| p.name)
-                    .collect(),
-            })
-            .collect();
-        recipes.sort_by(|a, b| a.name.cmp(&b.name));
-        Ok(recipes)
+        let mut result: Vec<RecipeInfo> = merged.into_values().collect();
+        result.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(result)
+    }
+}
+
+fn build_resolve_chain(root: &Path, global_dir: Option<&Path>) -> Vec<(ResolveLevel, PathBuf)> {
+    let mut chain = Vec::new();
+
+    // Global (lowest priority, inserted first → overwritten by later entries)
+    if let Some(dir) = global_dir {
+        if let Some(path) = find_justfile(dir) {
+            chain.push((ResolveLevel::Global, path));
+        }
+    } else {
+        // Default: ~/.config/lds/justfile
+        if let Some(home) = home_dir() {
+            let default_global = home.join(".config/lds");
+            if let Some(path) = find_justfile(&default_global) {
+                chain.push((ResolveLevel::Global, path));
+            }
+        }
     }
 
-    fn require_justfile(&self) -> Result<&PathBuf> {
-        self.justfile_path
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("no justfile found"))
+    // Project (highest priority)
+    if let Some(path) = find_justfile(root) {
+        chain.push((ResolveLevel::Project, path));
     }
+
+    chain
+}
+
+fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(PathBuf::from)
+}
+
+async fn dump_justfile(justfile: &Path) -> Result<Vec<JustRecipe>> {
+    let output = tokio::process::Command::new("just")
+        .arg("--justfile")
+        .arg(justfile)
+        .arg("--dump")
+        .arg("--dump-format")
+        .arg("json")
+        .output()
+        .await?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("just --dump failed for {}: {stderr}", justfile.display());
+    }
+
+    let dump: JustDump = serde_json::from_slice(&output.stdout)?;
+    Ok(dump.recipes.into_values().collect())
 }
 
 fn is_allow_agent(recipe: &JustRecipe) -> bool {
     for attr in &recipe.attributes {
-        if let JustAttribute::Group { group } = attr {
+        if let JustAttribute::Group(group) = attr {
             if group == ALLOW_AGENT_GROUP {
                 return true;
             }
         }
     }
     if let Some(ref doc) = recipe.doc {
-        if doc.contains(LEGACY_ALLOW_AGENT_DOC) {
-            return true;
+        for token in doc.split_whitespace() {
+            if token == LEGACY_ALLOW_AGENT_DOC {
+                return true;
+            }
         }
     }
     false
@@ -165,6 +231,7 @@ pub struct RecipeInfo {
     pub name: String,
     pub description: String,
     pub parameters: Vec<String>,
+    pub source: ResolveInfo,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -176,10 +243,10 @@ pub struct RecipeOutput {
     pub truncated: bool,
 }
 
-fn find_justfile(root: &std::path::Path) -> Option<PathBuf> {
+fn find_justfile(dir: &Path) -> Option<PathBuf> {
     let candidates = ["justfile", "Justfile", ".justfile"];
     for name in &candidates {
-        let path = root.join(name);
+        let path = dir.join(name);
         if path.is_file() {
             return Some(path);
         }
@@ -207,7 +274,7 @@ struct JustRecipe {
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
 enum JustAttribute {
-    Group { group: String },
+    Group(String),
     #[allow(dead_code)]
     Other(serde_json::Value),
 }
