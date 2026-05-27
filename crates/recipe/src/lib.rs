@@ -126,8 +126,8 @@ impl RecipeModule {
 
 fn is_allow_agent(recipe: &JustRecipe) -> bool {
     for attr in &recipe.attributes {
-        if let JustAttribute::Group { name } = attr {
-            if name == ALLOW_AGENT_GROUP {
+        if let JustAttribute::Group { group } = attr {
+            if group == ALLOW_AGENT_GROUP {
                 return true;
             }
         }
@@ -185,8 +185,9 @@ struct JustRecipe {
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
 enum JustAttribute {
-    Group { name: String },
-    Other(()),
+    Group { group: String },
+    #[allow(dead_code)]
+    Other(serde_json::Value),
 }
 
 #[derive(Debug, Deserialize)]
