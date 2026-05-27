@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use lds_core::LdsState;
+use lds_core::{LdsState, SessionConfig};
 use lds_git::GitModule;
 use lds_recipe::RecipeModule;
 use rmcp::handler::server::wrapper::Parameters;
@@ -37,6 +37,10 @@ impl LdsServer {
 #[derive(Debug, Deserialize, JsonSchema)]
 struct SessionStartReq {
     root: String,
+    #[serde(default)]
+    timeout_secs: Option<u64>,
+    #[serde(default)]
+    max_output: Option<usize>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -64,9 +68,14 @@ impl LdsServer {
         Parameters(req): Parameters<SessionStartReq>,
     ) -> Result<CallToolResult, McpError> {
         let mut inner = self.state.write().await;
+        let config = SessionConfig {
+            root: req.root.into(),
+            timeout_secs: req.timeout_secs,
+            max_output: req.max_output,
+        };
         let session = inner
             .lds
-            .start_session(&req.root)
+            .start_session(config)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         inner.git = Some(GitModule::new(Arc::clone(&session)));
         inner.recipe = Some(RecipeModule::new(Arc::clone(&session)));

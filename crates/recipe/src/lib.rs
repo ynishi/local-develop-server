@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{bail, Result};
-use lds_core::Session;
+use lds_core::{truncate_output, Session};
 use serde::Deserialize;
 
 const ALLOW_AGENT_GROUP: &str = "allow-agent";
@@ -73,12 +73,32 @@ impl RecipeModule {
         for arg in args {
             cmd.arg(arg);
         }
-        let output = cmd.output().await?;
-        Ok(RecipeOutput {
-            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-            exit_code: output.status.code().unwrap_or(-1),
-        })
+
+        let timeout = self.session.timeout();
+        let result = tokio::time::timeout(timeout, cmd.output()).await;
+
+        match result {
+            Ok(Ok(output)) => {
+                let max = self.session.max_output();
+                let (stdout, stdout_trunc) = truncate_output(&output.stdout, max);
+                let (stderr, stderr_trunc) = truncate_output(&output.stderr, max);
+                Ok(RecipeOutput {
+                    stdout,
+                    stderr,
+                    exit_code: output.status.code().unwrap_or(-1),
+                    timed_out: false,
+                    truncated: stdout_trunc || stderr_trunc,
+                })
+            }
+            Ok(Err(e)) => Err(e.into()),
+            Err(_) => Ok(RecipeOutput {
+                stdout: String::new(),
+                stderr: format!("recipe '{}' timed out after {}s", recipe, timeout.as_secs()),
+                exit_code: -1,
+                timed_out: true,
+                truncated: false,
+            }),
+        }
     }
 
     async fn dump_recipes(&self) -> Result<Vec<RecipeInfo>> {
@@ -152,6 +172,8 @@ pub struct RecipeOutput {
     pub stdout: String,
     pub stderr: String,
     pub exit_code: i32,
+    pub timed_out: bool,
+    pub truncated: bool,
 }
 
 fn find_justfile(root: &std::path::Path) -> Option<PathBuf> {
