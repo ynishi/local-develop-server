@@ -210,10 +210,10 @@ async fn dump_justfile(justfile: &Path) -> Result<Vec<JustRecipe>> {
 
 fn is_allow_agent(recipe: &JustRecipe) -> bool {
     for attr in &recipe.attributes {
-        if let JustAttribute::Group(group) = attr {
-            if group == ALLOW_AGENT_GROUP {
-                return true;
-            }
+        match attr {
+            JustAttribute::GroupObject { group } if group == ALLOW_AGENT_GROUP => return true,
+            JustAttribute::Bare(s) if s == ALLOW_AGENT_GROUP => return true,
+            _ => {}
         }
     }
     if let Some(ref doc) = recipe.doc {
@@ -274,7 +274,8 @@ struct JustRecipe {
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
 enum JustAttribute {
-    Group(String),
+    GroupObject { group: String },
+    Bare(String),
     #[allow(dead_code)]
     Other(serde_json::Value),
 }
