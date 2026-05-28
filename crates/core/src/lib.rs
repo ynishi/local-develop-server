@@ -5,6 +5,8 @@
 //! output truncation, global recipe dir — live here so modules don't
 //! duplicate configuration.
 
+pub mod log_store;
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;

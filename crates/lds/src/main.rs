@@ -299,7 +299,7 @@ impl LdsServer {
             .ok_or_else(|| McpError::internal_error("no session", None))?;
         let args_refs: Vec<&str> = req.args.iter().map(|s| s.as_str()).collect();
         let output = recipe
-            .run(&req.recipe, &args_refs, &req.content)
+            .run(&req.recipe, &args_refs, &req.content, None)
             .await
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         let json = serde_json::to_string_pretty(&output)
