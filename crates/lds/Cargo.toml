@@ -11,6 +11,7 @@ path = "src/main.rs"
 lds-core = { path = "../core" }
 lds-git = { path = "../git" }
 lds-recipe = { path = "../recipe" }
+lds-sandbox = { path = "../sandbox" }
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -585,6 +585,7 @@ dependencies = [
  "lds-core",
  "lds-git",
  "lds-recipe",
+ "lds-sandbox",
  "rmcp",
  "schemars",
  "serde",

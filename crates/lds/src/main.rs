@@ -6,6 +6,7 @@ use anyhow::Result;
 use lds_core::{LdsState, SessionConfig};
 use lds_git::GitModule;
 use lds_recipe::RecipeModule;
+use lds_sandbox::fs::SandboxFs;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, Content, ServerCapabilities, ServerInfo};
 use schemars::JsonSchema;
@@ -22,6 +23,7 @@ struct Inner {
     lds: LdsState,
     git: Option<GitModule>,
     recipe: Option<RecipeModule>,
+    sandbox_fs: Option<SandboxFs>,
 }
 
 impl LdsServer {
@@ -31,6 +33,7 @@ impl LdsServer {
                 lds: LdsState::new(),
                 git: None,
                 recipe: None,
+                sandbox_fs: None,
             })),
         }
     }
@@ -103,6 +106,55 @@ struct RecipeRunReq {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+struct SandboxWriteReq {
+    path: String,
+    content: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct SandboxEditReq {
+    path: String,
+    old_string: String,
+    new_string: String,
+    #[serde(default)]
+    replace_all: bool,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct SandboxAppendReq {
+    path: String,
+    content: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct SandboxReadReq {
+    path: String,
+    #[serde(default)]
+    offset: Option<usize>,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct SandboxLinesReq {
+    path: String,
+    #[serde(default)]
+    lines: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct SandboxRollbackReq {
+    path: String,
+    #[serde(default)]
+    snapshot_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct SandboxHistoryReq {
+    path: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 struct RecipeLogsReq {
     #[serde(default)]
     task_id: Option<String>,
@@ -130,6 +182,10 @@ impl LdsServer {
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         inner.git = Some(GitModule::new(Arc::clone(&session)));
         inner.recipe = Some(RecipeModule::new(Arc::clone(&session)));
+        inner.sandbox_fs = Some(
+            SandboxFs::new(session.root())
+                .map_err(|e| McpError::internal_error(e.to_string(), None))?,
+        );
         Ok(CallToolResult::success(vec![Content::text(format!(
             "session started: root={}, id={}",
             session.root().display(),
@@ -350,6 +406,144 @@ impl LdsServer {
         };
 
         let json = json.map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(description = "Sandboxed write: full file content. Auto-snapshots pre-state for rollback.")]
+    async fn sandbox_write(
+        &self,
+        Parameters(req): Parameters<SandboxWriteReq>,
+    ) -> Result<CallToolResult, McpError> {
+        let inner = self.state.read().await;
+        let fs = inner
+            .sandbox_fs
+            .as_ref()
+            .ok_or_else(|| McpError::internal_error("no session", None))?;
+        let result = fs
+            .write(&req.path, &req.content)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        let json = serde_json::to_string_pretty(&result)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(description = "Sandboxed edit: replace old_string with new_string. Auto-snapshots pre-state.")]
+    async fn sandbox_edit(
+        &self,
+        Parameters(req): Parameters<SandboxEditReq>,
+    ) -> Result<CallToolResult, McpError> {
+        let inner = self.state.read().await;
+        let fs = inner
+            .sandbox_fs
+            .as_ref()
+            .ok_or_else(|| McpError::internal_error("no session", None))?;
+        let result = fs
+            .edit(&req.path, &req.old_string, &req.new_string, req.replace_all)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        let json = serde_json::to_string_pretty(&result)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(description = "Sandboxed append: add content to end of file. Auto-snapshots pre-state.")]
+    async fn sandbox_append(
+        &self,
+        Parameters(req): Parameters<SandboxAppendReq>,
+    ) -> Result<CallToolResult, McpError> {
+        let inner = self.state.read().await;
+        let fs = inner
+            .sandbox_fs
+            .as_ref()
+            .ok_or_else(|| McpError::internal_error("no session", None))?;
+        let result = fs
+            .append(&req.path, &req.content)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        let json = serde_json::to_string_pretty(&result)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(description = "Sandboxed read: read file with optional offset (line) and limit.")]
+    async fn sandbox_read(
+        &self,
+        Parameters(req): Parameters<SandboxReadReq>,
+    ) -> Result<CallToolResult, McpError> {
+        let inner = self.state.read().await;
+        let fs = inner
+            .sandbox_fs
+            .as_ref()
+            .ok_or_else(|| McpError::internal_error("no session", None))?;
+        let content = fs
+            .read(&req.path, req.offset, req.limit)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(content)]))
+    }
+
+    #[tool(description = "Sandboxed head: read first N lines (default 20).")]
+    async fn sandbox_head(
+        &self,
+        Parameters(req): Parameters<SandboxLinesReq>,
+    ) -> Result<CallToolResult, McpError> {
+        let inner = self.state.read().await;
+        let fs = inner
+            .sandbox_fs
+            .as_ref()
+            .ok_or_else(|| McpError::internal_error("no session", None))?;
+        let content = fs
+            .head(&req.path, req.lines)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(content)]))
+    }
+
+    #[tool(description = "Sandboxed tail: read last N lines (default 20).")]
+    async fn sandbox_tail(
+        &self,
+        Parameters(req): Parameters<SandboxLinesReq>,
+    ) -> Result<CallToolResult, McpError> {
+        let inner = self.state.read().await;
+        let fs = inner
+            .sandbox_fs
+            .as_ref()
+            .ok_or_else(|| McpError::internal_error("no session", None))?;
+        let content = fs
+            .tail(&req.path, req.lines)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(content)]))
+    }
+
+    #[tool(description = "Rollback file to a prior snapshot. Omit snapshot_id to restore the most recent.")]
+    async fn sandbox_rollback(
+        &self,
+        Parameters(req): Parameters<SandboxRollbackReq>,
+    ) -> Result<CallToolResult, McpError> {
+        let inner = self.state.read().await;
+        let fs = inner
+            .sandbox_fs
+            .as_ref()
+            .ok_or_else(|| McpError::internal_error("no session", None))?;
+        let result = fs
+            .rollback(&req.path, req.snapshot_id.as_deref())
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        let json = serde_json::to_string_pretty(&result)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(description = "List snapshot history for a file (newest first).")]
+    async fn sandbox_history(
+        &self,
+        Parameters(req): Parameters<SandboxHistoryReq>,
+    ) -> Result<CallToolResult, McpError> {
+        let inner = self.state.read().await;
+        let fs = inner
+            .sandbox_fs
+            .as_ref()
+            .ok_or_else(|| McpError::internal_error("no session", None))?;
+        let history = fs
+            .history(&req.path)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        let json = serde_json::to_string_pretty(&history)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
