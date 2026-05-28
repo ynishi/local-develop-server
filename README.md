@@ -131,6 +131,26 @@ cargo install --path crates/lds
 }
 ```
 
+### Plugin Recipes
+
+Justfile recipes tagged with `[group('lds-plugin')]` are auto-registered
+as MCP tools at startup. Drop a `justfile` at `~/.config/lds/justfile`
+(global) or in your project root (project-scoped) and each plugin
+recipe becomes `mcp__lds__<name>`.
+
+Quick bootstrap:
+
+```sh
+cp examples/global-justfile.skeleton ~/.config/lds/justfile
+# restart Claude Code so the MCP server re-reads the global plugin set
+```
+
+The skeleton ships with `complexity` / `search-excluding` /
+`remote-url` / `text-stats` / `greet`. See
+[docs/plugin-recipe-authoring.md](docs/plugin-recipe-authoring.md) for
+the full IF contract, parameter mapping, shebang recipes, and the
+macOS-awk / CWD pitfalls.
+
 ## License
 
 MIT

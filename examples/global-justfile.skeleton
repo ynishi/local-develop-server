@@ -1,0 +1,90 @@
+# lds global plugin recipes — skeleton
+#
+# Copy this file to ~/.config/lds/justfile to bootstrap a global
+# plugin set. Every recipe tagged with [group('lds-plugin')] becomes a
+# named MCP tool (mcp__lds__<recipe-name>) at lds startup.
+#
+# Why these four:
+# - complexity: codedash output is the canonical "function fan-in"
+#   signal that several coding-pipeline agents need
+# - search-excluding: rg with comment/string/test post-filter, used
+#   by quality-gate and holistic-reviewer for false-positive control
+# - remote-url: task-graduate needs the origin URL without invoking
+#   gh CLI, and a typed wrapper around `git remote get-url` is small
+#   enough to merit a Plugin
+# - text-stats: plan-gate / context-broad-scout need batch
+#   lines/words/bytes per file; sandbox_python could do it but the
+#   one-liner Plugin keeps the agent prompt tight
+# - greet: smoke-test target, leave it in or strip it once you're
+#   confident the loader is working
+#
+# Authoring guide: docs/plugin-recipe-authoring.md
+
+# Code complexity metrics via codedash (top N functions sorted by metric)
+# sort_by: cyclomatic | lines | depth (default: cyclomatic)
+[group('lds-plugin')]
+complexity path="." top="20" sort_by="cyclomatic":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    case "{{sort_by}}" in
+        lines) k=2 ;;
+        depth) k=4 ;;
+        *) k=3 ;;
+    esac
+    codedash analyze {{path}} -t {{top}} -o json \
+      | jq -r '.entries[] | select(.kind == "function" or .kind == "method") | "\(.full_name) lines:\(.lines) cyclomatic:\(.cyclomatic) depth:\(.depth)"' \
+      | sort -t: -k${k} -rn \
+      | head -n {{top}}
+
+# Code search with section exclusion (comment / string / test / doc)
+# exclude is a comma-separated list of section kinds to drop from hits
+[group('lds-plugin')]
+search-excluding pattern paths="." exclude="comment,string":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    rg --json "{{pattern}}" {{paths}} | python3 -c '
+    import json, sys, re
+    exclude = set("{{exclude}}".split(","))
+    for line in sys.stdin:
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if obj.get("type") != "match":
+            continue
+        text = obj["data"]["lines"]["text"]
+        stripped = text.lstrip()
+        if "comment" in exclude and (stripped.startswith("//") or stripped.startswith("#")):
+            continue
+        if "doc" in exclude and (stripped.startswith("///") or stripped.startswith("//!")):
+            continue
+        path = obj["data"]["path"]["text"]
+        line_no = obj["data"]["line_number"]
+        if "test" in exclude and ("/tests/" in path or path.endswith("_test.rs") or path.endswith("_spec.lua")):
+            continue
+        sys.stdout.write(f"{path}:{line_no}: {text}")
+    '
+
+# Get local git remote URL (default origin)
+[group('lds-plugin')]
+remote-url remote="origin":
+    git remote get-url {{remote}}
+
+# File text statistics: lines, words, bytes per path (space-separated paths)
+[group('lds-plugin')]
+text-stats paths:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for p in {{paths}}; do
+        if [ ! -e "$p" ]; then
+            echo "$p: missing"
+            continue
+        fi
+        wc -l -w -c "$p" | awk '{ printf "%s: lines=%s words=%s bytes=%s\n", $4, $1, $2, $3 }'
+    done
+
+# Smoke-test plugin: returns a greeting. Useful for verifying that the
+# Plugin Loader is wired up after a Claude Code restart.
+[group('lds-plugin')]
+greet name="world":
+    @echo "hello {{name}} from lds-plugin"
