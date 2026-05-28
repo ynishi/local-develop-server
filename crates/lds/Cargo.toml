@@ -20,3 +20,7 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 rmcp.workspace = true
 schemars.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+rmcp = { version = "1.7", features = ["client", "transport-child-process"] }
