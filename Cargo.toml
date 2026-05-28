@@ -23,3 +23,4 @@ rmcp = { version = "1.7", features = ["server", "transport-io"] }
 git2 = "0.20"
 schemars = "1"
 thiserror = "2"
+tempfile = "3"
