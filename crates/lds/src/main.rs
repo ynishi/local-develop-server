@@ -8,8 +8,14 @@ use lds_git::GitModule;
 use lds_recipe::RecipeModule;
 use lds_sandbox::fs::SandboxFs;
 use lds_sandbox::python::SandboxPython;
+use rmcp::handler::server::tool::ToolCallContext;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::model::{CallToolResult, Content, ServerCapabilities, ServerInfo};
+use rmcp::model::{
+    CallToolRequestParams, CallToolResult, Content, ListToolsResult, PaginatedRequestParams,
+    ServerCapabilities, ServerInfo, Tool,
+};
+use rmcp::service::RequestContext;
+use rmcp::RoleServer;
 use schemars::JsonSchema;
 use rmcp::{tool, tool_handler, tool_router, ErrorData as McpError, ServerHandler, ServiceExt};
 use serde::Deserialize;
@@ -29,6 +35,55 @@ struct Inner {
 }
 
 impl LdsServer {
+    async fn list_plugin_tools(&self) -> Result<Vec<Tool>, McpError> {
+        let inner = self.state.read().await;
+        let Some(recipe) = inner.recipe.as_ref() else {
+            return Ok(Vec::new());
+        };
+        let plugins = recipe
+            .list_plugins()
+            .await
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(plugins.into_iter().map(plugin_to_tool).collect())
+    }
+
+    async fn try_plugin_call(
+        &self,
+        name: &str,
+        arguments: Option<&serde_json::Map<String, serde_json::Value>>,
+    ) -> Result<Option<CallToolResult>, McpError> {
+        let inner = self.state.read().await;
+        let Some(recipe) = inner.recipe.as_ref() else {
+            return Ok(None);
+        };
+        let plugins = recipe
+            .list_plugins()
+            .await
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        let Some(_target) = plugins.iter().find(|p| p.name == name) else {
+            return Ok(None);
+        };
+
+        let mut content_map: HashMap<String, String> = HashMap::new();
+        if let Some(args) = arguments {
+            for (k, v) in args {
+                let value = match v {
+                    serde_json::Value::String(s) => s.clone(),
+                    other => other.to_string(),
+                };
+                content_map.insert(k.to_uppercase(), value);
+            }
+        }
+
+        let output = recipe
+            .run(name, &[], &content_map, None)
+            .await
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        let json = serde_json::to_string_pretty(&output)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(Some(CallToolResult::success(vec![Content::text(json)])))
+    }
+
     fn new() -> Self {
         Self {
             state: Arc::new(RwLock::new(Inner {
@@ -658,6 +713,70 @@ impl ServerHandler for LdsServer {
         info.capabilities = ServerCapabilities::builder().enable_tools().build();
         info
     }
+
+    async fn list_tools(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListToolsResult, McpError> {
+        let mut tools = Self::tool_router().list_all();
+        let plugins = self.list_plugin_tools().await.unwrap_or_default();
+        tools.extend(plugins);
+        tools.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(ListToolsResult {
+            tools,
+            meta: None,
+            next_cursor: None,
+        })
+    }
+
+    async fn call_tool(
+        &self,
+        request: CallToolRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        if let Some(result) = self
+            .try_plugin_call(&request.name, request.arguments.as_ref())
+            .await?
+        {
+            return Ok(result);
+        }
+        let tcc = ToolCallContext::new(self, request, context);
+        Self::tool_router().call(tcc).await
+    }
+}
+
+fn plugin_to_tool(plugin: lds_recipe::PluginRecipe) -> Tool {
+    let mut properties = serde_json::Map::new();
+    let mut required = Vec::new();
+    for p in &plugin.parameters {
+        let mut prop = serde_json::Map::new();
+        prop.insert(
+            "type".to_string(),
+            serde_json::Value::String("string".to_string()),
+        );
+        properties.insert(p.name.clone(), serde_json::Value::Object(prop));
+        if p.default.is_none() {
+            required.push(serde_json::Value::String(p.name.clone()));
+        }
+    }
+    let mut schema = serde_json::Map::new();
+    schema.insert(
+        "type".to_string(),
+        serde_json::Value::String("object".to_string()),
+    );
+    schema.insert("properties".to_string(), serde_json::Value::Object(properties));
+    if !required.is_empty() {
+        schema.insert("required".to_string(), serde_json::Value::Array(required));
+    }
+
+    let description = if plugin.description.is_empty() {
+        format!("Plugin recipe: {}", plugin.name)
+    } else {
+        plugin.description
+    };
+
+    Tool::new(plugin.name, description, Arc::new(schema))
 }
 
 #[tokio::main]

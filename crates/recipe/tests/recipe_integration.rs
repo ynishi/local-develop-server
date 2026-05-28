@@ -138,6 +138,44 @@ async fn logs_store_records_execution() {
 }
 
 #[tokio::test]
+async fn list_plugins_filters_by_lds_plugin_group() {
+    let tmp = tempfile::tempdir().unwrap();
+    let content = r#"
+# A plugin tool
+[group('lds-plugin')]
+my-plugin path=".":
+    @echo "plugin {{path}}"
+
+[group('allow-agent')]
+my-task:
+    @echo "task"
+
+[group('lds-plugin')]
+[group('allow-agent')]
+mixed:
+    @echo "mixed"
+
+private_recipe:
+    @echo "hidden"
+"#;
+    std::fs::write(tmp.path().join("justfile"), content).unwrap();
+    let session = make_session_with_justfile(tmp.path());
+    let recipe = RecipeModule::new(session);
+
+    let plugins = recipe.list_plugins().await.unwrap();
+    let names: Vec<&str> = plugins.iter().map(|p| p.name.as_str()).collect();
+    assert!(names.contains(&"my-plugin"));
+    assert!(names.contains(&"mixed"));
+    assert!(!names.contains(&"my-task"));
+    assert!(!names.contains(&"private_recipe"));
+
+    let my_plugin = plugins.iter().find(|p| p.name == "my-plugin").unwrap();
+    assert_eq!(my_plugin.description, "A plugin tool");
+    assert_eq!(my_plugin.parameters.len(), 1);
+    assert_eq!(my_plugin.parameters[0].name, "path");
+}
+
+#[tokio::test]
 async fn failed_recipe_recorded_in_logs() {
     let tmp = tempfile::tempdir().unwrap();
     write_test_justfile(tmp.path());

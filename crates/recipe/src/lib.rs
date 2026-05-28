@@ -22,6 +22,7 @@ use serde::Deserialize;
 
 const ALLOW_AGENT_GROUP: &str = "allow-agent";
 const LEGACY_ALLOW_AGENT_DOC: &str = "[allow-agent]";
+const PLUGIN_GROUP: &str = "lds-plugin";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -98,6 +99,44 @@ impl RecipeModule {
 
     pub fn resolve_chain(&self) -> &[(ResolveLevel, PathBuf)] {
         &self.resolve_chain
+    }
+
+    pub async fn list_plugins(&self) -> Result<Vec<PluginRecipe>> {
+        let mut merged: HashMap<String, PluginRecipe> = HashMap::new();
+        for (level, justfile_path) in &self.resolve_chain {
+            let recipes = dump_justfile(justfile_path).await?;
+            for r in recipes {
+                if r.private {
+                    continue;
+                }
+                if !is_plugin(&r) {
+                    continue;
+                }
+                let parameters: Vec<PluginParam> = r
+                    .parameters
+                    .into_iter()
+                    .map(|p| PluginParam {
+                        name: p.name,
+                        default: p.default,
+                    })
+                    .collect();
+                merged.insert(
+                    r.name.clone(),
+                    PluginRecipe {
+                        name: r.name,
+                        description: r.doc.unwrap_or_default(),
+                        parameters,
+                        source: ResolveInfo {
+                            level: *level,
+                            source_path: justfile_path.clone(),
+                        },
+                    },
+                );
+            }
+        }
+        let mut result: Vec<PluginRecipe> = merged.into_values().collect();
+        result.sort_by(|a, b| a.name.cmp(&b.name));
+        Ok(result)
     }
 
     pub async fn list(&self) -> Result<Vec<RecipeInfo>> {
@@ -288,6 +327,17 @@ fn is_allow_agent(recipe: &JustRecipe) -> bool {
     false
 }
 
+fn is_plugin(recipe: &JustRecipe) -> bool {
+    for attr in &recipe.attributes {
+        match attr {
+            JustAttribute::GroupObject { group } if group == PLUGIN_GROUP => return true,
+            JustAttribute::Bare(s) if s == PLUGIN_GROUP => return true,
+            _ => {}
+        }
+    }
+    false
+}
+
 #[derive(Debug, serde::Serialize)]
 pub struct RecipeInfo {
     pub name: String,
@@ -414,6 +464,22 @@ enum JustAttribute {
 #[derive(Debug, Deserialize)]
 struct JustParameter {
     name: String,
+    #[serde(default)]
+    default: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PluginRecipe {
+    pub name: String,
+    pub description: String,
+    pub parameters: Vec<PluginParam>,
+    pub source: ResolveInfo,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PluginParam {
+    pub name: String,
+    pub default: Option<serde_json::Value>,
 }
 
 #[cfg(test)]
