@@ -7,6 +7,7 @@ use lds_core::{LdsState, SessionConfig};
 use lds_git::GitModule;
 use lds_recipe::RecipeModule;
 use lds_sandbox::fs::SandboxFs;
+use lds_sandbox::python::SandboxPython;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, Content, ServerCapabilities, ServerInfo};
 use schemars::JsonSchema;
@@ -24,6 +25,7 @@ struct Inner {
     git: Option<GitModule>,
     recipe: Option<RecipeModule>,
     sandbox_fs: Option<SandboxFs>,
+    sandbox_python: Option<SandboxPython>,
 }
 
 impl LdsServer {
@@ -34,6 +36,7 @@ impl LdsServer {
                 git: None,
                 recipe: None,
                 sandbox_fs: None,
+                sandbox_python: None,
             })),
         }
     }
@@ -155,6 +158,20 @@ struct SandboxHistoryReq {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+struct SandboxPythonReq {
+    script: String,
+    #[serde(default)]
+    timeout_secs: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct SandboxPythonFileReq {
+    path: String,
+    #[serde(default)]
+    timeout_secs: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 struct RecipeLogsReq {
     #[serde(default)]
     task_id: Option<String>,
@@ -186,6 +203,7 @@ impl LdsServer {
             SandboxFs::new(session.root())
                 .map_err(|e| McpError::internal_error(e.to_string(), None))?,
         );
+        inner.sandbox_python = Some(SandboxPython::new(session.root()));
         Ok(CallToolResult::success(vec![Content::text(format!(
             "session started: root={}, id={}",
             session.root().display(),
@@ -543,6 +561,54 @@ impl LdsServer {
             .history(&req.path)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         let json = serde_json::to_string_pretty(&history)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(description = "Run Python script in a sandboxed subprocess with 3-layer preamble guard (module deny + import guard + os attr removal).")]
+    async fn sandbox_python(
+        &self,
+        Parameters(req): Parameters<SandboxPythonReq>,
+    ) -> Result<CallToolResult, McpError> {
+        let inner = self.state.read().await;
+        let base = inner
+            .sandbox_python
+            .as_ref()
+            .ok_or_else(|| McpError::internal_error("no session", None))?
+            .clone();
+        let py = match req.timeout_secs {
+            Some(secs) => base.with_timeout(secs),
+            None => base,
+        };
+        let result = py
+            .execute(&req.script)
+            .await
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        let json = serde_json::to_string_pretty(&result)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(description = "Run a Python file in the sandboxed subprocess. Uses the same preamble guard as sandbox_python.")]
+    async fn sandbox_python_file(
+        &self,
+        Parameters(req): Parameters<SandboxPythonFileReq>,
+    ) -> Result<CallToolResult, McpError> {
+        let inner = self.state.read().await;
+        let base = inner
+            .sandbox_python
+            .as_ref()
+            .ok_or_else(|| McpError::internal_error("no session", None))?
+            .clone();
+        let py = match req.timeout_secs {
+            Some(secs) => base.with_timeout(secs),
+            None => base,
+        };
+        let result = py
+            .execute_file(std::path::Path::new(&req.path))
+            .await
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        let json = serde_json::to_string_pretty(&result)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
