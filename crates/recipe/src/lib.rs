@@ -16,7 +16,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Result};
-use lds_core::log_store::HasId;
+use lds_core::log_store::{HasId, LogStore};
 use lds_core::{truncate_output, Session};
 use serde::Deserialize;
 
@@ -61,11 +61,14 @@ pub enum RecipeMode {
     Unrestricted,
 }
 
+const LOG_CAPACITY: usize = 10;
+
 #[derive(Debug)]
 pub struct RecipeModule {
     session: Arc<Session>,
     resolve_chain: Vec<(ResolveLevel, PathBuf)>,
     mode: RecipeMode,
+    log_store: LogStore<RecipeOutput>,
 }
 
 impl RecipeModule {
@@ -85,7 +88,16 @@ impl RecipeModule {
             session,
             resolve_chain,
             mode,
+            log_store: LogStore::new(LOG_CAPACITY),
         }
+    }
+
+    pub fn logs(&self) -> &LogStore<RecipeOutput> {
+        &self.log_store
+    }
+
+    pub fn resolve_chain(&self) -> &[(ResolveLevel, PathBuf)] {
+        &self.resolve_chain
     }
 
     pub async fn list(&self) -> Result<Vec<RecipeInfo>> {
@@ -142,12 +154,12 @@ impl RecipeModule {
         let duration_ms = now_epoch().saturating_sub(started_at) * 1000;
         let exec_id = exec_uuid();
 
-        match result {
+        let output = match result {
             Ok(Ok(output)) => {
                 let max = self.session.max_output();
                 let (stdout, stdout_trunc) = truncate_output(&output.stdout, max);
                 let (stderr, stderr_trunc) = truncate_output(&output.stderr, max);
-                Ok(RecipeOutput {
+                RecipeOutput {
                     id: exec_id,
                     started_at,
                     duration_ms,
@@ -156,10 +168,10 @@ impl RecipeModule {
                     exit_code: output.status.code().unwrap_or(-1),
                     timed_out: false,
                     truncated: stdout_trunc || stderr_trunc,
-                })
+                }
             }
-            Ok(Err(e)) => Err(RecipeError::Io(e)),
-            Err(_) => Ok(RecipeOutput {
+            Ok(Err(e)) => return Err(RecipeError::Io(e)),
+            Err(_) => RecipeOutput {
                 id: exec_id,
                 started_at,
                 duration_ms,
@@ -168,8 +180,10 @@ impl RecipeModule {
                 exit_code: -1,
                 timed_out: true,
                 truncated: false,
-            }),
-        }
+            },
+        };
+        self.log_store.push(output.clone());
+        Ok(output)
     }
 
     async fn merged_recipes(&self) -> Result<Vec<RecipeInfo>> {
@@ -297,6 +311,29 @@ pub struct RecipeOutput {
 impl HasId for RecipeOutput {
     fn id(&self) -> &str {
         &self.id
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RecipeOutputSummary {
+    pub id: String,
+    pub started_at: u64,
+    pub duration_ms: u64,
+    pub exit_code: i32,
+    pub timed_out: bool,
+    pub truncated: bool,
+}
+
+impl From<&RecipeOutput> for RecipeOutputSummary {
+    fn from(o: &RecipeOutput) -> Self {
+        Self {
+            id: o.id.clone(),
+            started_at: o.started_at,
+            duration_ms: o.duration_ms,
+            exit_code: o.exit_code,
+            timed_out: o.timed_out,
+            truncated: o.truncated,
+        }
     }
 }
 

@@ -98,6 +98,16 @@ struct RecipeRunReq {
     args: Vec<String>,
     #[serde(default)]
     content: HashMap<String, String>,
+    #[serde(default)]
+    timeout_secs: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct RecipeLogsReq {
+    #[serde(default)]
+    task_id: Option<String>,
+    #[serde(default)]
+    tail: Option<usize>,
 }
 
 #[tool_router]
@@ -299,12 +309,84 @@ impl LdsServer {
             .ok_or_else(|| McpError::internal_error("no session", None))?;
         let args_refs: Vec<&str> = req.args.iter().map(|s| s.as_str()).collect();
         let output = recipe
-            .run(&req.recipe, &args_refs, &req.content, None)
+            .run(&req.recipe, &args_refs, &req.content, req.timeout_secs)
             .await
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         let json = serde_json::to_string_pretty(&output)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(description = "Query recipe execution logs. By ID returns full record; without ID returns recent summaries.")]
+    async fn recipe_logs(
+        &self,
+        Parameters(req): Parameters<RecipeLogsReq>,
+    ) -> Result<CallToolResult, McpError> {
+        let inner = self.state.read().await;
+        let recipe = inner
+            .recipe
+            .as_ref()
+            .ok_or_else(|| McpError::internal_error("no session", None))?;
+        let logs = recipe.logs();
+
+        let json = if let Some(ref id) = req.task_id {
+            let entry = logs
+                .get(id)
+                .ok_or_else(|| McpError::internal_error(format!("log not found: {id}"), None))?;
+            if let Some(tail) = req.tail {
+                let lines: Vec<&str> = entry.stdout.lines().collect();
+                let start = lines.len().saturating_sub(tail);
+                let mut trimmed = entry.clone();
+                trimmed.stdout = lines[start..].join("\n");
+                serde_json::to_string_pretty(&trimmed)
+            } else {
+                serde_json::to_string_pretty(&entry)
+            }
+        } else {
+            let recent = logs.recent(10);
+            let summaries: Vec<lds_recipe::RecipeOutputSummary> =
+                recent.iter().map(Into::into).collect();
+            serde_json::to_string_pretty(&summaries)
+        };
+
+        let json = json.map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(description = "Show current session state (id, root, mode, justfile paths)")]
+    async fn session_info(&self) -> Result<CallToolResult, McpError> {
+        let inner = self.state.read().await;
+        let session = inner
+            .lds
+            .session()
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+
+        let resolve_info: Vec<String> = inner
+            .recipe
+            .as_ref()
+            .map(|r| {
+                r.resolve_chain()
+                    .iter()
+                    .map(|(level, path)| format!("{level:?}: {}", path.display()))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let info = format!(
+            "session_id: {}\nroot: {}\nglobal_recipe_dir: {}\njustfiles:\n{}",
+            session.id(),
+            session.root().display(),
+            session
+                .global_recipe_dir()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "(default)".into()),
+            resolve_info
+                .iter()
+                .map(|s| format!("  - {s}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+        Ok(CallToolResult::success(vec![Content::text(info)]))
     }
 }
 
