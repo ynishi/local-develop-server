@@ -1,0 +1,16 @@
+[package]
+name = "lds-sandbox"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+lds-core = { path = "../core" }
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+tokio.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -506,6 +506,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "lds-sandbox"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "lds-core",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "libc"
 version = "0.2.186"
 source = "registry+https://github.com/rust-lang/crates.io-index"
