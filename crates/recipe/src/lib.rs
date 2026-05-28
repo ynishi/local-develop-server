@@ -236,7 +236,10 @@ impl RecipeModule {
                 if r.private {
                     continue;
                 }
-                if self.mode == RecipeMode::AgentOnly && !is_allow_agent(&r) {
+                if self.mode == RecipeMode::AgentOnly
+                    && !is_allow_agent(&r)
+                    && !is_plugin(&r)
+                {
                     continue;
                 }
                 merged.insert(
@@ -258,6 +261,46 @@ impl RecipeModule {
         result.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(result)
     }
+}
+
+/// Scan global plugin recipes from `~/.config/lds/justfile` (or the supplied dir).
+///
+/// Used at server startup to expose plugin tools before session_start is called.
+/// Returns an empty list if no global justfile is found.
+pub async fn list_global_plugins(global_dir: Option<&Path>) -> Result<Vec<PluginRecipe>> {
+    let justfile_path = if let Some(dir) = global_dir {
+        find_justfile(dir)
+    } else if let Some(home) = home_dir() {
+        find_justfile(&home.join(".config/lds"))
+    } else {
+        None
+    };
+    let Some(path) = justfile_path else {
+        return Ok(Vec::new());
+    };
+    let recipes = dump_justfile(&path).await?;
+    let mut plugins: Vec<PluginRecipe> = recipes
+        .into_iter()
+        .filter(|r| !r.private && is_plugin(r))
+        .map(|r| PluginRecipe {
+            name: r.name,
+            description: r.doc.unwrap_or_default(),
+            parameters: r
+                .parameters
+                .into_iter()
+                .map(|p| PluginParam {
+                    name: p.name,
+                    default: p.default,
+                })
+                .collect(),
+            source: ResolveInfo {
+                level: ResolveLevel::Global,
+                source_path: path.clone(),
+            },
+        })
+        .collect();
+    plugins.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(plugins)
 }
 
 fn build_resolve_chain(root: &Path, global_dir: Option<&Path>) -> Vec<(ResolveLevel, PathBuf)> {

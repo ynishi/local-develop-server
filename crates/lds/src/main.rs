@@ -36,14 +36,26 @@ struct Inner {
 
 impl LdsServer {
     async fn list_plugin_tools(&self) -> Result<Vec<Tool>, McpError> {
-        let inner = self.state.read().await;
-        let Some(recipe) = inner.recipe.as_ref() else {
-            return Ok(Vec::new());
-        };
-        let plugins = recipe
-            .list_plugins()
+        let mut plugins = lds_recipe::list_global_plugins(None)
             .await
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+
+        let inner = self.state.read().await;
+        if let Some(recipe) = inner.recipe.as_ref() {
+            let project = recipe
+                .list_plugins()
+                .await
+                .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+            // Project plugins override global on name collision.
+            let mut by_name: std::collections::HashMap<String, lds_recipe::PluginRecipe> =
+                plugins.into_iter().map(|p| (p.name.clone(), p)).collect();
+            for p in project {
+                by_name.insert(p.name.clone(), p);
+            }
+            plugins = by_name.into_values().collect();
+            plugins.sort_by(|a, b| a.name.cmp(&b.name));
+        }
+
         Ok(plugins.into_iter().map(plugin_to_tool).collect())
     }
 
@@ -54,29 +66,52 @@ impl LdsServer {
     ) -> Result<Option<CallToolResult>, McpError> {
         let inner = self.state.read().await;
         let Some(recipe) = inner.recipe.as_ref() else {
+            // No session yet — cannot dispatch (recipe module needs session for execution).
+            // Tool listing surfaces global plugins, but execution requires session_start first.
             return Ok(None);
         };
-        let plugins = recipe
-            .list_plugins()
+
+        let mut plugins = lds_recipe::list_global_plugins(None)
             .await
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        let Some(_target) = plugins.iter().find(|p| p.name == name) else {
+        plugins.extend(
+            recipe
+                .list_plugins()
+                .await
+                .map_err(|e| McpError::internal_error(e.to_string(), None))?,
+        );
+        let Some(target) = plugins.iter().find(|p| p.name == name) else {
             return Ok(None);
         };
 
-        let mut content_map: HashMap<String, String> = HashMap::new();
-        if let Some(args) = arguments {
-            for (k, v) in args {
-                let value = match v {
-                    serde_json::Value::String(s) => s.clone(),
-                    other => other.to_string(),
-                };
-                content_map.insert(k.to_uppercase(), value);
-            }
-        }
+        // Build positional args from recipe parameters, in declaration order.
+        // Skip trailing parameters whose value falls back to the recipe default.
+        let arg_strings: Vec<String> = target
+            .parameters
+            .iter()
+            .map(|p| {
+                arguments
+                    .and_then(|a| a.get(&p.name))
+                    .map(|v| match v {
+                        serde_json::Value::String(s) => s.clone(),
+                        other => other.to_string(),
+                    })
+                    .unwrap_or_default()
+            })
+            .collect();
+        // Trim trailing empty strings (parameters left to recipe default).
+        let last_present = arg_strings
+            .iter()
+            .rposition(|s| !s.is_empty())
+            .map(|i| i + 1)
+            .unwrap_or(0);
+        let positional: Vec<&str> = arg_strings[..last_present]
+            .iter()
+            .map(|s| s.as_str())
+            .collect();
 
         let output = recipe
-            .run(name, &[], &content_map, None)
+            .run(name, &positional, &HashMap::new(), None)
             .await
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         let json = serde_json::to_string_pretty(&output)
