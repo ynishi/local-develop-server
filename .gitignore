@@ -5,4 +5,4 @@ workspace
 .worktrees
 .claude
 
-.mcp.json
+.mcp.json.sandbox-snapshots
