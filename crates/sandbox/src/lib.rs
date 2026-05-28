@@ -5,3 +5,4 @@
 //! - (future) `python` — Python execution with preamble security guard
 
 pub mod fs;
+pub mod python;
