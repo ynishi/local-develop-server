@@ -118,6 +118,47 @@ impl Default for LdsState {
     }
 }
 
+/// Check whether an executable is reachable via `PATH`.
+///
+/// Returns the resolved path on success. Used by `session_info` to
+/// report degraded-mode availability of external tools that lds
+/// (and plugin recipes) depend on (`git`, `just`, `python3`,
+/// `codedash`, `rg`, etc.). Agents read the result to decide between
+/// a typed tool path and an in-band fallback.
+pub fn find_in_path(binary: &str) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path) {
+        let candidate = dir.join(binary);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+/// Availability status for an external binary.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct BinaryStatus {
+    pub name: String,
+    pub available: bool,
+    pub path: Option<String>,
+}
+
+/// Check a set of external binaries and return their availability.
+pub fn check_binaries(names: &[&str]) -> Vec<BinaryStatus> {
+    names
+        .iter()
+        .map(|name| {
+            let resolved = find_in_path(name);
+            BinaryStatus {
+                name: (*name).to_string(),
+                available: resolved.is_some(),
+                path: resolved.map(|p| p.display().to_string()),
+            }
+        })
+        .collect()
+}
+
 /// Truncate byte output to `max` bytes, splitting into head + tail halves.
 ///
 /// Returns `(output_string, was_truncated)`. When truncated, inserts a
@@ -219,5 +260,30 @@ mod tests {
         let (out, truncated) = truncate_output(data, data.len());
         assert_eq!(out, "exactly ten");
         assert!(!truncated);
+    }
+
+    #[test]
+    fn find_in_path_resolves_common_binary() {
+        // `sh` is essentially guaranteed on every Unix.
+        let resolved = find_in_path("sh");
+        assert!(resolved.is_some(), "sh should be on PATH");
+        assert!(resolved.unwrap().is_file());
+    }
+
+    #[test]
+    fn find_in_path_returns_none_for_unknown() {
+        assert!(find_in_path("definitely-not-a-real-binary-xyz-12345").is_none());
+    }
+
+    #[test]
+    fn check_binaries_marks_missing() {
+        let report = check_binaries(&["sh", "definitely-not-a-real-binary-xyz-12345"]);
+        assert_eq!(report.len(), 2);
+        assert_eq!(report[0].name, "sh");
+        assert!(report[0].available);
+        assert!(report[0].path.is_some());
+        assert_eq!(report[1].name, "definitely-not-a-real-binary-xyz-12345");
+        assert!(!report[1].available);
+        assert!(report[1].path.is_none());
     }
 }

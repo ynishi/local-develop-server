@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Result;
-use lds_core::{LdsState, SessionConfig};
+use lds_core::{check_binaries, LdsState, SessionConfig};
 use lds_git::GitModule;
 use lds_recipe::RecipeModule;
 use lds_sandbox::fs::SandboxFs;
@@ -722,8 +722,18 @@ impl LdsServer {
             })
             .unwrap_or_default();
 
+        let binaries = check_binaries(&["git", "just", "python3", "codedash", "rg"]);
+        let binary_lines: Vec<String> = binaries
+            .iter()
+            .map(|b| {
+                let status = if b.available { "available" } else { "MISSING" };
+                let path = b.path.as_deref().unwrap_or("-");
+                format!("  - {}: {status} ({path})", b.name)
+            })
+            .collect();
+
         let info = format!(
-            "session_id: {}\nroot: {}\nglobal_recipe_dir: {}\njustfiles:\n{}",
+            "session_id: {}\nroot: {}\nglobal_recipe_dir: {}\njustfiles:\n{}\nexternal tools:\n{}",
             session.id(),
             session.root().display(),
             session
@@ -735,6 +745,7 @@ impl LdsServer {
                 .map(|s| format!("  - {s}"))
                 .collect::<Vec<_>>()
                 .join("\n"),
+            binary_lines.join("\n"),
         );
         Ok(CallToolResult::success(vec![Content::text(info)]))
     }
