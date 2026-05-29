@@ -37,7 +37,10 @@ struct Inner {
 
 impl LdsServer {
     async fn list_plugin_tools(&self) -> Result<Vec<Tool>, McpError> {
-        let mut plugins = lds_recipe::list_global_plugins(None)
+        let env_dirs: Vec<PathBuf> = std::env::var_os("LDS_RECIPE_GLOBAL_DIRS")
+            .map(|v| std::env::split_paths(&v).collect())
+            .unwrap_or_default();
+        let mut plugins = lds_recipe::list_global_plugins(&env_dirs)
             .await
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
@@ -83,7 +86,10 @@ impl LdsServer {
             return Err(no_session_error());
         };
 
-        let mut plugins = lds_recipe::list_global_plugins(None)
+        let env_dirs: Vec<PathBuf> = std::env::var_os("LDS_RECIPE_GLOBAL_DIRS")
+            .map(|v| std::env::split_paths(&v).collect())
+            .unwrap_or_default();
+        let mut plugins = lds_recipe::list_global_plugins(&env_dirs)
             .await
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         plugins.extend(
@@ -330,11 +336,22 @@ impl LdsServer {
         Parameters(req): Parameters<SessionStartReq>,
     ) -> Result<CallToolResult, McpError> {
         let mut inner = self.state.write().await;
+        // Adapter: compose global_recipe_dirs from the MCP single arg (if any)
+        // followed by LDS_RECIPE_GLOBAL_DIRS env dirs in declaration order.
+        // Precedence (low→high): default ~/.config/lds → MCP arg → ENV dirs → project.
+        let env_dirs: Vec<PathBuf> = std::env::var_os("LDS_RECIPE_GLOBAL_DIRS")
+            .map(|v| std::env::split_paths(&v).collect())
+            .unwrap_or_default();
+        let mut global_recipe_dirs: Vec<PathBuf> = req
+            .global_recipe_dir
+            .map(|s| vec![PathBuf::from(s)])
+            .unwrap_or_default();
+        global_recipe_dirs.extend(env_dirs);
         let config = SessionConfig {
             root: req.root.into(),
             timeout_secs: req.timeout_secs,
             max_output: req.max_output,
-            global_recipe_dir: req.global_recipe_dir.map(Into::into),
+            global_recipe_dirs,
         };
         let session = build_session_modules(&mut inner, config)?;
         Ok(CallToolResult::success(vec![Content::text(format!(
@@ -727,14 +744,22 @@ impl LdsServer {
             })
             .collect();
 
+        let global_dirs_display = {
+            let dirs = session.global_recipe_dirs();
+            if dirs.is_empty() {
+                "(default)".to_string()
+            } else {
+                dirs.iter()
+                    .map(|p| p.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            }
+        };
         let info = format!(
-            "session_id: {}\nroot: {}\nglobal_recipe_dir: {}\njustfiles:\n{}\nexternal tools:\n{}",
+            "session_id: {}\nroot: {}\nglobal_recipe_dirs: {}\njustfiles:\n{}\nexternal tools:\n{}",
             session.id(),
             session.root().display(),
-            session
-                .global_recipe_dir()
-                .map(|p| p.display().to_string())
-                .unwrap_or_else(|| "(default)".into()),
+            global_dirs_display,
             resolve_info
                 .iter()
                 .map(|s| format!("  - {s}"))
@@ -788,11 +813,15 @@ impl ServerHandler for LdsServer {
                 && let Some(cwd) = inner.startup_cwd.clone()
                 && is_project_root(&cwd)
             {
+                // Auto-start: read ENV dirs so plugins are resolved correctly.
+                let env_dirs: Vec<PathBuf> = std::env::var_os("LDS_RECIPE_GLOBAL_DIRS")
+                    .map(|v| std::env::split_paths(&v).collect())
+                    .unwrap_or_default();
                 let config = SessionConfig {
                     root: cwd,
                     timeout_secs: None,
                     max_output: None,
-                    global_recipe_dir: None,
+                    global_recipe_dirs: env_dirs,
                 };
                 build_session_modules(&mut inner, config)?;
             }
