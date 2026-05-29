@@ -15,9 +15,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use lds_core::log_store::{HasId, LogStore};
-use lds_core::{truncate_output, Session};
+use lds_core::{Session, truncate_output};
 use serde::Deserialize;
 
 const ALLOW_AGENT_GROUP: &str = "allow-agent";
@@ -78,7 +78,7 @@ impl RecipeModule {
     }
 
     pub fn with_mode(session: Arc<Session>, mode: RecipeMode) -> Self {
-        let resolve_chain = build_resolve_chain(session.root(), session.global_recipe_dir());
+        let resolve_chain = build_resolve_chain(session.root(), session.global_recipe_dirs());
         for (level, path) in &resolve_chain {
             tracing::info!(level = ?level, justfile = %path.display(), "recipe module: justfile found");
         }
@@ -236,10 +236,7 @@ impl RecipeModule {
                 if r.private {
                     continue;
                 }
-                if self.mode == RecipeMode::AgentOnly
-                    && !is_allow_agent(&r)
-                    && !is_plugin(&r)
-                {
+                if self.mode == RecipeMode::AgentOnly && !is_allow_agent(&r) && !is_plugin(&r) {
                     continue;
                 }
                 merged.insert(
@@ -263,65 +260,87 @@ impl RecipeModule {
     }
 }
 
-/// Scan global plugin recipes from `~/.config/lds/justfile` (or the supplied dir).
+/// Scan global plugin recipes from all global dirs, in precedence order.
 ///
-/// Used at server startup to expose plugin tools before session_start is called.
-/// Returns an empty list if no global justfile is found.
-pub async fn list_global_plugins(global_dir: Option<&Path>) -> Result<Vec<PluginRecipe>> {
-    let justfile_path = if let Some(dir) = global_dir {
-        find_justfile(dir)
-    } else if let Some(home) = home_dir() {
-        find_justfile(&home.join(".config/lds"))
-    } else {
-        None
-    };
-    let Some(path) = justfile_path else {
-        return Ok(Vec::new());
-    };
-    let recipes = dump_justfile(&path).await?;
-    let mut plugins: Vec<PluginRecipe> = recipes
-        .into_iter()
-        .filter(|r| !r.private && is_plugin(r))
-        .map(|r| PluginRecipe {
-            name: r.name,
-            description: r.doc.unwrap_or_default(),
-            parameters: r
+/// Scans `~/.config/lds/justfile` first (default), then each entry in
+/// `global_dirs` in slice order. Later entries override earlier ones on name
+/// collision (same behaviour as `build_resolve_chain`). Used at server startup
+/// to expose plugin tools before `session_start` is called.
+pub async fn list_global_plugins(global_dirs: &[PathBuf]) -> Result<Vec<PluginRecipe>> {
+    // Build the ordered list of dirs to scan: default first, then extra dirs.
+    let mut dirs_to_scan: Vec<PathBuf> = Vec::new();
+    if let Some(home) = home_dir() {
+        dirs_to_scan.push(home.join(".config/lds"));
+    }
+    dirs_to_scan.extend_from_slice(global_dirs);
+
+    let mut merged: HashMap<String, PluginRecipe> = HashMap::new();
+    for dir in &dirs_to_scan {
+        let Some(path) = find_justfile(dir) else {
+            continue;
+        };
+        let recipes = dump_justfile(&path).await?;
+        for r in recipes {
+            if r.private || !is_plugin(&r) {
+                continue;
+            }
+            let parameters: Vec<PluginParam> = r
                 .parameters
                 .into_iter()
                 .map(|p| PluginParam {
                     name: p.name,
                     default: p.default,
                 })
-                .collect(),
-            source: ResolveInfo {
-                level: ResolveLevel::Global,
-                source_path: path.clone(),
-            },
-        })
-        .collect();
+                .collect();
+            // Later dir overrides earlier on collision (higher priority).
+            merged.insert(
+                r.name.clone(),
+                PluginRecipe {
+                    name: r.name,
+                    description: r.doc.unwrap_or_default(),
+                    parameters,
+                    source: ResolveInfo {
+                        level: ResolveLevel::Global,
+                        source_path: path.clone(),
+                    },
+                },
+            );
+        }
+    }
+    let mut plugins: Vec<PluginRecipe> = merged.into_values().collect();
     plugins.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(plugins)
 }
 
-fn build_resolve_chain(root: &Path, global_dir: Option<&Path>) -> Vec<(ResolveLevel, PathBuf)> {
+/// Build the justfile resolve chain for a session.
+///
+/// Push order (lowest → highest priority):
+/// 1. Default `~/.config/lds` — always consulted first.
+/// 2. Each entry in `global_dirs` in slice order (crux §2: ENV-listed order preserved).
+/// 3. Project `<root>/justfile` — highest priority.
+///
+/// Only directories where `find_justfile` succeeds are pushed. Callers arrange
+/// `global_dirs` as `[mcp_arg_dir?, env_dir_0, env_dir_1, …]` so that the MCP
+/// wire argument precedes ENV dirs and both precede the project justfile.
+fn build_resolve_chain(root: &Path, global_dirs: &[PathBuf]) -> Vec<(ResolveLevel, PathBuf)> {
     let mut chain = Vec::new();
 
-    // Global (lowest priority, inserted first → overwritten by later entries)
-    if let Some(dir) = global_dir {
-        if let Some(path) = find_justfile(dir) {
+    // (1) Default: ~/.config/lds (always first, lowest priority)
+    if let Some(home) = home_dir() {
+        let default_global = home.join(".config/lds");
+        if let Some(path) = find_justfile(&default_global) {
             chain.push((ResolveLevel::Global, path));
-        }
-    } else {
-        // Default: ~/.config/lds/justfile
-        if let Some(home) = home_dir() {
-            let default_global = home.join(".config/lds");
-            if let Some(path) = find_justfile(&default_global) {
-                chain.push((ResolveLevel::Global, path));
-            }
         }
     }
 
-    // Project (highest priority)
+    // (2) Extra global dirs in declaration order (crux §2: Vec preserves insertion order)
+    for dir in global_dirs {
+        if let Some(path) = find_justfile(dir) {
+            chain.push((ResolveLevel::Global, path));
+        }
+    }
+
+    // (3) Project justfile (highest priority)
     if let Some(path) = find_justfile(root) {
         chain.push((ResolveLevel::Project, path));
     }
@@ -498,7 +517,9 @@ struct JustRecipe {
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
 enum JustAttribute {
-    GroupObject { group: String },
+    GroupObject {
+        group: String,
+    },
     Bare(String),
     #[allow(dead_code)]
     Other(serde_json::Value),

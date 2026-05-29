@@ -2,7 +2,7 @@
 //!
 //! Every module (git, recipe, sandbox) receives an `Arc<Session>` that
 //! anchors operations to a single project root. Shared concerns — timeout,
-//! output truncation, global recipe dir — live here so modules don't
+//! output truncation, global recipe dirs — live here so modules don't
 //! duplicate configuration.
 
 pub mod log_store;
@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 
 const DEFAULT_TIMEOUT_SECS: u64 = 60;
 const DEFAULT_MAX_OUTPUT: usize = 102_400; // 100KB
@@ -22,7 +22,13 @@ pub struct SessionConfig {
     pub root: PathBuf,
     pub timeout_secs: Option<u64>,
     pub max_output: Option<usize>,
-    pub global_recipe_dir: Option<PathBuf>,
+    /// Additional global recipe directories, in precedence order (lowest first).
+    ///
+    /// The default `~/.config/lds` is always consulted by `build_resolve_chain`
+    /// regardless of this list. Entries here are pushed after the default and before
+    /// the project justfile. Populate via `LDS_RECIPE_GLOBAL_DIRS` (colon-separated)
+    /// and/or the `global_recipe_dir` MCP wire argument.
+    pub global_recipe_dirs: Vec<PathBuf>,
 }
 
 /// Immutable session state created by `session_start`.
@@ -35,7 +41,7 @@ pub struct Session {
     session_id: String,
     timeout: Duration,
     max_output: usize,
-    global_recipe_dir: Option<PathBuf>,
+    global_recipe_dirs: Vec<PathBuf>,
 }
 
 impl Session {
@@ -54,13 +60,13 @@ impl Session {
             max_output,
             "session started"
         );
-        let global_recipe_dir = config.global_recipe_dir;
+        let global_recipe_dirs = config.global_recipe_dirs;
         Ok(Self {
             root,
             session_id,
             timeout,
             max_output,
-            global_recipe_dir,
+            global_recipe_dirs,
         })
     }
 
@@ -80,8 +86,8 @@ impl Session {
         self.max_output
     }
 
-    pub fn global_recipe_dir(&self) -> Option<&Path> {
-        self.global_recipe_dir.as_deref()
+    pub fn global_recipe_dirs(&self) -> &[PathBuf] {
+        &self.global_recipe_dirs
     }
 }
 

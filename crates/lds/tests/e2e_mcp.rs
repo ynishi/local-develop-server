@@ -7,18 +7,34 @@
 use std::path::Path;
 use std::process::Command as StdCommand;
 
-use rmcp::{model::CallToolRequestParams, transport::TokioChildProcess, ServiceExt};
-use serde_json::{json, Value};
+use rmcp::{
+    ServiceError, ServiceExt, model::CallToolRequestParams, model::ErrorCode,
+    transport::TokioChildProcess,
+};
+use serde_json::{Value, json};
 use tokio::process::Command;
 
 fn server_bin() -> String {
-    std::env::var("CARGO_BIN_EXE_lds").unwrap_or_else(|_| {
-        format!("{}/target/debug/lds", env!("CARGO_MANIFEST_DIR"))
-    })
+    std::env::var("CARGO_BIN_EXE_lds")
+        .unwrap_or_else(|_| format!("{}/target/debug/lds", env!("CARGO_MANIFEST_DIR")))
 }
 
 async fn connect() -> rmcp::service::RunningService<rmcp::RoleClient, ()> {
     let cmd = Command::new(server_bin());
+    let transport = TokioChildProcess::new(cmd).expect("failed to spawn lds server");
+    ().serve(transport)
+        .await
+        .expect("failed to initialize MCP client")
+}
+
+/// Spawn the lds server with `dir` as its working directory.
+///
+/// Use this variant when the test needs to control whether auto-start fires.
+/// A dir that contains `.git` or `justfile` will trigger auto-start; a plain
+/// tempdir will not (crux §3 — must distinguish the two cases).
+async fn connect_in(dir: &std::path::Path) -> rmcp::service::RunningService<rmcp::RoleClient, ()> {
+    let mut cmd = Command::new(server_bin());
+    cmd.current_dir(dir);
     let transport = TokioChildProcess::new(cmd).expect("failed to spawn lds server");
     ().serve(transport)
         .await
@@ -198,10 +214,7 @@ async fn sandbox_write_read_round_trip() {
 
     let read_result = client
         .peer()
-        .call_tool(call_params(
-            "sandbox_read",
-            json!({ "path": "note.txt" }),
-        ))
+        .call_tool(call_params("sandbox_read", json!({ "path": "note.txt" })))
         .await
         .unwrap();
     let read_text = extract_text(&read_result);
@@ -213,13 +226,66 @@ async fn sandbox_write_read_round_trip() {
 
 #[tokio::test]
 async fn calling_tool_without_session_errors() {
-    let client = connect().await;
-    // No session_start — git_status should report no session.
+    // Spawn the server in a plain tempdir that has neither `.git` nor
+    // `justfile`, so auto-start does NOT fire. Calling git_status without
+    // session_start must return an error (crux §3: non-ProjectRoot CWD path).
+    let tmpdir = tempfile::tempdir().expect("tempdir");
+    let client = connect_in(tmpdir.path()).await;
     let outcome = client
         .peer()
         .call_tool(call_params("git_status", json!({})))
         .await;
     assert!(outcome.is_err(), "expected error, got {outcome:?}");
+
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test]
+async fn calling_tool_auto_starts_in_project_root() {
+    // Spawn the server with a TempRepo (contains `.git`) as CWD.
+    // Auto-start should fire and git_status must succeed without an explicit
+    // session_start call (crux §3: ProjectRoot CWD path).
+    let repo = TempRepo::new();
+    let client = connect_in(repo.dir.path()).await;
+    let outcome = client
+        .peer()
+        .call_tool(call_params("git_status", json!({})))
+        .await;
+    assert!(
+        outcome.is_ok(),
+        "expected auto-start to succeed, got {outcome:?}"
+    );
+
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test]
+async fn no_session_error_has_internal_error_code() {
+    // Regression: all no-session paths must return the unified error code
+    // -32603 (McpError::INTERNAL_ERROR). Previously each handler inlined a
+    // separate McpError::internal_error("no session", None) call — this test
+    // pins the code so any divergence is caught at the E2E boundary.
+    //
+    // Use a non-ProjectRoot tmpdir so auto-start does NOT fire (crux §3).
+    let tmpdir = tempfile::tempdir().expect("tempdir");
+    let client = connect_in(tmpdir.path()).await;
+    let outcome = client
+        .peer()
+        .call_tool(call_params("git_status", json!({})))
+        .await;
+
+    match outcome {
+        Err(ServiceError::McpError(ref err_data)) => {
+            assert_eq!(
+                err_data.code,
+                ErrorCode::INTERNAL_ERROR,
+                "no-session error must use code -32603 (INTERNAL_ERROR), got {:?}",
+                err_data.code
+            );
+        }
+        Err(other) => panic!("expected McpError(-32603), got ServiceError variant: {other:?}"),
+        Ok(_) => panic!("expected error for no-session call, got Ok"),
+    }
 
     client.cancel().await.unwrap();
 }

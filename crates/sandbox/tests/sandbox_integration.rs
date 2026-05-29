@@ -117,11 +117,7 @@ async fn python_file_execution_uses_preamble() {
     }
     let tmp = tempfile::tempdir().unwrap();
     let script_path = tmp.path().join("script.py");
-    std::fs::write(
-        &script_path,
-        "import subprocess; print('should not reach')",
-    )
-    .unwrap();
+    std::fs::write(&script_path, "import subprocess; print('should not reach')").unwrap();
 
     let py = SandboxPython::new(tmp.path()).with_timeout(5);
     let result = py.execute_file(&script_path).await.unwrap();
