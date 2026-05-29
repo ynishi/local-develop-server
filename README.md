@@ -24,7 +24,7 @@ Claude Code / Agent
      │         │
      ▼         ▼
   Session (core)
-  root / session_id / timeout / max_output / global_recipe_dir
+  root / session_id / timeout / max_output / global_recipe_dirs
 ```
 
 ### Session — Smart Inject Env
@@ -33,10 +33,13 @@ Claude Code / Agent
 各 module は Session から root / timeout / max_output を読むだけ。
 git module の write scope tracking (owned_worktrees) は Session とは別に module 内部で管理。
 
+**Auto session-start**: サーバ起動時の CWD が ProjectRoot (`.git` または `justfile` を含むディレクトリ) である場合、`session_start` を呼ばなくても最初の tool call で自動的にセッションが開始される。`session_start` は引き続き利用可能で、別の project root に切り替える際に明示的に呼ぶ。自動起動した tool call のレスポンスには `auto_session_start` フィールドが含まれる。
+
+**No-session error**: セッションが存在しない状態でツールを呼んだ場合、全ハンドラで JSON-RPC エラーコード `-32603` を返す (メッセージ: `"no session"`)。
+
 ### Resolve Chain (recipe)
 
-dotenv-like な階層解決。Global (`~/.config/lds/justfile`) → Project (`{root}/justfile`)
-の順で justfile を探索し、recipe 単位で merge する。name 衝突は Project 優先。
+dotenv-like な階層解決。`~/.config/lds/justfile` (default global) → `LDS_RECIPE_GLOBAL_DIRS` 追加 global → Project (`{root}/justfile`) の順で justfile を探索し、recipe 単位で merge する。name 衝突は後勝ち (Project が最高優先)。
 各 recipe は `ResolveInfo { level, source_path }` を持ち、どこから来たかを追跡する。
 `ResolveLevel` enum に variant を足すだけで Worktree 層等を追加可能。
 
@@ -62,7 +65,7 @@ crates/
 
 | Tool | Description |
 |---|---|
-| `session_start` | Initialize session with project root. All modules anchored to this root. |
+| `session_start` | Initialize session with project root. Optional when the server was launched inside a ProjectRoot (directory containing `.git` or `justfile`) — the first tool call auto-starts the session using the startup CWD. Call `session_start` explicitly to use a different root. |
 
 ### Git (read)
 
@@ -150,6 +153,30 @@ The skeleton ships with `complexity` / `search-excluding` /
 [docs/plugin-recipe-authoring.md](docs/plugin-recipe-authoring.md) for
 the full IF contract, parameter mapping, shebang recipes, and the
 macOS-awk / CWD pitfalls.
+
+#### Additional Global Recipe Directories (`LDS_RECIPE_GLOBAL_DIRS`)
+
+Set `LDS_RECIPE_GLOBAL_DIRS` to a colon-separated list of directories
+(PATH-style) to load additional global justfiles beyond `~/.config/lds/`:
+
+```sh
+# .mcp.json
+{
+  "mcpServers": {
+    "lds": {
+      "command": "lds",
+      "args": [],
+      "env": {
+        "LDS_RECIPE_GLOBAL_DIRS": "/opt/shared-recipes:/home/user/team-recipes"
+      }
+    }
+  }
+}
+```
+
+Precedence (low → high): `~/.config/lds` → `LDS_RECIPE_GLOBAL_DIRS` dirs in
+declaration order → project `justfile`. Same-name recipes in later entries
+override earlier ones; the project justfile always wins.
 
 ## License
 
