@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct Snapshot {
@@ -28,8 +28,7 @@ pub struct SandboxFs {
 impl SandboxFs {
     pub fn new(root: &Path) -> Result<Self> {
         let snapshots_dir = root.join(".sandbox-snapshots");
-        std::fs::create_dir_all(&snapshots_dir)
-            .context("failed to create .sandbox-snapshots")?;
+        std::fs::create_dir_all(&snapshots_dir).context("failed to create .sandbox-snapshots")?;
         Ok(Self {
             root: root.to_path_buf(),
             snapshots_dir,
@@ -43,12 +42,17 @@ impl SandboxFs {
         } else {
             self.root.join(path)
         };
-        let canon_root = self.root.canonicalize().unwrap_or_else(|_| self.root.clone());
+        let canon_root = self
+            .root
+            .canonicalize()
+            .unwrap_or_else(|_| self.root.clone());
         let canon_path = if resolved.exists() {
             resolved.canonicalize().unwrap_or_else(|_| resolved.clone())
         } else {
             let parent = resolved.parent().unwrap_or(&self.root);
-            let canon_parent = parent.canonicalize().unwrap_or_else(|_| parent.to_path_buf());
+            let canon_parent = parent
+                .canonicalize()
+                .unwrap_or_else(|_| parent.to_path_buf());
             canon_parent.join(resolved.file_name().unwrap_or_default())
         };
         if !canon_path.starts_with(&canon_root) {
@@ -161,8 +165,8 @@ impl SandboxFs {
 
     pub fn read(&self, path: &str, offset: Option<usize>, limit: Option<usize>) -> Result<String> {
         let resolved = self.ensure_within_root(Path::new(path))?;
-        let content = std::fs::read_to_string(&resolved)
-            .with_context(|| format!("failed to read {path}"))?;
+        let content =
+            std::fs::read_to_string(&resolved).with_context(|| format!("failed to read {path}"))?;
 
         let lines: Vec<&str> = content.lines().collect();
         let start = offset.unwrap_or(0).min(lines.len());
@@ -178,8 +182,8 @@ impl SandboxFs {
 
     pub fn tail(&self, path: &str, lines: Option<usize>) -> Result<String> {
         let resolved = self.ensure_within_root(Path::new(path))?;
-        let content = std::fs::read_to_string(&resolved)
-            .with_context(|| format!("failed to read {path}"))?;
+        let content =
+            std::fs::read_to_string(&resolved).with_context(|| format!("failed to read {path}"))?;
 
         let all_lines: Vec<&str> = content.lines().collect();
         let n = lines.unwrap_or(20);
@@ -423,6 +427,10 @@ mod tests {
 
         let err = fs.write("../../etc/passwd", "hacked");
         assert!(err.is_err());
-        assert!(err.unwrap_err().to_string().contains("path traversal denied"));
+        assert!(
+            err.unwrap_err()
+                .to_string()
+                .contains("path traversal denied")
+        );
     }
 }

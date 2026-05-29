@@ -46,7 +46,9 @@ fn worktree_lifecycle() {
     assert!(list.contains("owned: false"));
 
     // worktree_add
-    let result = git.worktree_add("test-wt", "feat/test", Some("main")).unwrap();
+    let result = git
+        .worktree_add("test-wt", "feat/test", Some("main"))
+        .unwrap();
     assert!(result.contains("worktree created"));
     assert!(result.contains("feat/test"));
 
@@ -90,8 +92,14 @@ fn ownership_guard_rejects_unowned_worktree() {
 
     // create a worktree outside of GitModule (simulating another session)
     Command::new("git")
-        .args(["worktree", "add", "-b", "other/branch",
-            tmp.path().join(".worktrees/foreign").to_str().unwrap(), "main"])
+        .args([
+            "worktree",
+            "add",
+            "-b",
+            "other/branch",
+            tmp.path().join(".worktrees/foreign").to_str().unwrap(),
+            "main",
+        ])
         .current_dir(tmp.path())
         .output()
         .unwrap();
@@ -102,12 +110,20 @@ fn ownership_guard_rejects_unowned_worktree() {
     std::fs::write(foreign_path.join("file.txt"), "x").unwrap();
     let err = git.commit(&foreign_path, "bad commit", None);
     assert!(err.is_err());
-    assert!(err.unwrap_err().to_string().contains("not owned by this session"));
+    assert!(
+        err.unwrap_err()
+            .to_string()
+            .contains("not owned by this session")
+    );
 
     // branch_delete on unowned branch should fail
     let err = git.branch_delete("other/branch");
     assert!(err.is_err());
-    assert!(err.unwrap_err().to_string().contains("not owned by this session"));
+    assert!(
+        err.unwrap_err()
+            .to_string()
+            .contains("not owned by this session")
+    );
 }
 
 #[test]
@@ -118,7 +134,11 @@ fn commit_allowed_at_session_root() {
     let git = GitModule::new(session);
 
     std::fs::write(tmp.path().join("root_file.txt"), "content\n").unwrap();
-    let result = git.commit(tmp.path(), "root commit", Some(&["root_file.txt".to_string()]));
+    let result = git.commit(
+        tmp.path(),
+        "root commit",
+        Some(&["root_file.txt".to_string()]),
+    );
     assert!(result.is_ok());
     assert!(result.unwrap().contains("committed"));
 }

@@ -6,7 +6,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 
 const DEFAULT_DENY: &[&str] = &[
     "subprocess",
@@ -22,10 +22,33 @@ const DEFAULT_DENY: &[&str] = &[
 ];
 
 const DANGEROUS_OS_ATTRS: &[&str] = &[
-    "system", "popen", "exec", "execl", "execle", "execlp", "execlpe", "execv",
-    "execve", "execvp", "execvpe", "spawnl", "spawnle", "spawnlp", "spawnlpe",
-    "spawnv", "spawnve", "spawnvp", "spawnvpe", "posix_spawn", "posix_spawnp",
-    "fork", "forkpty", "kill", "killpg", "plock", "startfile",
+    "system",
+    "popen",
+    "exec",
+    "execl",
+    "execle",
+    "execlp",
+    "execlpe",
+    "execv",
+    "execve",
+    "execvp",
+    "execvpe",
+    "spawnl",
+    "spawnle",
+    "spawnlp",
+    "spawnlpe",
+    "spawnv",
+    "spawnve",
+    "spawnvp",
+    "spawnvpe",
+    "posix_spawn",
+    "posix_spawnp",
+    "fork",
+    "forkpty",
+    "kill",
+    "killpg",
+    "plock",
+    "startfile",
 ];
 
 const MAX_TIMEOUT_SECS: u64 = 300;
@@ -252,7 +275,10 @@ mod tests {
         }
         let tmp = tempfile::tempdir().unwrap();
         let py = SandboxPython::new(tmp.path());
-        let result = py.execute("import subprocess; print('reached')").await.unwrap();
+        let result = py
+            .execute("import subprocess; print('reached')")
+            .await
+            .unwrap();
         assert_ne!(result.exit_code, 0);
         assert!(result.stderr.contains("blocked") || result.stderr.contains("ImportError"));
     }
@@ -264,7 +290,10 @@ mod tests {
         }
         let tmp = tempfile::tempdir().unwrap();
         let py = SandboxPython::new(tmp.path());
-        let result = py.execute("import os; os.system('echo bad')").await.unwrap();
+        let result = py
+            .execute("import os; os.system('echo bad')")
+            .await
+            .unwrap();
         assert_ne!(result.exit_code, 0);
     }
 
@@ -304,7 +333,10 @@ mod tests {
         }
         let tmp = tempfile::tempdir().unwrap();
         let py = SandboxPython::new(tmp.path());
-        let result = py.execute("import json; print(json.dumps({'k': 1}))").await.unwrap();
+        let result = py
+            .execute("import json; print(json.dumps({'k': 1}))")
+            .await
+            .unwrap();
         assert_eq!(result.exit_code, 0);
         assert!(result.stdout.contains("\"k\""));
     }
@@ -322,8 +354,7 @@ mod tests {
     #[test]
     fn preamble_includes_custom_deny() {
         let tmp = tempfile::tempdir().unwrap();
-        let py = SandboxPython::new(tmp.path())
-            .with_deny_modules(vec!["socket".to_string()]);
+        let py = SandboxPython::new(tmp.path()).with_deny_modules(vec!["socket".to_string()]);
         let preamble = py.build_preamble();
         assert!(preamble.contains("'socket'"));
     }

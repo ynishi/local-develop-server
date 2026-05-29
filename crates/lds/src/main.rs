@@ -3,11 +3,12 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Result;
-use lds_core::{check_binaries, LdsState, SessionConfig};
+use lds_core::{LdsState, Session, SessionConfig, check_binaries};
 use lds_git::GitModule;
 use lds_recipe::RecipeModule;
 use lds_sandbox::fs::SandboxFs;
 use lds_sandbox::python::SandboxPython;
+use rmcp::RoleServer;
 use rmcp::handler::server::tool::ToolCallContext;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{
@@ -15,9 +16,8 @@ use rmcp::model::{
     ServerCapabilities, ServerInfo, Tool,
 };
 use rmcp::service::RequestContext;
-use rmcp::RoleServer;
+use rmcp::{ErrorData as McpError, ServerHandler, ServiceExt, tool, tool_handler, tool_router};
 use schemars::JsonSchema;
-use rmcp::{tool, tool_handler, tool_router, ErrorData as McpError, ServerHandler, ServiceExt};
 use serde::Deserialize;
 use tokio::sync::RwLock;
 
@@ -32,6 +32,7 @@ struct Inner {
     recipe: Option<RecipeModule>,
     sandbox_fs: Option<SandboxFs>,
     sandbox_python: Option<SandboxPython>,
+    startup_cwd: Option<PathBuf>,
 }
 
 impl LdsServer {
@@ -120,6 +121,7 @@ impl LdsServer {
     }
 
     fn new() -> Self {
+        let startup_cwd = std::env::current_dir().ok();
         Self {
             state: Arc::new(RwLock::new(Inner {
                 lds: LdsState::new(),
@@ -127,6 +129,7 @@ impl LdsServer {
                 recipe: None,
                 sandbox_fs: None,
                 sandbox_python: None,
+                startup_cwd,
             })),
         }
     }
@@ -269,6 +272,36 @@ struct RecipeLogsReq {
     tail: Option<usize>,
 }
 
+/// Build and initialize all session-dependent modules on `inner`.
+///
+/// This is the single construction path shared by the explicit `session_start`
+/// handler and the auto-start hook in `call_tool`. Inlining the construction
+/// logic in two separate places would allow the two paths to diverge, breaking
+/// session invariants (crux §1).
+fn build_session_modules(
+    inner: &mut Inner,
+    config: SessionConfig,
+) -> Result<Arc<Session>, McpError> {
+    let session = inner
+        .lds
+        .start_session(config)
+        .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+    inner.git = Some(GitModule::new(Arc::clone(&session)));
+    inner.recipe = Some(RecipeModule::new(Arc::clone(&session)));
+    inner.sandbox_fs = Some(
+        SandboxFs::new(session.root())
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?,
+    );
+    inner.sandbox_python = Some(SandboxPython::new(session.root()));
+    Ok(session)
+}
+
+/// Return `true` if `path` is a ProjectRoot: a directory that contains a
+/// `.git` entry or a `justfile`. Equivalent to task-mcp's ProjectRoot check.
+fn is_project_root(path: &std::path::Path) -> bool {
+    path.join(".git").exists() || path.join("justfile").exists()
+}
+
 #[tool_router]
 impl LdsServer {
     #[tool(description = "Initialize session with project root. Must be called first.")]
@@ -283,17 +316,7 @@ impl LdsServer {
             max_output: req.max_output,
             global_recipe_dir: req.global_recipe_dir.map(Into::into),
         };
-        let session = inner
-            .lds
-            .start_session(config)
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        inner.git = Some(GitModule::new(Arc::clone(&session)));
-        inner.recipe = Some(RecipeModule::new(Arc::clone(&session)));
-        inner.sandbox_fs = Some(
-            SandboxFs::new(session.root())
-                .map_err(|e| McpError::internal_error(e.to_string(), None))?,
-        );
-        inner.sandbox_python = Some(SandboxPython::new(session.root()));
+        let session = build_session_modules(&mut inner, config)?;
         Ok(CallToolResult::success(vec![Content::text(format!(
             "session started: root={}, id={}",
             session.root().display(),
@@ -481,7 +504,9 @@ impl LdsServer {
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
-    #[tool(description = "Query recipe execution logs. By ID returns full record; without ID returns recent summaries.")]
+    #[tool(
+        description = "Query recipe execution logs. By ID returns full record; without ID returns recent summaries."
+    )]
     async fn recipe_logs(
         &self,
         Parameters(req): Parameters<RecipeLogsReq>,
@@ -517,7 +542,9 @@ impl LdsServer {
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
-    #[tool(description = "Sandboxed write: full file content. Auto-snapshots pre-state for rollback.")]
+    #[tool(
+        description = "Sandboxed write: full file content. Auto-snapshots pre-state for rollback."
+    )]
     async fn sandbox_write(
         &self,
         Parameters(req): Parameters<SandboxWriteReq>,
@@ -535,7 +562,9 @@ impl LdsServer {
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
-    #[tool(description = "Sandboxed edit: replace old_string with new_string. Auto-snapshots pre-state.")]
+    #[tool(
+        description = "Sandboxed edit: replace old_string with new_string. Auto-snapshots pre-state."
+    )]
     async fn sandbox_edit(
         &self,
         Parameters(req): Parameters<SandboxEditReq>,
@@ -619,7 +648,9 @@ impl LdsServer {
         Ok(CallToolResult::success(vec![Content::text(content)]))
     }
 
-    #[tool(description = "Rollback file to a prior snapshot. Omit snapshot_id to restore the most recent.")]
+    #[tool(
+        description = "Rollback file to a prior snapshot. Omit snapshot_id to restore the most recent."
+    )]
     async fn sandbox_rollback(
         &self,
         Parameters(req): Parameters<SandboxRollbackReq>,
@@ -655,7 +686,9 @@ impl LdsServer {
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
-    #[tool(description = "Run Python script in a sandboxed subprocess with 3-layer preamble guard (module deny + import guard + os attr removal).")]
+    #[tool(
+        description = "Run Python script in a sandboxed subprocess with 3-layer preamble guard (module deny + import guard + os attr removal)."
+    )]
     async fn sandbox_python(
         &self,
         Parameters(req): Parameters<SandboxPythonReq>,
@@ -679,7 +712,9 @@ impl LdsServer {
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
-    #[tool(description = "Run a Python file in the sandboxed subprocess. Uses the same preamble guard as sandbox_python.")]
+    #[tool(
+        description = "Run a Python file in the sandboxed subprocess. Uses the same preamble guard as sandbox_python."
+    )]
     async fn sandbox_python_file(
         &self,
         Parameters(req): Parameters<SandboxPythonFileReq>,
@@ -781,6 +816,29 @@ impl ServerHandler for LdsServer {
         request: CallToolRequestParams,
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
+        // Auto-start: if the server was launched from a ProjectRoot and no
+        // session has been started yet, start one automatically. Skip when the
+        // tool being called is session_start itself (that handler will start
+        // the session explicitly). The write guard is kept in a tight scope and
+        // dropped before dispatch so that try_plugin_call can acquire a read
+        // guard without deadlocking (R3).
+        if request.name != "session_start" {
+            let mut inner = self.state.write().await;
+            if inner.lds.session().is_err()
+                && let Some(cwd) = inner.startup_cwd.clone()
+                && is_project_root(&cwd)
+            {
+                let config = SessionConfig {
+                    root: cwd,
+                    timeout_secs: None,
+                    max_output: None,
+                    global_recipe_dir: None,
+                };
+                build_session_modules(&mut inner, config)?;
+            }
+            // write guard drops here — before try_plugin_call takes a read guard
+        }
+
         if let Some(result) = self
             .try_plugin_call(&request.name, request.arguments.as_ref())
             .await?
@@ -811,7 +869,10 @@ fn plugin_to_tool(plugin: lds_recipe::PluginRecipe) -> Tool {
         "type".to_string(),
         serde_json::Value::String("object".to_string()),
     );
-    schema.insert("properties".to_string(), serde_json::Value::Object(properties));
+    schema.insert(
+        "properties".to_string(),
+        serde_json::Value::Object(properties),
+    );
     if !required.is_empty() {
         schema.insert("required".to_string(), serde_json::Value::Array(required));
     }

@@ -63,8 +63,14 @@ mod tests {
     #[test]
     fn push_and_get() {
         let store = LogStore::new(10);
-        store.push(Entry { id: "a".into(), value: 1 });
-        store.push(Entry { id: "b".into(), value: 2 });
+        store.push(Entry {
+            id: "a".into(),
+            value: 1,
+        });
+        store.push(Entry {
+            id: "b".into(),
+            value: 2,
+        });
         assert_eq!(store.get("a").unwrap().value, 1);
         assert_eq!(store.get("b").unwrap().value, 2);
     }
@@ -72,9 +78,18 @@ mod tests {
     #[test]
     fn eviction_at_capacity() {
         let store = LogStore::new(2);
-        store.push(Entry { id: "a".into(), value: 1 });
-        store.push(Entry { id: "b".into(), value: 2 });
-        store.push(Entry { id: "c".into(), value: 3 });
+        store.push(Entry {
+            id: "a".into(),
+            value: 1,
+        });
+        store.push(Entry {
+            id: "b".into(),
+            value: 2,
+        });
+        store.push(Entry {
+            id: "c".into(),
+            value: 3,
+        });
         assert!(store.get("a").is_none());
         assert_eq!(store.get("b").unwrap().value, 2);
         assert_eq!(store.get("c").unwrap().value, 3);
@@ -83,9 +98,18 @@ mod tests {
     #[test]
     fn recent_newest_first() {
         let store = LogStore::new(10);
-        store.push(Entry { id: "a".into(), value: 1 });
-        store.push(Entry { id: "b".into(), value: 2 });
-        store.push(Entry { id: "c".into(), value: 3 });
+        store.push(Entry {
+            id: "a".into(),
+            value: 1,
+        });
+        store.push(Entry {
+            id: "b".into(),
+            value: 2,
+        });
+        store.push(Entry {
+            id: "c".into(),
+            value: 3,
+        });
         let recent = store.recent(2);
         assert_eq!(recent.len(), 2);
         assert_eq!(recent[0].id, "c");

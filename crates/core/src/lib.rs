@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 
 const DEFAULT_TIMEOUT_SECS: u64 = 60;
 const DEFAULT_MAX_OUTPUT: usize = 102_400; // 100KB
