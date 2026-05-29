@@ -7,7 +7,10 @@
 use std::path::Path;
 use std::process::Command as StdCommand;
 
-use rmcp::{ServiceExt, model::CallToolRequestParams, transport::TokioChildProcess};
+use rmcp::{
+    ServiceError, ServiceExt, model::CallToolRequestParams, model::ErrorCode,
+    transport::TokioChildProcess,
+};
 use serde_json::{Value, json};
 use tokio::process::Command;
 
@@ -252,6 +255,37 @@ async fn calling_tool_auto_starts_in_project_root() {
         outcome.is_ok(),
         "expected auto-start to succeed, got {outcome:?}"
     );
+
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test]
+async fn no_session_error_has_internal_error_code() {
+    // Regression: all no-session paths must return the unified error code
+    // -32603 (McpError::INTERNAL_ERROR). Previously each handler inlined a
+    // separate McpError::internal_error("no session", None) call — this test
+    // pins the code so any divergence is caught at the E2E boundary.
+    //
+    // Use a non-ProjectRoot tmpdir so auto-start does NOT fire (crux §3).
+    let tmpdir = tempfile::tempdir().expect("tempdir");
+    let client = connect_in(tmpdir.path()).await;
+    let outcome = client
+        .peer()
+        .call_tool(call_params("git_status", json!({})))
+        .await;
+
+    match outcome {
+        Err(ServiceError::McpError(ref err_data)) => {
+            assert_eq!(
+                err_data.code,
+                ErrorCode::INTERNAL_ERROR,
+                "no-session error must use code -32603 (INTERNAL_ERROR), got {:?}",
+                err_data.code
+            );
+        }
+        Err(other) => panic!("expected McpError(-32603), got ServiceError variant: {other:?}"),
+        Ok(_) => panic!("expected error for no-session call, got Ok"),
+    }
 
     client.cancel().await.unwrap();
 }

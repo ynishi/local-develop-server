@@ -67,9 +67,20 @@ impl LdsServer {
     ) -> Result<Option<CallToolResult>, McpError> {
         let inner = self.state.read().await;
         let Some(recipe) = inner.recipe.as_ref() else {
-            // No session yet — cannot dispatch (recipe module needs session for execution).
-            // Tool listing surfaces global plugins, but execution requires session_start first.
-            return Ok(None);
+            // No session yet — cannot dispatch plugins (recipe module needs session for
+            // execution). If the requested tool is a static built-in the router can still
+            // handle it (e.g. session_start itself), so fall through with Ok(None). If the
+            // tool is NOT a built-in it must be a plugin call — return the unified
+            // no-session error (-32603) instead of letting it become a tool-not-found (R-W2a).
+            let is_builtin = Self::tool_router()
+                .list_all()
+                .iter()
+                .any(|t| t.name.as_ref() == name);
+            if is_builtin {
+                return Ok(None);
+            }
+            tracing::warn!(tool = name, "plugin call attempted without active session");
+            return Err(no_session_error());
         };
 
         let mut plugins = lds_recipe::list_global_plugins(None)
@@ -272,6 +283,15 @@ struct RecipeLogsReq {
     tail: Option<usize>,
 }
 
+/// Shared factory for the "no session active" MCP error.
+///
+/// All tool handlers that require an active session use this factory so that
+/// the error code (-32603) and message ("no session") are defined in one place.
+/// Infallible — never fails.
+fn no_session_error() -> McpError {
+    McpError::internal_error("no session", None)
+}
+
 /// Build and initialize all session-dependent modules on `inner`.
 ///
 /// This is the single construction path shared by the explicit `session_start`
@@ -327,10 +347,7 @@ impl LdsServer {
     #[tool(description = "Show git working tree status")]
     async fn git_status(&self) -> Result<CallToolResult, McpError> {
         let inner = self.state.read().await;
-        let git = inner
-            .git
-            .as_ref()
-            .ok_or_else(|| McpError::internal_error("no session", None))?;
+        let git = inner.git.as_ref().ok_or_else(no_session_error)?;
         let out = git
             .status()
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
@@ -343,10 +360,7 @@ impl LdsServer {
         Parameters(req): Parameters<GitLogReq>,
     ) -> Result<CallToolResult, McpError> {
         let inner = self.state.read().await;
-        let git = inner
-            .git
-            .as_ref()
-            .ok_or_else(|| McpError::internal_error("no session", None))?;
+        let git = inner.git.as_ref().ok_or_else(no_session_error)?;
         let out = git
             .log(req.max_count)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
@@ -356,10 +370,7 @@ impl LdsServer {
     #[tool(description = "Show git diff (working tree vs HEAD)")]
     async fn git_diff(&self) -> Result<CallToolResult, McpError> {
         let inner = self.state.read().await;
-        let git = inner
-            .git
-            .as_ref()
-            .ok_or_else(|| McpError::internal_error("no session", None))?;
+        let git = inner.git.as_ref().ok_or_else(no_session_error)?;
         let out = git
             .diff()
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
@@ -369,10 +380,7 @@ impl LdsServer {
     #[tool(description = "List git worktrees with session ownership annotation")]
     async fn git_worktree_list(&self) -> Result<CallToolResult, McpError> {
         let inner = self.state.read().await;
-        let git = inner
-            .git
-            .as_ref()
-            .ok_or_else(|| McpError::internal_error("no session", None))?;
+        let git = inner.git.as_ref().ok_or_else(no_session_error)?;
         let out = git
             .worktree_list()
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
@@ -385,10 +393,7 @@ impl LdsServer {
         Parameters(req): Parameters<GitWorktreeAddReq>,
     ) -> Result<CallToolResult, McpError> {
         let mut inner = self.state.write().await;
-        let git = inner
-            .git
-            .as_mut()
-            .ok_or_else(|| McpError::internal_error("no session", None))?;
+        let git = inner.git.as_mut().ok_or_else(no_session_error)?;
         let out = git
             .worktree_add(&req.name, &req.branch, req.base_branch.as_deref())
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
@@ -401,10 +406,7 @@ impl LdsServer {
         Parameters(req): Parameters<GitWorktreeRemoveReq>,
     ) -> Result<CallToolResult, McpError> {
         let mut inner = self.state.write().await;
-        let git = inner
-            .git
-            .as_mut()
-            .ok_or_else(|| McpError::internal_error("no session", None))?;
+        let git = inner.git.as_mut().ok_or_else(no_session_error)?;
         let out = git
             .worktree_remove(&req.name)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
@@ -417,10 +419,7 @@ impl LdsServer {
         Parameters(req): Parameters<GitCommitReq>,
     ) -> Result<CallToolResult, McpError> {
         let inner = self.state.read().await;
-        let git = inner
-            .git
-            .as_ref()
-            .ok_or_else(|| McpError::internal_error("no session", None))?;
+        let git = inner.git.as_ref().ok_or_else(no_session_error)?;
         let working_dir = PathBuf::from(&req.working_dir);
         let out = git
             .commit(&working_dir, &req.message, req.paths.as_deref())
@@ -434,10 +433,7 @@ impl LdsServer {
         Parameters(req): Parameters<GitMergeReq>,
     ) -> Result<CallToolResult, McpError> {
         let inner = self.state.read().await;
-        let git = inner
-            .git
-            .as_ref()
-            .ok_or_else(|| McpError::internal_error("no session", None))?;
+        let git = inner.git.as_ref().ok_or_else(no_session_error)?;
         let session = inner
             .lds
             .session()
@@ -458,10 +454,7 @@ impl LdsServer {
         Parameters(req): Parameters<GitBranchDeleteReq>,
     ) -> Result<CallToolResult, McpError> {
         let inner = self.state.read().await;
-        let git = inner
-            .git
-            .as_ref()
-            .ok_or_else(|| McpError::internal_error("no session", None))?;
+        let git = inner.git.as_ref().ok_or_else(no_session_error)?;
         let out = git
             .branch_delete(&req.branch)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
@@ -471,10 +464,7 @@ impl LdsServer {
     #[tool(description = "List available justfile recipes")]
     async fn recipe_list(&self) -> Result<CallToolResult, McpError> {
         let inner = self.state.read().await;
-        let recipe = inner
-            .recipe
-            .as_ref()
-            .ok_or_else(|| McpError::internal_error("no session", None))?;
+        let recipe = inner.recipe.as_ref().ok_or_else(no_session_error)?;
         let recipes = recipe
             .list()
             .await
@@ -490,10 +480,7 @@ impl LdsServer {
         Parameters(req): Parameters<RecipeRunReq>,
     ) -> Result<CallToolResult, McpError> {
         let inner = self.state.read().await;
-        let recipe = inner
-            .recipe
-            .as_ref()
-            .ok_or_else(|| McpError::internal_error("no session", None))?;
+        let recipe = inner.recipe.as_ref().ok_or_else(no_session_error)?;
         let args_refs: Vec<&str> = req.args.iter().map(|s| s.as_str()).collect();
         let output = recipe
             .run(&req.recipe, &args_refs, &req.content, req.timeout_secs)
@@ -512,10 +499,7 @@ impl LdsServer {
         Parameters(req): Parameters<RecipeLogsReq>,
     ) -> Result<CallToolResult, McpError> {
         let inner = self.state.read().await;
-        let recipe = inner
-            .recipe
-            .as_ref()
-            .ok_or_else(|| McpError::internal_error("no session", None))?;
+        let recipe = inner.recipe.as_ref().ok_or_else(no_session_error)?;
         let logs = recipe.logs();
 
         let json = if let Some(ref id) = req.task_id {
@@ -550,10 +534,7 @@ impl LdsServer {
         Parameters(req): Parameters<SandboxWriteReq>,
     ) -> Result<CallToolResult, McpError> {
         let inner = self.state.read().await;
-        let fs = inner
-            .sandbox_fs
-            .as_ref()
-            .ok_or_else(|| McpError::internal_error("no session", None))?;
+        let fs = inner.sandbox_fs.as_ref().ok_or_else(no_session_error)?;
         let result = fs
             .write(&req.path, &req.content)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
@@ -570,10 +551,7 @@ impl LdsServer {
         Parameters(req): Parameters<SandboxEditReq>,
     ) -> Result<CallToolResult, McpError> {
         let inner = self.state.read().await;
-        let fs = inner
-            .sandbox_fs
-            .as_ref()
-            .ok_or_else(|| McpError::internal_error("no session", None))?;
+        let fs = inner.sandbox_fs.as_ref().ok_or_else(no_session_error)?;
         let result = fs
             .edit(&req.path, &req.old_string, &req.new_string, req.replace_all)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
@@ -588,10 +566,7 @@ impl LdsServer {
         Parameters(req): Parameters<SandboxAppendReq>,
     ) -> Result<CallToolResult, McpError> {
         let inner = self.state.read().await;
-        let fs = inner
-            .sandbox_fs
-            .as_ref()
-            .ok_or_else(|| McpError::internal_error("no session", None))?;
+        let fs = inner.sandbox_fs.as_ref().ok_or_else(no_session_error)?;
         let result = fs
             .append(&req.path, &req.content)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
@@ -606,10 +581,7 @@ impl LdsServer {
         Parameters(req): Parameters<SandboxReadReq>,
     ) -> Result<CallToolResult, McpError> {
         let inner = self.state.read().await;
-        let fs = inner
-            .sandbox_fs
-            .as_ref()
-            .ok_or_else(|| McpError::internal_error("no session", None))?;
+        let fs = inner.sandbox_fs.as_ref().ok_or_else(no_session_error)?;
         let content = fs
             .read(&req.path, req.offset, req.limit)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
@@ -622,10 +594,7 @@ impl LdsServer {
         Parameters(req): Parameters<SandboxLinesReq>,
     ) -> Result<CallToolResult, McpError> {
         let inner = self.state.read().await;
-        let fs = inner
-            .sandbox_fs
-            .as_ref()
-            .ok_or_else(|| McpError::internal_error("no session", None))?;
+        let fs = inner.sandbox_fs.as_ref().ok_or_else(no_session_error)?;
         let content = fs
             .head(&req.path, req.lines)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
@@ -638,10 +607,7 @@ impl LdsServer {
         Parameters(req): Parameters<SandboxLinesReq>,
     ) -> Result<CallToolResult, McpError> {
         let inner = self.state.read().await;
-        let fs = inner
-            .sandbox_fs
-            .as_ref()
-            .ok_or_else(|| McpError::internal_error("no session", None))?;
+        let fs = inner.sandbox_fs.as_ref().ok_or_else(no_session_error)?;
         let content = fs
             .tail(&req.path, req.lines)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
@@ -656,10 +622,7 @@ impl LdsServer {
         Parameters(req): Parameters<SandboxRollbackReq>,
     ) -> Result<CallToolResult, McpError> {
         let inner = self.state.read().await;
-        let fs = inner
-            .sandbox_fs
-            .as_ref()
-            .ok_or_else(|| McpError::internal_error("no session", None))?;
+        let fs = inner.sandbox_fs.as_ref().ok_or_else(no_session_error)?;
         let result = fs
             .rollback(&req.path, req.snapshot_id.as_deref())
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
@@ -674,10 +637,7 @@ impl LdsServer {
         Parameters(req): Parameters<SandboxHistoryReq>,
     ) -> Result<CallToolResult, McpError> {
         let inner = self.state.read().await;
-        let fs = inner
-            .sandbox_fs
-            .as_ref()
-            .ok_or_else(|| McpError::internal_error("no session", None))?;
+        let fs = inner.sandbox_fs.as_ref().ok_or_else(no_session_error)?;
         let history = fs
             .history(&req.path)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
@@ -697,7 +657,7 @@ impl LdsServer {
         let base = inner
             .sandbox_python
             .as_ref()
-            .ok_or_else(|| McpError::internal_error("no session", None))?
+            .ok_or_else(no_session_error)?
             .clone();
         let py = match req.timeout_secs {
             Some(secs) => base.with_timeout(secs),
@@ -723,7 +683,7 @@ impl LdsServer {
         let base = inner
             .sandbox_python
             .as_ref()
-            .ok_or_else(|| McpError::internal_error("no session", None))?
+            .ok_or_else(no_session_error)?
             .clone();
         let py = match req.timeout_secs {
             Some(secs) => base.with_timeout(secs),
