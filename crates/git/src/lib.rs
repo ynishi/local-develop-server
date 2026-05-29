@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use lds_core::Session;
 
 /// Git module instance, tied to a [`Session`].
@@ -181,8 +181,7 @@ impl GitModule {
         base_branch: Option<&str>,
     ) -> Result<String> {
         let wt_dir = self.worktrees_dir();
-        std::fs::create_dir_all(&wt_dir)
-            .context("failed to create .worktrees directory")?;
+        std::fs::create_dir_all(&wt_dir).context("failed to create .worktrees directory")?;
 
         let wt_path = wt_dir.join(name);
         if wt_path.exists() {
@@ -192,18 +191,29 @@ impl GitModule {
         if let Some(base) = base_branch {
             git_cmd(
                 self.session.root(),
-                &["worktree", "add", "-b", branch, wt_path.to_str().unwrap_or(name), base],
+                &[
+                    "worktree",
+                    "add",
+                    "-b",
+                    branch,
+                    wt_path.to_str().unwrap_or(name),
+                    base,
+                ],
             )?;
         } else {
             git_cmd(
                 self.session.root(),
-                &["worktree", "add", "-b", branch, wt_path.to_str().unwrap_or(name)],
+                &[
+                    "worktree",
+                    "add",
+                    "-b",
+                    branch,
+                    wt_path.to_str().unwrap_or(name),
+                ],
             )?;
         }
 
-        let canon = wt_path
-            .canonicalize()
-            .unwrap_or_else(|_| wt_path.clone());
+        let canon = wt_path.canonicalize().unwrap_or_else(|_| wt_path.clone());
         self.owned_worktrees.insert(canon);
         self.owned_branches.insert(branch.to_string());
 
@@ -217,16 +227,19 @@ impl GitModule {
 
     pub fn worktree_remove(&mut self, name: &str) -> Result<String> {
         let wt_path = self.worktrees_dir().join(name);
-        let canon = wt_path
-            .canonicalize()
-            .unwrap_or_else(|_| wt_path.clone());
+        let canon = wt_path.canonicalize().unwrap_or_else(|_| wt_path.clone());
 
         self.ensure_owned(&canon)
             .or_else(|_| self.ensure_owned(&wt_path))?;
 
         git_cmd(
             self.session.root(),
-            &["worktree", "remove", "--force", wt_path.to_str().unwrap_or(name)],
+            &[
+                "worktree",
+                "remove",
+                "--force",
+                wt_path.to_str().unwrap_or(name),
+            ],
         )?;
 
         self.owned_worktrees.remove(&canon);
@@ -258,11 +271,8 @@ impl GitModule {
         git_cmd(working_dir, &["commit", "-m", message])?;
 
         let hash = git_cmd(working_dir, &["rev-parse", "--short", "HEAD"])?;
-        let files_changed = git_cmd(
-            working_dir,
-            &["diff", "--name-only", "HEAD~1..HEAD"],
-        )
-        .unwrap_or_default();
+        let files_changed =
+            git_cmd(working_dir, &["diff", "--name-only", "HEAD~1..HEAD"]).unwrap_or_default();
 
         let count = files_changed.lines().count();
         Ok(format!(
@@ -270,12 +280,7 @@ impl GitModule {
         ))
     }
 
-    pub fn merge(
-        &self,
-        branch: &str,
-        into_branch: &str,
-        working_dir: &Path,
-    ) -> Result<String> {
+    pub fn merge(&self, branch: &str, into_branch: &str, working_dir: &Path) -> Result<String> {
         self.ensure_session_scope(working_dir)?;
 
         let current = git_cmd(working_dir, &["branch", "--show-current"])?;
@@ -283,13 +288,23 @@ impl GitModule {
             git_cmd(working_dir, &["checkout", into_branch])?;
         }
 
-        let result = git_cmd(working_dir, &["merge", "--no-ff", branch, "-m",
-            &format!("Merge branch '{}' into {}", branch, into_branch)]);
+        let result = git_cmd(
+            working_dir,
+            &[
+                "merge",
+                "--no-ff",
+                branch,
+                "-m",
+                &format!("Merge branch '{}' into {}", branch, into_branch),
+            ],
+        );
 
         match result {
             Ok(out) => {
                 let hash = git_cmd(working_dir, &["rev-parse", "--short", "HEAD"])?;
-                Ok(format!("merged: {branch} -> {into_branch}, hash={hash}\n{out}"))
+                Ok(format!(
+                    "merged: {branch} -> {into_branch}, hash={hash}\n{out}"
+                ))
             }
             Err(e) => {
                 let _ = git_cmd(working_dir, &["merge", "--abort"]);

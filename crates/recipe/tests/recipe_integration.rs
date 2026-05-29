@@ -95,9 +95,7 @@ async fn content_key_validation_rejects_invalid() {
 
     let mut bad_content = HashMap::new();
     bad_content.insert("bad-key".to_string(), "value".to_string());
-    let err = recipe
-        .run("echo", &[], &bad_content, None)
-        .await;
+    let err = recipe.run("echo", &[], &bad_content, None).await;
     assert!(err.is_err());
     assert!(err.unwrap_err().to_string().contains("invalid content key"));
 }

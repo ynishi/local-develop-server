@@ -15,9 +15,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use lds_core::log_store::{HasId, LogStore};
-use lds_core::{truncate_output, Session};
+use lds_core::{Session, truncate_output};
 use serde::Deserialize;
 
 const ALLOW_AGENT_GROUP: &str = "allow-agent";
@@ -236,10 +236,7 @@ impl RecipeModule {
                 if r.private {
                     continue;
                 }
-                if self.mode == RecipeMode::AgentOnly
-                    && !is_allow_agent(&r)
-                    && !is_plugin(&r)
-                {
+                if self.mode == RecipeMode::AgentOnly && !is_allow_agent(&r) && !is_plugin(&r) {
                     continue;
                 }
                 merged.insert(
@@ -498,7 +495,9 @@ struct JustRecipe {
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
 enum JustAttribute {
-    GroupObject { group: String },
+    GroupObject {
+        group: String,
+    },
     Bare(String),
     #[allow(dead_code)]
     Other(serde_json::Value),
