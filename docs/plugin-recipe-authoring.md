@@ -54,10 +54,11 @@ Two anchors:
 that exact name. Two rules follow:
 
 1. **Names must be globally unique across every justfile lds loads**
-   (`~/.config/lds/justfile`, every dir in `LDS_RECIPE_GLOBAL_DIRS`,
-   every justfile they `import`). If two plugins share a name, just's
-   own dedup picks one — but which one wins is an implementation
-   detail you should not depend on. Treat collisions as a config bug.
+   (directories in `config.toml` `recipes.dirs`, every dir in
+   `LDS_RECIPE_GLOBAL_DIRS`, `~/.config/lds/justfile`, and every
+   justfile they `import`). If two plugins share a name, just's own
+   dedup picks one — but which one wins is an implementation detail you
+   should not depend on. Treat collisions as a config bug.
 
 2. **Pick names that read as utilities, not nouns from your project.**
    `complexity`, `search-excluding`, `text-stats`, `remote-url` work
@@ -96,14 +97,35 @@ they're migrated; once a recipe is touched, switch to
 
 ## 2. Where Plugin recipes live
 
-lds scans two justfile locations (resolve chain):
+lds scans justfile locations in the following resolve chain (priority low → high):
 
-1. **Global**: `~/.config/lds/justfile` (or `$XDG_CONFIG_HOME/lds/justfile`)
-2. **Project**: `{session.root}/justfile`
+| Priority | Source | How to configure |
+|---|---|---|
+| lowest | `~/.config/lds/justfile` (default global) | Drop a justfile here to get started |
+| ↑ | Directories in `config.toml` `recipes.dirs` | `lds recipe-dir add <path>` (recommended) |
+| ↑ | Directories in `LDS_RECIPE_GLOBAL_DIRS` env | Legacy / CI; colon-separated |
+| highest | `{session.root}/justfile` (project) | Per-project recipes |
 
-Global plugins are loaded eagerly at server startup, before the first
-`session_start` call. This means the MCP client (Claude Code) sees them
-in the very first `tools/list` response after connecting.
+Directories from `LDS_RECIPE_GLOBAL_DIRS` take precedence over `config.toml`
+on name collision (env is loaded after config in the resolution chain,
+following the cargo/git/gh convention where env overrides file config).
+On name collision the higher-priority source wins; the project justfile always wins.
+
+**Adding recipe directories** (recommended):
+
+```sh
+lds recipe-dir add ~/team-recipes   # expands tilde; preserves existing config.toml
+lds recipe-dir list                 # show all configured dirs
+lds recipe-dir remove ~/team-recipes
+```
+
+For CI or one-off environments, set `LDS_RECIPE_GLOBAL_DIRS` instead
+(see [Additional Global Recipe Directories — Legacy](../README.md#additional-global-recipe-directories--legacy-lds_recipe_global_dirs)).
+
+**Loading order**: global plugins are loaded eagerly at server startup, before
+the first `session_start` call. The MCP client (Claude Code) sees them in the
+very first `tools/list` response after connecting. Changes to `config.toml` or
+env vars require restarting the lds process (SIGHUP reload is not implemented).
 
 Project plugins become visible only after `session_start` is called.
 On name collision, project wins.
