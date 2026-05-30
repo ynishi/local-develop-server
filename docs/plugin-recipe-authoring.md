@@ -20,6 +20,80 @@ If you find yourself writing the same wrapper recipe across multiple
 projects, it's a Plugin. If the recipe encodes one project's
 deployment ladder, it's a Task.
 
+### 1.1 Decision flowchart
+
+When you write a new recipe, walk this tree before choosing a group:
+
+```
+Is the recipe useful across multiple unrelated projects?
+├── yes → Is it a thin wrapper around a single CLI / tool?
+│        ├── yes → [group('lds-plugin')]   (e.g. complexity, search-excluding)
+│        └── no  → still likely Plugin, but verify the next question:
+│                  Does invoking it require a session root?
+│                  ├── no  → [group('lds-plugin')]
+│                  └── yes → consider whether per-project state belongs in
+│                            the recipe (Task) or in a session arg (Plugin).
+└── no  → Does it encode a project-specific workflow (build / deploy /
+         release / scaffold)?
+         ├── yes → [group('allow-agent')]   (e.g. profile-install, q-fix,
+         │        coding-orch, deploy-lds-import)
+         └── no  → omit the group. Recipe will not be served.
+```
+
+Two anchors:
+
+- **Plugin** = "the wrapper an agent reaches for instinctively, like
+  `grep`." Same name, same shape, every project.
+- **Task** = "the runbook step that depends on this repo's layout."
+  Agents call it through `recipe_run` and may open the recipe source.
+
+### 1.2 Plugin naming collision guide
+
+`[group('lds-plugin')]` recipes occupy the global MCP tool namespace
+(`mcp__lds__<recipe-name>`). Every Claude Code session sees them by
+that exact name. Two rules follow:
+
+1. **Names must be globally unique across every justfile lds loads**
+   (`~/.config/lds/justfile`, every dir in `LDS_RECIPE_GLOBAL_DIRS`,
+   every justfile they `import`). If two plugins share a name, just's
+   own dedup picks one — but which one wins is an implementation
+   detail you should not depend on. Treat collisions as a config bug.
+
+2. **Pick names that read as utilities, not nouns from your project.**
+   `complexity`, `search-excluding`, `text-stats`, `remote-url` work
+   because they describe an operation. `mywebapp-deploy` would compile
+   but pollutes the namespace and signals you should have used
+   `[group('allow-agent')]` instead.
+
+Existing global plugins (reference set, all live in
+`examples/global-justfile.skeleton`):
+
+| Name | What it wraps | Why it's a Plugin |
+|---|---|---|
+| `complexity` | codedash + jq + sort | every Rust/TS repo, same shape |
+| `search-excluding` | rg with stable exclude list | repo-agnostic search |
+| `text-stats` | wc -l/-w/-c on a list of files | repo-agnostic |
+| `remote-url` | `git remote get-url origin` | one git invocation, universal |
+| `greet` | echo test | smoke test, intentionally tiny |
+
+Existing AllowAgent task recipes (typical patterns, agent-profiles
+`tasks/`):
+
+| Name | Why it's a Task (not a Plugin) |
+|---|---|
+| `profile-install` | mutates the consumer project's `.claude/` layout |
+| `q-fix-*` | encodes a multi-step fix workflow |
+| `coding-orch-*` | drives `/orch` pipeline, project-aware |
+| `deploy-lds-import` | edits the user's `~/.config/lds/justfile` |
+
+### 1.3 Legacy `# [allow-agent]` doc-comment marker
+
+`is_allow_agent` still honors a `# [allow-agent]` token in the doc
+comment for backward compatibility with pre-group justfiles. **Do not
+use it in new recipes.** It exists to keep old recipes working until
+they're migrated; once a recipe is touched, switch to
+`[group('allow-agent')]`.
+
 ## 2. Where Plugin recipes live
 
 lds scans two justfile locations (resolve chain):

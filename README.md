@@ -152,7 +152,11 @@ The skeleton ships with `complexity` / `search-excluding` /
 `remote-url` / `text-stats` / `greet`. See
 [docs/plugin-recipe-authoring.md](docs/plugin-recipe-authoring.md) for
 the full IF contract, parameter mapping, shebang recipes, and the
-macOS-awk / CWD pitfalls.
+macOS-awk / CWD pitfalls. The same doc carries the
+[Plugin vs AllowAgent decision flowchart](docs/plugin-recipe-authoring.md#11-decision-flowchart)
+and the
+[naming-collision guide](docs/plugin-recipe-authoring.md#12-plugin-naming-collision-guide)
+for picking the right group.
 
 #### Additional Global Recipe Directories (`LDS_RECIPE_GLOBAL_DIRS`)
 
