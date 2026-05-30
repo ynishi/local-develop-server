@@ -321,3 +321,90 @@ async fn list_global_plugins_later_dir_overrides() {
         matches[0].source.source_path
     );
 }
+
+// ── Session root existence check tests (K-239) ───────────────────────────────
+
+#[tokio::test]
+async fn run_returns_error_when_session_root_deleted() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_test_justfile(tmp.path());
+    let path = tmp.path().to_path_buf();
+    let session = make_session_with_justfile(&path);
+    let recipe = RecipeModule::new(session);
+
+    std::fs::remove_dir_all(&path).unwrap();
+    assert!(!path.exists(), "temp dir should be deleted before calling run");
+
+    let err = recipe
+        .run("echo", &[], &HashMap::new(), None)
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("session root path no longer exists, please call session_start again"),
+        "expected session-root-gone error, got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn list_plugins_returns_error_when_session_root_deleted() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_test_justfile(tmp.path());
+    let path = tmp.path().to_path_buf();
+    let session = make_session_with_justfile(&path);
+    let recipe = RecipeModule::new(session);
+
+    std::fs::remove_dir_all(&path).unwrap();
+    assert!(
+        !path.exists(),
+        "temp dir should be deleted before calling list_plugins"
+    );
+
+    let err = recipe.list_plugins().await.unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("session root path no longer exists, please call session_start again"),
+        "expected session-root-gone error, got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn recovers_after_session_restart() {
+    // First session: run successfully.
+    let tmp1 = tempfile::tempdir().unwrap();
+    write_test_justfile(tmp1.path());
+    let session1 = make_session_with_justfile(tmp1.path());
+    let recipe1 = RecipeModule::new(session1);
+    let out = recipe1
+        .run("echo", &[], &HashMap::new(), None)
+        .await
+        .unwrap();
+    assert_eq!(out.exit_code, 0);
+
+    // Delete the first session root.
+    let path1 = tmp1.path().to_path_buf();
+    std::fs::remove_dir_all(&path1).unwrap();
+    assert!(!path1.exists());
+
+    // After deletion, run should fail.
+    let err = recipe1
+        .run("echo", &[], &HashMap::new(), None)
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("session root path no longer exists, please call session_start again"),
+        "expected session-root-gone error, got: {err}"
+    );
+
+    // Second session (simulating session_start with a new root): run should succeed.
+    let tmp2 = tempfile::tempdir().unwrap();
+    write_test_justfile(tmp2.path());
+    let session2 = make_session_with_justfile(tmp2.path());
+    let recipe2 = RecipeModule::new(session2);
+    let out2 = recipe2
+        .run("echo", &[], &HashMap::new(), None)
+        .await
+        .unwrap();
+    assert_eq!(out2.exit_code, 0);
+}
