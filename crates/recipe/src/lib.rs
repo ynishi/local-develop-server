@@ -53,6 +53,8 @@ pub enum RecipeError {
     Io(#[from] std::io::Error),
     #[error("just error: {0}")]
     Just(String),
+    #[error("session root path no longer exists, please call session_start again: {}", _0.display())]
+    SessionRootGone(PathBuf),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -101,7 +103,18 @@ impl RecipeModule {
         &self.resolve_chain
     }
 
+    fn check_session_root(&self) -> Result<(), RecipeError> {
+        if !self.session.root().is_dir() {
+            tracing::warn!(root = %self.session.root().display(), "session root no longer exists");
+            return Err(RecipeError::SessionRootGone(
+                self.session.root().to_path_buf(),
+            ));
+        }
+        Ok(())
+    }
+
     pub async fn list_plugins(&self) -> Result<Vec<PluginRecipe>> {
+        self.check_session_root().map_err(|e| anyhow::anyhow!(e))?;
         let mut merged: HashMap<String, PluginRecipe> = HashMap::new();
         for (level, justfile_path) in &self.resolve_chain {
             let recipes = dump_justfile(justfile_path).await?;
@@ -140,6 +153,7 @@ impl RecipeModule {
     }
 
     pub async fn list(&self) -> Result<Vec<RecipeInfo>> {
+        self.check_session_root().map_err(|e| anyhow::anyhow!(e))?;
         self.merged_recipes().await
     }
 
@@ -150,6 +164,7 @@ impl RecipeModule {
         content: &HashMap<String, String>,
         timeout_override: Option<u64>,
     ) -> Result<RecipeOutput, RecipeError> {
+        self.check_session_root()?;
         for arg in args {
             validate_arg_value(arg)?;
         }
@@ -616,5 +631,44 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("bad-key"));
         assert!(msg.contains("[A-Za-z]"));
+    }
+
+    #[test]
+    fn check_session_root_returns_ok_when_root_exists() {
+        let tmp = tempfile::tempdir().unwrap();
+        let session = Arc::new(
+            lds_core::Session::new(lds_core::SessionConfig {
+                root: tmp.path().to_path_buf(),
+                timeout_secs: Some(10),
+                max_output: None,
+                global_recipe_dirs: Vec::new(),
+            })
+            .unwrap(),
+        );
+        let recipe = RecipeModule::new(session);
+        assert!(recipe.check_session_root().is_ok());
+    }
+
+    #[test]
+    fn check_session_root_returns_err_when_root_deleted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().to_path_buf();
+        let session = Arc::new(
+            lds_core::Session::new(lds_core::SessionConfig {
+                root: path.clone(),
+                timeout_secs: Some(10),
+                max_output: None,
+                global_recipe_dirs: Vec::new(),
+            })
+            .unwrap(),
+        );
+        let recipe = RecipeModule::new(session);
+        std::fs::remove_dir_all(&path).unwrap();
+        assert!(!path.exists());
+        let err = recipe.check_session_root().unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("session root path no longer exists, please call session_start again")
+        );
     }
 }
