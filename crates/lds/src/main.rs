@@ -1,3 +1,5 @@
+mod cli;
+
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -924,6 +926,15 @@ fn plugin_to_tool(plugin: lds_recipe::PluginRecipe) -> Tool {
     Tool::new(plugin.name, description, Arc::new(schema))
 }
 
+/// MCP serve mode: initialise the server and run until the transport closes.
+async fn serve_mcp() -> Result<()> {
+    tracing::info!("lds v{}", env!("CARGO_PKG_VERSION"));
+    let server = LdsServer::new();
+    let service = server.serve(rmcp::transport::io::stdio()).await?;
+    service.waiting().await?;
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -931,12 +942,13 @@ async fn main() -> Result<()> {
         .with_writer(std::io::stderr)
         .init();
 
-    tracing::info!("lds v{}", env!("CARGO_PKG_VERSION"));
-
-    let server = LdsServer::new();
-    let service = server.serve(rmcp::transport::io::stdio()).await?;
-    service.waiting().await?;
-    Ok(())
+    // Route to CLI mode when any argument is supplied; otherwise use the
+    // existing MCP stdio serve path (preserves Auto session-start behaviour).
+    if std::env::args_os().count() <= 1 {
+        serve_mcp().await
+    } else {
+        cli::run()
+    }
 }
 
 #[cfg(test)]
