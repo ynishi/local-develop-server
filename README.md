@@ -39,7 +39,15 @@ git module の write scope tracking (owned_worktrees) は Session とは別に m
 
 ### Resolve Chain (recipe)
 
-dotenv-like な階層解決。`~/.config/lds/justfile` (default global) → `LDS_RECIPE_GLOBAL_DIRS` 追加 global → Project (`{root}/justfile`) の順で justfile を探索し、recipe 単位で merge する。name 衝突は後勝ち (Project が最高優先)。
+dotenv-like な階層解決。justfile を以下の優先順 (低 → 高) で探索し、recipe 単位で merge する。name 衝突は後勝ち (Project が最高優先)。
+
+| Priority | Source | Notes |
+|---|---|---|
+| lowest | `~/.config/lds/justfile` (default global) | always scanned |
+| ↑ | `config.toml` `recipes.dirs` | `~/.config/lds/config.toml` で宣言した追加ディレクトリ群 |
+| ↑ | `LDS_RECIPE_GLOBAL_DIRS` env var | colon-separated dirs; legacy / CI 向け |
+| highest | Project (`{root}/justfile`) | session root のプロジェクト justfile |
+
 各 recipe は `ResolveInfo { level, source_path }` を持ち、どこから来たかを追跡する。
 `ResolveLevel` enum に variant を足すだけで Worktree 層等を追加可能。
 
@@ -158,7 +166,44 @@ and the
 [naming-collision guide](docs/plugin-recipe-authoring.md#12-plugin-naming-collision-guide)
 for picking the right group.
 
-#### Additional Global Recipe Directories (`LDS_RECIPE_GLOBAL_DIRS`)
+#### config.toml (Recommended)
+
+The preferred way to configure persistent global recipe directories is
+`~/.config/lds/config.toml`:
+
+```toml
+[recipes]
+dirs = ["/opt/shared-recipes", "~/team-recipes"]
+
+[paths]
+global_justfile = "~/.config/lds/justfile"
+```
+
+Use the `lds recipe-dir` CLI to manage `recipes.dirs` without hand-editing:
+
+```sh
+lds recipe-dir add ~/team-recipes
+lds recipe-dir list
+lds recipe-dir remove ~/team-recipes
+```
+
+> **Tilde expansion**: `lds recipe-dir add ~/team-recipes` expands the path
+> to an absolute path before writing it to `config.toml`. Existing comments
+> and other sections in `config.toml` are preserved (patch-safe write).
+
+**Resolution priority** (low → high):
+`~/.config/lds/justfile` (default) → `config.toml` `recipes.dirs` →
+`LDS_RECIPE_GLOBAL_DIRS` env → project `justfile`
+
+**Restart required**: `config.toml` is read once at process startup.
+Changes to `config.toml` require restarting the lds process to take effect.
+SIGHUP-based reload is not implemented (tracked as a separate issue).
+
+#### Additional Global Recipe Directories — Legacy (`LDS_RECIPE_GLOBAL_DIRS`)
+
+> **Legacy**: prefer `config.toml` + `lds recipe-dir add` (above) for new
+> setups. `LDS_RECIPE_GLOBAL_DIRS` continues to work and is useful for CI /
+> ephemeral environments where a config file is inconvenient.
 
 Set `LDS_RECIPE_GLOBAL_DIRS` to a colon-separated list of directories
 (PATH-style) to load additional global justfiles beyond `~/.config/lds/`:
@@ -178,20 +223,36 @@ Set `LDS_RECIPE_GLOBAL_DIRS` to a colon-separated list of directories
 }
 ```
 
-Precedence (low → high): `~/.config/lds` → `LDS_RECIPE_GLOBAL_DIRS` dirs in
-declaration order → project `justfile`. Same-name recipes in later entries
-override earlier ones; the project justfile always wins.
+When both `config.toml` and `LDS_RECIPE_GLOBAL_DIRS` are set, directories
+from `LDS_RECIPE_GLOBAL_DIRS` take precedence over `config.toml` on name
+collision — env is loaded after config in the resolution chain, following
+the standard CLI convention (cargo, git, gh: env overrides file config).
+Same-name recipes in later entries override earlier ones; the project
+justfile always wins.
+
+#### Alternative: `import '<abs>/justfile'`
+
+Add an `import` statement to `~/.config/lds/justfile` to pull in another
+justfile directly:
+
+```just
+import '/opt/shared/shared-recipes.just'
+```
+
+This approach requires editing `~/.config/lds/justfile` by hand and does
+not appear in `lds recipe-dir list`. It is provided for compatibility with
+existing setups.
 
 ### Global Recipe Contract
 
 Consumer-facing IF for serving recipes via lds. The five points below are
 the contract; they are not optional behaviors.
 
-1. **Discovery paths**: lds reads `~/.config/lds/justfile` (default global)
-   and every directory listed in `LDS_RECIPE_GLOBAL_DIRS`. Recipes brought
-   in by just's native `import '<path>'` from any of those justfiles are
-   also served — there is no separate registration step for imported
-   recipes.
+1. **Discovery paths**: lds reads `~/.config/lds/justfile` (default global),
+   every directory listed in `config.toml` `recipes.dirs`, and every
+   directory listed in `LDS_RECIPE_GLOBAL_DIRS`. Recipes brought in by
+   just's native `import '<path>'` from any of those justfiles are also
+   served — there is no separate registration step for imported recipes.
 
 2. **Group filter** (mutually exclusive routing):
 
@@ -205,16 +266,17 @@ the contract; they are not optional behaviors.
    injection + root `import`), `just --dump` dedupes by recipe name; lds
    does not error and serves a single entry.
 
-4. **Restart required**: lds reads `LDS_RECIPE_GLOBAL_DIRS` and resolves
-   the global justfile set at **process startup**. `recipe_list` /
-   `recipe_run` re-parse justfiles live, but env changes and newly added
-   global directories require a Claude Code restart to take effect.
+4. **Restart required**: lds resolves the global justfile set at **process
+   startup** using `config.toml` and `LDS_RECIPE_GLOBAL_DIRS`. `recipe_list`
+   / `recipe_run` re-parse justfiles live, but changes to `config.toml`,
+   env vars, or newly added global directories require a Claude Code restart
+   to take effect. SIGHUP reload is not implemented.
 
-5. **Two coexisting routes for adding global recipes**: (a) inject via
-   `LDS_RECIPE_GLOBAL_DIRS` env, or (b) add `import '<abs>/justfile'` to
-   `~/.config/lds/justfile`. Both are supported simultaneously. (a) is
-   reproducible via `.mcp.json`; (b) requires editing the user's
-   `~/.config/lds/justfile` (no first-class CLI today — see future work).
+5. **Three coexisting routes for adding global recipes**: (a) declare in
+   `config.toml` `recipes.dirs` via `lds recipe-dir add` (recommended), (b)
+   inject via `LDS_RECIPE_GLOBAL_DIRS` env (legacy / CI), or (c) add
+   `import '<abs>/justfile'` to `~/.config/lds/justfile` (manual). All three
+   are supported simultaneously.
 
 ## License
 

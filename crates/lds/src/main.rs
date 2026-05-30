@@ -1,8 +1,12 @@
+mod cli;
+
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Result;
+use lds_core::config::Config;
 use lds_core::{LdsState, Session, SessionConfig, check_binaries};
 use lds_git::GitModule;
 use lds_recipe::RecipeModule;
@@ -33,18 +37,66 @@ struct Inner {
     sandbox_fs: Option<SandboxFs>,
     sandbox_python: Option<SandboxPython>,
     startup_cwd: Option<PathBuf>,
+    startup_global_dirs: Arc<Vec<PathBuf>>,
+}
+
+/// Merge all configured global recipe directory sources into a single ordered list.
+///
+/// Resolution priority (crux 1):
+///   1. `cfg.paths.global_justfile` — if set, its **directory** is prepended (highest)
+///   2. `cfg.recipes.dirs`          — paths from `~/.config/lds/config.toml`
+///   3. `env_var`                   — `LDS_RECIPE_GLOBAL_DIRS` colon-separated paths (lowest)
+///
+/// Project-level justfiles are NOT included here; `build_resolve_chain` appends
+/// the project justfile automatically when given the session root.
+///
+/// The `env_var` parameter is injectable for unit testing without mutating the
+/// real environment.
+fn resolve_startup_global_dirs(cfg: Config, env_var: Option<OsString>) -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = Vec::new();
+
+    // (highest) paths.global_justfile — its parent directory becomes a recipe dir.
+    if let Some(path) = cfg.paths.global_justfile {
+        // The path may still contain a tilde if the user edited config.toml by hand.
+        // Expand it defensively before storing.
+        let expanded = match lds_core::config::tilde_expand(&path.to_string_lossy()) {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!("failed to expand global_justfile path: {e}");
+                path
+            }
+        };
+        dirs.push(expanded);
+    }
+
+    // (next) recipes.dirs from config.toml — already absolute (tilde-expanded by Config::load).
+    let config_dirs_count = cfg.recipes.dirs.len();
+    dirs.extend(cfg.recipes.dirs);
+
+    // (lowest) LDS_RECIPE_GLOBAL_DIRS env var — colon-separated on Unix.
+    let env_dirs: Vec<PathBuf> = env_var
+        .map(|v| std::env::split_paths(&v).collect())
+        .unwrap_or_default();
+    let env_dirs_count = env_dirs.len();
+    dirs.extend(env_dirs);
+
+    tracing::info!(
+        config_dirs_count,
+        env_dirs_count,
+        "global recipe dirs resolved"
+    );
+
+    dirs
 }
 
 impl LdsServer {
     async fn list_plugin_tools(&self) -> Result<Vec<Tool>, McpError> {
-        let env_dirs: Vec<PathBuf> = std::env::var_os("LDS_RECIPE_GLOBAL_DIRS")
-            .map(|v| std::env::split_paths(&v).collect())
-            .unwrap_or_default();
-        let mut plugins = lds_recipe::list_global_plugins(&env_dirs)
+        let inner = self.state.read().await;
+        let global_dirs = inner.startup_global_dirs.clone();
+        let mut plugins = lds_recipe::list_global_plugins(&*global_dirs)
             .await
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
-        let inner = self.state.read().await;
         if let Some(recipe) = inner.recipe.as_ref() {
             let project = recipe
                 .list_plugins()
@@ -86,10 +138,8 @@ impl LdsServer {
             return Err(no_session_error());
         };
 
-        let env_dirs: Vec<PathBuf> = std::env::var_os("LDS_RECIPE_GLOBAL_DIRS")
-            .map(|v| std::env::split_paths(&v).collect())
-            .unwrap_or_default();
-        let mut plugins = lds_recipe::list_global_plugins(&env_dirs)
+        let global_dirs = inner.startup_global_dirs.clone();
+        let mut plugins = lds_recipe::list_global_plugins(&*global_dirs)
             .await
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         plugins.extend(
@@ -139,6 +189,9 @@ impl LdsServer {
 
     fn new() -> Self {
         let startup_cwd = std::env::current_dir().ok();
+        let cfg = Config::load_or_default();
+        let env_var = std::env::var_os("LDS_RECIPE_GLOBAL_DIRS");
+        let startup_global_dirs = Arc::new(resolve_startup_global_dirs(cfg, env_var));
         Self {
             state: Arc::new(RwLock::new(Inner {
                 lds: LdsState::new(),
@@ -147,6 +200,7 @@ impl LdsServer {
                 sandbox_fs: None,
                 sandbox_python: None,
                 startup_cwd,
+                startup_global_dirs,
             })),
         }
     }
@@ -337,16 +391,15 @@ impl LdsServer {
     ) -> Result<CallToolResult, McpError> {
         let mut inner = self.state.write().await;
         // Adapter: compose global_recipe_dirs from the MCP single arg (if any)
-        // followed by LDS_RECIPE_GLOBAL_DIRS env dirs in declaration order.
-        // Precedence (low→high): default ~/.config/lds → MCP arg → ENV dirs → project.
-        let env_dirs: Vec<PathBuf> = std::env::var_os("LDS_RECIPE_GLOBAL_DIRS")
-            .map(|v| std::env::split_paths(&v).collect())
-            .unwrap_or_default();
+        // followed by startup_global_dirs (config.toml dirs then env dirs) in
+        // declaration order.
+        // Precedence (low→high): default ~/.config/lds → config.toml dirs → env dirs → MCP wire arg → project.
+        let startup_dirs = inner.startup_global_dirs.clone();
         let mut global_recipe_dirs: Vec<PathBuf> = req
             .global_recipe_dir
             .map(|s| vec![PathBuf::from(s)])
             .unwrap_or_default();
-        global_recipe_dirs.extend(env_dirs);
+        global_recipe_dirs.extend(startup_dirs.iter().cloned());
         let config = SessionConfig {
             root: req.root.into(),
             timeout_secs: req.timeout_secs,
@@ -813,15 +866,13 @@ impl ServerHandler for LdsServer {
                 && let Some(cwd) = inner.startup_cwd.clone()
                 && is_project_root(&cwd)
             {
-                // Auto-start: read ENV dirs so plugins are resolved correctly.
-                let env_dirs: Vec<PathBuf> = std::env::var_os("LDS_RECIPE_GLOBAL_DIRS")
-                    .map(|v| std::env::split_paths(&v).collect())
-                    .unwrap_or_default();
+                // Auto-start: use startup_global_dirs (config.toml + env) so plugins are resolved correctly.
+                let global_recipe_dirs = (*inner.startup_global_dirs).clone();
                 let config = SessionConfig {
                     root: cwd,
                     timeout_secs: None,
                     max_output: None,
-                    global_recipe_dirs: env_dirs,
+                    global_recipe_dirs,
                 };
                 build_session_modules(&mut inner, config)?;
             }
@@ -875,6 +926,15 @@ fn plugin_to_tool(plugin: lds_recipe::PluginRecipe) -> Tool {
     Tool::new(plugin.name, description, Arc::new(schema))
 }
 
+/// MCP serve mode: initialise the server and run until the transport closes.
+async fn serve_mcp() -> Result<()> {
+    tracing::info!("lds v{}", env!("CARGO_PKG_VERSION"));
+    let server = LdsServer::new();
+    let service = server.serve(rmcp::transport::io::stdio()).await?;
+    service.waiting().await?;
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -882,10 +942,90 @@ async fn main() -> Result<()> {
         .with_writer(std::io::stderr)
         .init();
 
-    tracing::info!("lds v{}", env!("CARGO_PKG_VERSION"));
+    // Route to CLI mode when any argument is supplied; otherwise use the
+    // existing MCP stdio serve path (preserves Auto session-start behaviour).
+    if std::env::args_os().count() <= 1 {
+        serve_mcp().await
+    } else {
+        cli::run()
+    }
+}
 
-    let server = LdsServer::new();
-    let service = server.serve(rmcp::transport::io::stdio()).await?;
-    service.waiting().await?;
-    Ok(())
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lds_core::config::{Config, Paths, Recipes};
+
+    /// Verify that `resolve_startup_global_dirs` merges sources in the correct
+    /// priority order: global_justfile → config.recipes.dirs → env_dirs.
+    ///
+    /// This test exercises crux 1 by injecting all three sources and asserting
+    /// that the resulting Vec preserves the expected ordering without skipping
+    /// any source.
+    #[test]
+    fn test_resolve_startup_global_dirs_priority_order() {
+        let cfg = Config {
+            recipes: Recipes {
+                dirs: vec![PathBuf::from("/config/dir1"), PathBuf::from("/config/dir2")],
+            },
+            paths: Paths {
+                global_justfile: Some(PathBuf::from("/custom/justfile")),
+            },
+        };
+
+        // env_var with two paths (colon-separated on Unix, semicolon on Windows).
+        #[cfg(unix)]
+        let env_val = OsString::from("/env/dir1:/env/dir2");
+        #[cfg(windows)]
+        let env_val = OsString::from("/env/dir1;/env/dir2");
+
+        let dirs = resolve_startup_global_dirs(cfg, Some(env_val));
+
+        // Expected order:
+        //   [0] global_justfile path (highest)
+        //   [1] config dir 1
+        //   [2] config dir 2
+        //   [3] env dir 1 (lowest from env)
+        //   [4] env dir 2
+        assert_eq!(dirs.len(), 5, "expected 5 entries, got: {dirs:?}");
+        assert_eq!(dirs[0], PathBuf::from("/custom/justfile"));
+        assert_eq!(dirs[1], PathBuf::from("/config/dir1"));
+        assert_eq!(dirs[2], PathBuf::from("/config/dir2"));
+        assert_eq!(dirs[3], PathBuf::from("/env/dir1"));
+        assert_eq!(dirs[4], PathBuf::from("/env/dir2"));
+    }
+
+    /// When no env_var is provided and config is default, the result is empty.
+    #[test]
+    fn test_resolve_startup_global_dirs_all_empty() {
+        let dirs = resolve_startup_global_dirs(Config::default(), None);
+        assert!(dirs.is_empty(), "expected empty dirs, got: {dirs:?}");
+    }
+
+    /// Only env var provided — config is default.
+    #[test]
+    fn test_resolve_startup_global_dirs_env_only() {
+        #[cfg(unix)]
+        let env_val = OsString::from("/env/only");
+        #[cfg(windows)]
+        let env_val = OsString::from("/env/only");
+
+        let dirs = resolve_startup_global_dirs(Config::default(), Some(env_val));
+        assert_eq!(dirs, vec![PathBuf::from("/env/only")]);
+    }
+
+    /// Only config.recipes.dirs provided — no env, no global_justfile.
+    #[test]
+    fn test_resolve_startup_global_dirs_config_only() {
+        let cfg = Config {
+            recipes: Recipes {
+                dirs: vec![PathBuf::from("/config/only")],
+            },
+            paths: Paths {
+                global_justfile: None,
+            },
+        };
+        let dirs = resolve_startup_global_dirs(cfg, None);
+        assert_eq!(dirs, vec![PathBuf::from("/config/only")]);
+    }
 }

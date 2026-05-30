@@ -20,6 +20,8 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 rmcp.workspace = true
 schemars.workspace = true
+clap.workspace = true
+dirs.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
