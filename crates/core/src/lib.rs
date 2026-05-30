@@ -5,6 +5,7 @@
 //! output truncation, global recipe dirs — live here so modules don't
 //! duplicate configuration.
 
+pub mod config;
 pub mod log_store;
 
 use std::path::{Path, PathBuf};
