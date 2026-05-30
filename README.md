@@ -178,6 +178,40 @@ Precedence (low → high): `~/.config/lds` → `LDS_RECIPE_GLOBAL_DIRS` dirs in
 declaration order → project `justfile`. Same-name recipes in later entries
 override earlier ones; the project justfile always wins.
 
+### Global Recipe Contract
+
+Consumer-facing IF for serving recipes via lds. The five points below are
+the contract; they are not optional behaviors.
+
+1. **Discovery paths**: lds reads `~/.config/lds/justfile` (default global)
+   and every directory listed in `LDS_RECIPE_GLOBAL_DIRS`. Recipes brought
+   in by just's native `import '<path>'` from any of those justfiles are
+   also served — there is no separate registration step for imported
+   recipes.
+
+2. **Group filter** (mutually exclusive routing):
+
+   | Tag | Routing |
+   |---|---|
+   | `[group('lds-plugin')]` | Registered as a dedicated MCP tool at startup (`mcp__lds__<name>`) **and** listed by `recipe_list` / runnable via `recipe_run`. Intended for global utilities. |
+   | `[group('allow-agent')]` | Listed by `recipe_list` and runnable via `recipe_run` only. Not exposed as an individual MCP tool. Intended for project/task recipes invoked through `recipe_run`. |
+   | no group | **Excluded.** Not served at all (legacy `# [allow-agent]` doc comment is still honored for backward compatibility). |
+
+3. **Dedup**: When the same recipe arrives through two paths (e.g. env
+   injection + root `import`), `just --dump` dedupes by recipe name; lds
+   does not error and serves a single entry.
+
+4. **Restart required**: lds reads `LDS_RECIPE_GLOBAL_DIRS` and resolves
+   the global justfile set at **process startup**. `recipe_list` /
+   `recipe_run` re-parse justfiles live, but env changes and newly added
+   global directories require a Claude Code restart to take effect.
+
+5. **Two coexisting routes for adding global recipes**: (a) inject via
+   `LDS_RECIPE_GLOBAL_DIRS` env, or (b) add `import '<abs>/justfile'` to
+   `~/.config/lds/justfile`. Both are supported simultaneously. (a) is
+   reproducible via `.mcp.json`; (b) requires editing the user's
+   `~/.config/lds/justfile` (no first-class CLI today — see future work).
+
 ## License
 
 MIT
