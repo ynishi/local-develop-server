@@ -37,6 +37,8 @@ git module の write scope tracking (owned_worktrees) は Session とは別に m
 
 **No-session error**: セッションが存在しない状態でツールを呼んだ場合、全ハンドラで JSON-RPC エラーコード `-32603` を返す (メッセージ: `"no session"`)。
 
+**Session root gone error**: `session_start` 後にセッションルートが削除された場合 (例: worktree を手動削除した後も session が残っている場合)、recipe 系 tool (`recipe_run` / `recipe_list` / `recipe_list_plugins`) は `"session root path no longer exists, please call session_start again: <path>"` エラーを返す。`session_start` を有効なルートで再呼び出しすることで回復できる。
+
 ### Resolve Chain (recipe)
 
 dotenv-like な階層解決。justfile を以下の優先順 (低 → 高) で探索し、recipe 単位で merge する。name 衝突は後勝ち (Project が最高優先)。
