@@ -12,8 +12,6 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Result, bail};
-
 const DEFAULT_TIMEOUT_SECS: u64 = 60;
 const DEFAULT_MAX_OUTPUT: usize = 102_400; // 100KB
 
@@ -43,6 +41,15 @@ pub enum SessionError {
     RootGone(PathBuf),
 }
 
+/// Errors that can occur during session construction or access.
+#[derive(Debug, thiserror::Error)]
+pub enum CoreError {
+    #[error("session root does not exist: {}", _0.display())]
+    RootNotFound(PathBuf),
+    #[error("no active session — call session_start first")]
+    NoSession,
+}
+
 /// Immutable session state created by `session_start`.
 ///
 /// Cloned (via `Arc`) into each module. Holds the project root and
@@ -57,10 +64,11 @@ pub struct Session {
 }
 
 impl Session {
-    pub fn new(config: SessionConfig) -> Result<Self> {
+    pub fn new(config: SessionConfig) -> Result<Self, CoreError> {
         let root = config.root;
         if !root.is_dir() {
-            bail!("session root does not exist: {}", root.display());
+            tracing::warn!(root = %root.display(), "session root does not exist");
+            return Err(CoreError::RootNotFound(root));
         }
         let session_id = uuid_v4();
         let timeout = Duration::from_secs(config.timeout_secs.unwrap_or(DEFAULT_TIMEOUT_SECS));
@@ -130,16 +138,14 @@ impl LdsState {
         Self { session: None }
     }
 
-    pub fn start_session(&mut self, config: SessionConfig) -> Result<Arc<Session>> {
+    pub fn start_session(&mut self, config: SessionConfig) -> Result<Arc<Session>, CoreError> {
         let session = Arc::new(Session::new(config)?);
         self.session = Some(Arc::clone(&session));
         Ok(session)
     }
 
-    pub fn session(&self) -> Result<&Arc<Session>> {
-        self.session
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("no active session — call session_start first"))
+    pub fn session(&self) -> Result<&Arc<Session>, CoreError> {
+        self.session.as_ref().ok_or(CoreError::NoSession)
     }
 }
 
@@ -250,6 +256,33 @@ fn uuid_v4() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── CoreError Display invariants (I1 / I2) ───────────────────────────────
+
+    #[test]
+    fn core_error_root_not_found_display_contains_prefix_and_path() {
+        let path = PathBuf::from("/some/missing/root");
+        let err = CoreError::RootNotFound(path.clone());
+        let msg = err.to_string();
+        assert!(
+            msg.contains("session root does not exist: "),
+            "I1: message must start with invariant prefix, got: {msg}"
+        );
+        assert!(
+            msg.contains("/some/missing/root"),
+            "I1: message must contain the path, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn core_error_no_session_display_matches_invariant() {
+        let err = CoreError::NoSession;
+        let msg = err.to_string();
+        assert_eq!(
+            msg, "no active session \u{2014} call session_start first",
+            "I2: message must exactly match invariant string"
+        );
+    }
 
     // ── SessionError / Session::ensure_alive ─────────────────────────────────
 
