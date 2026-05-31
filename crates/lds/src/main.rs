@@ -93,7 +93,7 @@ impl LdsServer {
     async fn list_plugin_tools(&self) -> Result<Vec<Tool>, McpError> {
         let inner = self.state.read().await;
         let global_dirs = inner.startup_global_dirs.clone();
-        let mut plugins = lds_recipe::list_global_plugins(&*global_dirs)
+        let mut plugins = lds_recipe::list_global_plugins(&global_dirs)
             .await
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
@@ -139,7 +139,7 @@ impl LdsServer {
         };
 
         let global_dirs = inner.startup_global_dirs.clone();
-        let mut plugins = lds_recipe::list_global_plugins(&*global_dirs)
+        let mut plugins = lds_recipe::list_global_plugins(&global_dirs)
             .await
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         plugins.extend(
@@ -879,9 +879,16 @@ impl ServerHandler for LdsServer {
             // write guard drops here — before try_plugin_call takes a read guard
         }
 
-        if let Some(result) = self
-            .try_plugin_call(&request.name, request.arguments.as_ref())
-            .await?
+        // Skip plugin lookup for `session_start` so it can recover after the
+        // previous session's root has been removed. Without this guard,
+        // RecipeModule::list_plugins (called inside try_plugin_call) hits the
+        // K-239 check_session_root on the dead session and rejects session_start
+        // itself — breaking the very recovery path the K-239 error message
+        // promises. Mirrors the auto-start gate exemption above.
+        if request.name != "session_start"
+            && let Some(result) = self
+                .try_plugin_call(&request.name, request.arguments.as_ref())
+                .await?
         {
             return Ok(result);
         }
