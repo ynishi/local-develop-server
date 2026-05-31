@@ -19,12 +19,8 @@ use tempfile::TempDir;
 /// Cargo sets `CARGO_BIN_EXE_lds` in integration test processes; we fall back
 /// to `<manifest_dir>/../../target/debug/lds` for direct `cargo test` runs.
 fn lds_bin() -> String {
-    std::env::var("CARGO_BIN_EXE_lds").unwrap_or_else(|_| {
-        format!(
-            "{}/../../target/debug/lds",
-            env!("CARGO_MANIFEST_DIR")
-        )
-    })
+    std::env::var("CARGO_BIN_EXE_lds")
+        .unwrap_or_else(|_| format!("{}/../../target/debug/lds", env!("CARGO_MANIFEST_DIR")))
 }
 
 /// Spawn `lds <args>` with `HOME` overridden to `home_dir`.
@@ -212,7 +208,11 @@ fn test_remove_deletes_entry() {
     let stdout = String::from_utf8_lossy(&list_out.stdout);
     let lines: Vec<&str> = stdout.lines().collect();
 
-    assert_eq!(lines.len(), 1, "only one entry should remain; got:\n{stdout}");
+    assert_eq!(
+        lines.len(),
+        1,
+        "only one entry should remain; got:\n{stdout}"
+    );
     assert!(
         lines[0].contains(dir_b.to_string_lossy().as_ref()),
         "remaining entry should be dir_b; got:\n{stdout}"
@@ -225,20 +225,13 @@ fn test_remove_not_found_exits_one() {
     let tmp = TempDir::new().expect("TempDir::new");
     let home = tmp.path();
 
-    let out = run_lds(
-        home,
-        &["recipe-dir", "remove", "/no/such/directory"],
-    );
+    let out = run_lds(home, &["recipe-dir", "remove", "/no/such/directory"]);
 
     assert!(
         !out.status.success(),
         "remove of non-existent path should exit non-zero"
     );
-    assert_eq!(
-        out.status.code(),
-        Some(1),
-        "exit code should be 1"
-    );
+    assert_eq!(out.status.code(), Some(1), "exit code should be 1");
 
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
@@ -278,5 +271,8 @@ fn test_add_duplicate_is_noop() {
     let list_out = run_lds(home, &["recipe-dir", "list"]);
     let stdout = String::from_utf8_lossy(&list_out.stdout);
     let count = stdout.lines().count();
-    assert_eq!(count, 1, "should have exactly 1 entry after duplicate add; got:\n{stdout}");
+    assert_eq!(
+        count, 1,
+        "should have exactly 1 entry after duplicate add; got:\n{stdout}"
+    );
 }
