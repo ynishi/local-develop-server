@@ -289,3 +289,111 @@ async fn no_session_error_has_internal_error_code() {
 
     client.cancel().await.unwrap();
 }
+
+#[tokio::test]
+async fn session_start_recovers_after_previous_root_deleted() {
+    // Regression guard for K-239: after the session root has been deleted,
+    // `session_start` must succeed on a new root even though
+    // `try_plugin_call` (via RecipeModule::list_plugins / check_session_root)
+    // would have rejected the call on the dead session before this fix.
+    //
+    // Step 1: create tempdir A with a minimal justfile.
+    let dir_a = tempfile::tempdir().expect("tempdir A");
+    std::fs::write(dir_a.path().join("justfile"), "default:\n\t@echo ok\n").unwrap();
+
+    // Step 2: use connect() (non-ProjectRoot spawn) so auto-start does NOT
+    // fire — this isolates the session_start path from the auto-start gate.
+    let client = connect().await;
+
+    // Step 3: session_start with root = A — must succeed.
+    let result = client
+        .peer()
+        .call_tool(call_params(
+            "session_start",
+            json!({ "root": dir_a.path().to_str().unwrap() }),
+        ))
+        .await
+        .unwrap();
+    let text = extract_text(&result);
+    assert!(
+        text.contains("session started"),
+        "step 3: session_start(A) should succeed, got: {text}"
+    );
+
+    // Step 4: recipe_list — sanity check that the session is functional.
+    let result = client
+        .peer()
+        .call_tool(call_params("recipe_list", json!({})))
+        .await
+        .unwrap();
+    assert!(
+        result.is_error != Some(true),
+        "step 4: recipe_list after session_start(A) should succeed, got: {:?}",
+        extract_text(&result)
+    );
+
+    // Step 5: delete dir A — the session root is now gone.
+    std::fs::remove_dir_all(dir_a.path()).unwrap();
+
+    // Step 6: recipe_list must fail with SessionRootGone.
+    let outcome = client
+        .peer()
+        .call_tool(call_params("recipe_list", json!({})))
+        .await;
+    match outcome {
+        Err(ServiceError::McpError(ref err_data)) => {
+            assert!(
+                err_data
+                    .message
+                    .contains("session root path no longer exists"),
+                "step 6: expected 'session root path no longer exists' in error message, got: {}",
+                err_data.message
+            );
+        }
+        Ok(result) => {
+            // Some MCP implementations surface errors as Ok(isError:true).
+            let text = extract_text(&result);
+            assert!(
+                result.is_error == Some(true)
+                    && text.contains("session root path no longer exists"),
+                "step 6: expected SessionRootGone error, got Ok: {text}"
+            );
+        }
+        Err(other) => panic!("step 6: unexpected error variant: {other:?}"),
+    }
+
+    // Step 7: create tempdir B with a minimal justfile.
+    let dir_b = tempfile::tempdir().expect("tempdir B");
+    std::fs::write(dir_b.path().join("justfile"), "default:\n\t@echo ok\n").unwrap();
+
+    // Step 8: session_start with root = B — this is the core assertion of the fix.
+    // Before the fix, try_plugin_call would hit check_session_root on the dead
+    // session A and reject session_start entirely.
+    let result = client
+        .peer()
+        .call_tool(call_params(
+            "session_start",
+            json!({ "root": dir_b.path().to_str().unwrap() }),
+        ))
+        .await
+        .unwrap();
+    let text = extract_text(&result);
+    assert!(
+        text.contains("session started"),
+        "step 8: session_start(B) must succeed after root A was deleted, got: {text}"
+    );
+
+    // Step 9: recipe_list with B — confirm the new session is fully functional.
+    let result = client
+        .peer()
+        .call_tool(call_params("recipe_list", json!({})))
+        .await
+        .unwrap();
+    assert!(
+        result.is_error != Some(true),
+        "step 9: recipe_list after session_start(B) should succeed, got: {:?}",
+        extract_text(&result)
+    );
+
+    client.cancel().await.unwrap();
+}

@@ -86,8 +86,7 @@ fn handle_recipe_dir(action: RecipeDirAction) -> Result<()> {
 /// `recipe-dir add <path>`: tilde-expand → absolute → deduplicate → patch-safe write.
 fn cmd_add(raw: &str) -> Result<()> {
     // 1. Expand tilde (crux 2: tilde literal must not reach disk).
-    let expanded =
-        tilde_expand(raw).with_context(|| format!("failed to expand path '{raw}'"))?;
+    let expanded = tilde_expand(raw).with_context(|| format!("failed to expand path '{raw}'"))?;
 
     // 2. Make absolute (works even if the directory does not exist yet).
     let abs = std::path::absolute(&expanded)
@@ -99,7 +98,10 @@ fn cmd_add(raw: &str) -> Result<()> {
 
     // 4. Deduplicate — no-op with warning when already present.
     if config.recipes.dirs.contains(&abs) {
-        eprintln!("warn: '{}' is already in recipes.dirs — skipping", abs.display());
+        eprintln!(
+            "warn: '{}' is already in recipes.dirs — skipping",
+            abs.display()
+        );
         return Ok(());
     }
 
@@ -124,8 +126,7 @@ fn cmd_list() -> Result<()> {
 /// `recipe-dir remove <path>`: expand → absolute → retain all non-matching → write back.
 fn cmd_remove(raw: &str) -> Result<()> {
     // 1. Expand and absolutize the target path the same way `add` does.
-    let expanded =
-        tilde_expand(raw).with_context(|| format!("failed to expand path '{raw}'"))?;
+    let expanded = tilde_expand(raw).with_context(|| format!("failed to expand path '{raw}'"))?;
     let target = std::path::absolute(&expanded)
         .with_context(|| format!("failed to make path absolute: {}", expanded.display()))?;
 
