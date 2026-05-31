@@ -33,6 +33,16 @@ pub struct SessionConfig {
     pub global_recipe_dirs: Vec<PathBuf>,
 }
 
+/// Errors that can occur during a [`Session`]'s post-construction lifecycle.
+#[derive(Debug, thiserror::Error)]
+pub enum SessionError {
+    #[error(
+        "session root path no longer exists, please call session_start again: {}",
+        _0.display()
+    )]
+    RootGone(PathBuf),
+}
+
 /// Immutable session state created by `session_start`.
 ///
 /// Cloned (via `Arc`) into each module. Holds the project root and
@@ -90,6 +100,19 @@ impl Session {
 
     pub fn global_recipe_dirs(&self) -> &[PathBuf] {
         &self.global_recipe_dirs
+    }
+
+    /// Check that the session root directory still exists.
+    ///
+    /// Call this at each entry point (e.g. `list`, `run`) to detect a deleted
+    /// root before attempting I/O. Returns [`SessionError::RootGone`] if the
+    /// directory no longer exists.
+    pub fn ensure_alive(&self) -> Result<(), SessionError> {
+        if !self.root.is_dir() {
+            tracing::warn!(root = %self.root.display(), "session root no longer exists");
+            return Err(SessionError::RootGone(self.root.clone()));
+        }
+        Ok(())
     }
 }
 
@@ -227,6 +250,55 @@ fn uuid_v4() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── SessionError / Session::ensure_alive ─────────────────────────────────
+
+    #[test]
+    fn session_error_root_gone_message_contains_invariant_substring() {
+        use std::path::PathBuf;
+        let path = PathBuf::from("/tmp/gone");
+        let err = SessionError::RootGone(path.clone());
+        let msg = err.to_string();
+        assert!(
+            msg.contains("session root path no longer exists, please call session_start again"),
+            "error message must contain the K-239 recovery substring, got: {msg}"
+        );
+        assert!(
+            msg.contains("/tmp/gone"),
+            "error message must include the path, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn ensure_alive_ok_when_root_exists() {
+        let tmp = tempfile::tempdir().unwrap();
+        let session = Session::new(SessionConfig {
+            root: tmp.path().to_path_buf(),
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(session.ensure_alive().is_ok());
+    }
+
+    #[test]
+    fn ensure_alive_err_when_root_deleted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().to_path_buf();
+        let session = Session::new(SessionConfig {
+            root: path.clone(),
+            ..Default::default()
+        })
+        .unwrap();
+        std::fs::remove_dir_all(&path).unwrap();
+        let err = session.ensure_alive().unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("session root path no longer exists, please call session_start again"),
+            "expected K-239 substring, got: {msg}"
+        );
+    }
+
+    // ── truncate_output ──────────────────────────────────────────────────────
 
     #[test]
     fn truncate_short_input() {
