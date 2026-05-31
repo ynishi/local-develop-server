@@ -3,8 +3,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use lds_core::log_store::HasId;
-use lds_core::{Session, SessionConfig};
-use lds_recipe::{RecipeModule, list_global_plugins};
+use lds_core::{Session, SessionConfig, SessionError};
+use lds_recipe::{RecipeError, RecipeModule, list_global_plugins};
 
 fn make_session_with_justfile(dir: &std::path::Path) -> Arc<Session> {
     Arc::new(
@@ -341,10 +341,16 @@ async fn run_returns_error_when_session_root_deleted() {
         .run("echo", &[], &HashMap::new(), None)
         .await
         .unwrap_err();
+    // Variant check: must be RecipeError::Session(SessionError::RootGone(_))
+    assert!(
+        matches!(err, RecipeError::Session(SessionError::RootGone(_))),
+        "expected RecipeError::Session(SessionError::RootGone(_)), got: {err:?}"
+    );
+    // Substring check: K-239 recovery message must reach the error string
     assert!(
         err.to_string()
             .contains("session root path no longer exists, please call session_start again"),
-        "expected session-root-gone error, got: {err}"
+        "expected session-root-gone error substring, got: {err}"
     );
 }
 
@@ -363,10 +369,19 @@ async fn list_plugins_returns_error_when_session_root_deleted() {
     );
 
     let err = recipe.list_plugins().await.unwrap_err();
+    // Substring check: K-239 recovery message must reach the error string
     assert!(
         err.to_string()
             .contains("session root path no longer exists, please call session_start again"),
-        "expected session-root-gone error, got: {err}"
+        "expected session-root-gone error substring, got: {err}"
+    );
+    // Downcast check: underlying error must be SessionError::RootGone
+    let session_err = err
+        .downcast_ref::<SessionError>()
+        .expect("error should downcast to SessionError");
+    assert!(
+        matches!(session_err, SessionError::RootGone(_)),
+        "expected SessionError::RootGone, got: {session_err:?}"
     );
 }
 
@@ -393,10 +408,16 @@ async fn recovers_after_session_restart() {
         .run("echo", &[], &HashMap::new(), None)
         .await
         .unwrap_err();
+    // Variant check: must be RecipeError::Session(SessionError::RootGone(_))
+    assert!(
+        matches!(err, RecipeError::Session(SessionError::RootGone(_))),
+        "expected RecipeError::Session(SessionError::RootGone(_)), got: {err:?}"
+    );
+    // Substring check: K-239 recovery message must reach the error string
     assert!(
         err.to_string()
             .contains("session root path no longer exists, please call session_start again"),
-        "expected session-root-gone error, got: {err}"
+        "expected session-root-gone error substring, got: {err}"
     );
 
     // Second session (simulating session_start with a new root): run should succeed.
