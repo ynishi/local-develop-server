@@ -870,9 +870,8 @@ impl ServerHandler for LdsServer {
                 let global_recipe_dirs = (*inner.startup_global_dirs).clone();
                 let config = SessionConfig {
                     root: cwd,
-                    timeout_secs: None,
-                    max_output: None,
                     global_recipe_dirs,
+                    ..Default::default()
                 };
                 build_session_modules(&mut inner, config)?;
             }
