@@ -11,8 +11,7 @@ fn make_session_with_justfile(dir: &std::path::Path) -> Arc<Session> {
         Session::new(SessionConfig {
             root: dir.to_path_buf(),
             timeout_secs: Some(10),
-            max_output: None,
-            global_recipe_dirs: Vec::new(),
+            ..Default::default()
         })
         .unwrap(),
     )
@@ -225,8 +224,8 @@ async fn resolve_chain_preserves_global_dirs_order() {
         Session::new(SessionConfig {
             root: project.path().to_path_buf(),
             timeout_secs: Some(10),
-            max_output: None,
             global_recipe_dirs: vec![dir_a.path().to_path_buf(), dir_b.path().to_path_buf()],
+            ..Default::default()
         })
         .unwrap(),
     );
@@ -280,8 +279,8 @@ async fn later_global_dir_overrides_earlier_on_collision() {
         Session::new(SessionConfig {
             root: project.path().to_path_buf(),
             timeout_secs: Some(10),
-            max_output: None,
             global_recipe_dirs: vec![dir_a.path().to_path_buf(), dir_b.path().to_path_buf()],
+            ..Default::default()
         })
         .unwrap(),
     );
@@ -333,7 +332,10 @@ async fn run_returns_error_when_session_root_deleted() {
     let recipe = RecipeModule::new(session);
 
     std::fs::remove_dir_all(&path).unwrap();
-    assert!(!path.exists(), "temp dir should be deleted before calling run");
+    assert!(
+        !path.exists(),
+        "temp dir should be deleted before calling run"
+    );
 
     let err = recipe
         .run("echo", &[], &HashMap::new(), None)

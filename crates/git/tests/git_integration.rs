@@ -27,8 +27,7 @@ fn make_session(root: &Path) -> Arc<Session> {
         Session::new(SessionConfig {
             root: root.to_path_buf(),
             timeout_secs: Some(30),
-            max_output: None,
-            global_recipe_dirs: Vec::new(),
+            ..Default::default()
         })
         .unwrap(),
     )
