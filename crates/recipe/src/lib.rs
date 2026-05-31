@@ -640,8 +640,7 @@ mod tests {
             lds_core::Session::new(lds_core::SessionConfig {
                 root: tmp.path().to_path_buf(),
                 timeout_secs: Some(10),
-                max_output: None,
-                global_recipe_dirs: Vec::new(),
+                ..Default::default()
             })
             .unwrap(),
         );
@@ -657,8 +656,7 @@ mod tests {
             lds_core::Session::new(lds_core::SessionConfig {
                 root: path.clone(),
                 timeout_secs: Some(10),
-                max_output: None,
-                global_recipe_dirs: Vec::new(),
+                ..Default::default()
             })
             .unwrap(),
         );

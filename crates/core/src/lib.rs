@@ -19,6 +19,7 @@ const DEFAULT_MAX_OUTPUT: usize = 102_400; // 100KB
 
 /// Configuration passed to [`Session::new`]. Optional fields fall back
 /// to sensible defaults (60s timeout, 100KB output limit).
+#[derive(Debug, Default)]
 pub struct SessionConfig {
     pub root: PathBuf,
     pub timeout_secs: Option<u64>,
