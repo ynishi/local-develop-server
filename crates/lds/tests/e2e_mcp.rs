@@ -169,18 +169,38 @@ async fn git_status_round_trip() {
         .await
         .unwrap();
 
-    let result = client
+    // --- clean phase ---
+    // A freshly-initialised repo with only a committed README.md.
+    // GitModule::status() uses git2::Repository::statuses() which returns
+    // no entries for a clean tree, producing "".  The .worktrees/ dir created
+    // by TempRepo::new() is untracked and may appear as Status(WT_NEW), so we
+    // accept either an empty string or a Status(…) debug-format entry.
+    let result_clean = client
         .peer()
         .call_tool(call_params("git_status", json!({})))
         .await
         .unwrap();
-
-    // A clean tempdir repo produces empty status output — the wire
-    // result should be Ok with empty or whitespace-only content.
-    let text = extract_text(&result);
+    let text_clean = extract_text(&result_clean);
     assert!(
-        text.trim().is_empty() || text.contains("CURRENT") || text.contains("\n"),
-        "unexpected status text: {text:?}"
+        text_clean.trim().is_empty() || text_clean.contains("Status("),
+        "clean repo: expected empty output or Status(...) entries, got: {text_clean:?}"
+    );
+
+    // --- dirty phase ---
+    // Write an untracked file; git2 will report it as WT_NEW.
+    // The output must contain the Status(…) debug-format token and the
+    // file-path token "dirty.txt", verifying the structural contract of
+    // GitModule::status() on a modified working tree.
+    std::fs::write(repo.dir.path().join("dirty.txt"), "content\n").unwrap();
+    let result_dirty = client
+        .peer()
+        .call_tool(call_params("git_status", json!({})))
+        .await
+        .unwrap();
+    let text_dirty = extract_text(&result_dirty);
+    assert!(
+        text_dirty.contains("Status(") && text_dirty.contains("dirty.txt"),
+        "dirty repo: expected Status(...) entry mentioning dirty.txt, got: {text_dirty:?}"
     );
 
     client.cancel().await.unwrap();
