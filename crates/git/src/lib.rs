@@ -271,8 +271,11 @@ impl GitModule {
         git_cmd(working_dir, &["commit", "-m", message])?;
 
         let hash = git_cmd(working_dir, &["rev-parse", "--short", "HEAD"])?;
-        let files_changed =
-            git_cmd(working_dir, &["diff", "--name-only", "HEAD~1..HEAD"]).unwrap_or_default();
+        let files_changed = git_cmd(working_dir, &["diff", "--name-only", "HEAD~1..HEAD"])
+            .unwrap_or_else(|e| {
+                tracing::warn!(error = %e, "git diff HEAD~1..HEAD failed (initial commit?)");
+                String::new()
+            });
 
         let count = files_changed.lines().count();
         Ok(format!(

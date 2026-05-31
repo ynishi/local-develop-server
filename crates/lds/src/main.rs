@@ -839,7 +839,10 @@ impl ServerHandler for LdsServer {
         _context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
         let mut tools = Self::tool_router().list_all();
-        let plugins = self.list_plugin_tools().await.unwrap_or_default();
+        let plugins = self.list_plugin_tools().await.unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "list_plugin_tools failed during list_tools");
+            Vec::new()
+        });
         tools.extend(plugins);
         tools.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(ListToolsResult {

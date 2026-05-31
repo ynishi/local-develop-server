@@ -482,14 +482,20 @@ fn validate_arg_value(value: &str) -> Result<(), RecipeError> {
 fn now_epoch() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
+        .unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "system clock before unix epoch in now_epoch");
+            std::time::Duration::default()
+        })
         .as_secs()
 }
 
 fn exec_uuid() -> String {
     let ts = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
+        .unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "system clock before unix epoch in exec_uuid");
+            std::time::Duration::default()
+        })
         .as_nanos();
     let pid = std::process::id();
     format!("{ts:x}-{pid:x}")
