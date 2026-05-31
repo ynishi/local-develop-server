@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{Result, bail};
+use anyhow::Result;
 use lds_core::log_store::{HasId, LogStore};
 use lds_core::{Session, truncate_output};
 use serde::Deserialize;
@@ -51,8 +51,14 @@ pub enum RecipeError {
     NotAllowed(String),
     #[error(transparent)]
     Io(#[from] std::io::Error),
-    #[error("just error: {0}")]
-    Just(String),
+    #[error("just --dump failed for {}: {stderr}", justfile.display())]
+    JustDumpFailed { justfile: PathBuf, stderr: String },
+    #[error("just --dump JSON parse failed for {}", justfile.display())]
+    JustDumpParse {
+        justfile: PathBuf,
+        #[source]
+        source: serde_json::Error,
+    },
     #[error(transparent)]
     Session(#[from] lds_core::SessionError),
 }
@@ -109,7 +115,9 @@ impl RecipeModule {
             .map_err(|e| anyhow::anyhow!(e))?;
         let mut merged: HashMap<String, PluginRecipe> = HashMap::new();
         for (level, justfile_path) in &self.resolve_chain {
-            let recipes = dump_justfile(justfile_path).await?;
+            let recipes = dump_justfile(justfile_path)
+                .await
+                .map_err(anyhow::Error::from)?;
             for r in recipes {
                 if r.private {
                     continue;
@@ -148,7 +156,7 @@ impl RecipeModule {
         self.session
             .ensure_alive()
             .map_err(|e| anyhow::anyhow!(e))?;
-        self.merged_recipes().await
+        self.merged_recipes().await.map_err(anyhow::Error::from)
     }
 
     pub async fn run(
@@ -166,10 +174,7 @@ impl RecipeModule {
             validate_content_key(key)?;
         }
 
-        let resolved = self
-            .merged_recipes()
-            .await
-            .map_err(|e| RecipeError::Just(e.to_string()))?;
+        let resolved = self.merged_recipes().await?;
         let recipe_info = resolved.iter().find(|r| r.name == recipe);
 
         if self.mode == RecipeMode::AgentOnly && recipe_info.is_none() {
@@ -234,7 +239,7 @@ impl RecipeModule {
         Ok(output)
     }
 
-    async fn merged_recipes(&self) -> Result<Vec<RecipeInfo>> {
+    async fn merged_recipes(&self) -> Result<Vec<RecipeInfo>, RecipeError> {
         let mut merged: HashMap<String, RecipeInfo> = HashMap::new();
 
         // Iterate from lowest priority (Global) to highest (Project).
@@ -288,7 +293,7 @@ pub async fn list_global_plugins(global_dirs: &[PathBuf]) -> Result<Vec<PluginRe
         let Some(path) = find_justfile(dir) else {
             continue;
         };
-        let recipes = dump_justfile(&path).await?;
+        let recipes = dump_justfile(&path).await.map_err(anyhow::Error::from)?;
         for r in recipes {
             if r.private || !is_plugin(&r) {
                 continue;
@@ -361,7 +366,7 @@ fn home_dir() -> Option<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from)
 }
 
-async fn dump_justfile(justfile: &Path) -> Result<Vec<JustRecipe>> {
+async fn dump_justfile(justfile: &Path) -> Result<Vec<JustRecipe>, RecipeError> {
     let output = tokio::process::Command::new("just")
         .arg("--justfile")
         .arg(justfile)
@@ -369,15 +374,22 @@ async fn dump_justfile(justfile: &Path) -> Result<Vec<JustRecipe>> {
         .arg("--dump-format")
         .arg("json")
         .output()
-        .await?;
+        .await?; // io::Error -> RecipeError::Io via #[from]
 
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("just --dump failed for {}: {stderr}", justfile.display());
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        return Err(RecipeError::JustDumpFailed {
+            justfile: justfile.to_path_buf(),
+            stderr,
+        });
     }
 
-    let dump: JustDump = serde_json::from_slice(&output.stdout)?;
-    Ok(dump.recipes.into_values().collect())
+    serde_json::from_slice::<JustDump>(&output.stdout)
+        .map(|dump| dump.recipes.into_values().collect())
+        .map_err(|source| RecipeError::JustDumpParse {
+            justfile: justfile.to_path_buf(),
+            source,
+        })
 }
 
 fn is_allow_agent(recipe: &JustRecipe) -> bool {
@@ -631,6 +643,38 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("bad-key"));
         assert!(msg.contains("[A-Za-z]"));
+    }
+
+    #[test]
+    fn recipe_error_just_dump_failed_display() {
+        let err = RecipeError::JustDumpFailed {
+            justfile: PathBuf::from("/tmp/justfile"),
+            stderr: "syntax error".to_string(),
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("/tmp/justfile"),
+            "expected path in message: {msg}"
+        );
+        assert!(
+            msg.contains("syntax error"),
+            "expected stderr in message: {msg}"
+        );
+    }
+
+    #[test]
+    fn recipe_error_just_dump_parse_display() {
+        // Construct a serde_json::Error by attempting to parse invalid JSON.
+        let source = serde_json::from_str::<serde_json::Value>("not-json").unwrap_err();
+        let err = RecipeError::JustDumpParse {
+            justfile: PathBuf::from("/tmp/justfile"),
+            source,
+        };
+        let msg = err.to_string();
+        assert!(
+            msg.contains("/tmp/justfile"),
+            "expected path in message: {msg}"
+        );
     }
 
     #[test]
