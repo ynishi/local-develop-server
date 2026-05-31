@@ -70,7 +70,7 @@ impl Session {
             tracing::warn!(root = %root.display(), "session root does not exist");
             return Err(CoreError::RootNotFound(root));
         }
-        let session_id = uuid_v4();
+        let session_id = session_id_new();
         let timeout = Duration::from_secs(config.timeout_secs.unwrap_or(DEFAULT_TIMEOUT_SECS));
         let max_output = config.max_output.unwrap_or(DEFAULT_MAX_OUTPUT);
         tracing::info!(
@@ -243,7 +243,13 @@ fn is_utf8_char_start(b: u8) -> bool {
     (b & 0xC0) != 0x80
 }
 
-fn uuid_v4() -> String {
+/// Generate a session uniqueness identifier as `{nanos_hex}-{pid_hex}`.
+///
+/// This is NOT an RFC 4122 UUID — it is a lightweight identifier used
+/// for session ownership tracking and log correlation. It carries no
+/// cryptographic randomness guarantees. Use the `uuid` crate if a
+/// RFC 4122 v4 UUID is required.
+fn session_id_new() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
     let ts = SystemTime::now()
         .duration_since(UNIX_EPOCH)
