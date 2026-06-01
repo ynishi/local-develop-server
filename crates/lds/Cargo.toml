@@ -1,7 +1,15 @@
 [package]
 name = "local-develop-server"
+description = "Unified MCP server for the coding pipeline — consolidates git / recipe / sandbox tooling into one process with shared session state"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+readme.workspace = true
 
 [[bin]]
 name = "lds"

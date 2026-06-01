@@ -1,7 +1,14 @@
 [package]
 name = "lds-recipe"
+description = "Recipe module for local-develop-server (lds) — just CLI wrapper with dotenv-style resolve chain"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
 
 [dependencies]
 lds-core = { path = "../core" }

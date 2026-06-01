@@ -11,7 +11,13 @@ members = [
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-license = "MIT"
+license = "MIT OR Apache-2.0"
+authors = ["Yutaka Nishimura"]
+repository = "https://github.com/ynishi/local-develop-server"
+homepage = "https://github.com/ynishi/local-develop-server"
+keywords = ["mcp", "development", "agent", "git", "recipe"]
+categories = ["development-tools"]
+readme = "README.md"
 
 [workspace.dependencies]
 anyhow = "1"

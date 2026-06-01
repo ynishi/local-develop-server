@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **Publish metadata for all 5 crates** — added `description` / `license` / `authors` / `repository` / `homepage` / `keywords` / `categories` (workspace-inherited where shared, per-crate `description`). License changed from `MIT` to `MIT OR Apache-2.0` (dual, matching algocline / seed-scope). Repository / homepage URLs point to `https://github.com/ynishi/local-develop-server`. `LICENSE-MIT` and `LICENSE-APACHE` files added at the repo root.
+
 ### Documentation
 
 - **README: Git (write) section synced with implementation** — the table previously labelled `Git (write) — S1 in progress` with all six tools marked `planned` was out of date. The six write tools (`git_commit`, `git_merge`, `git_branch_delete`, `git_worktree_add`, `git_worktree_remove`, `git_worktree_list`) have been implemented and exposed via the MCP tool router since earlier in 0.1.0 development (verified by `cargo test --test e2e_mcp` 8/8 pass on 2026-06-01). README now describes the session-scoped write safety contract and drops the stale `Status` column. The Crate Structure block gained the missing `sandbox/ lds-sandbox` row, and Consolidation Roadmap marks S1 as ✅ done.
