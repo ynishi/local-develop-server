@@ -16,10 +16,10 @@ name = "lds"
 path = "src/main.rs"
 
 [dependencies]
-lds-core = { path = "../core" }
-lds-git = { path = "../git" }
-lds-recipe = { path = "../recipe" }
-lds-sandbox = { path = "../sandbox" }
+lds-core = { path = "../core", version = "0.1.0" }
+lds-git = { path = "../git", version = "0.1.0" }
+lds-recipe = { path = "../recipe", version = "0.1.0" }
+lds-sandbox = { path = "../sandbox", version = "0.1.0" }
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
