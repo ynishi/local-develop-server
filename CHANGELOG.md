@@ -10,6 +10,7 @@ All notable changes to this project will be documented in this file.
 
 ### Documentation
 
+- **README: rewritten in English, License section updated to dual MIT OR Apache-2.0** — the Session / Resolve Chain / Output Safety sections previously carried Japanese prose; rewritten in English to match the repo-wide doc language policy. The License section now points to both `LICENSE-APACHE` and `LICENSE-MIT` (was MIT-only).
 - **README: Git (write) section synced with implementation** — the table previously labelled `Git (write) — S1 in progress` with all six tools marked `planned` was out of date. The six write tools (`git_commit`, `git_merge`, `git_branch_delete`, `git_worktree_add`, `git_worktree_remove`, `git_worktree_list`) have been implemented and exposed via the MCP tool router since earlier in 0.1.0 development (verified by `cargo test --test e2e_mcp` 8/8 pass on 2026-06-01). README now describes the session-scoped write safety contract and drops the stale `Status` column. The Crate Structure block gained the missing `sandbox/ lds-sandbox` row, and Consolidation Roadmap marks S1 as ✅ done.
 
 ### Changed

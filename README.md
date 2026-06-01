@@ -29,35 +29,50 @@ Claude Code / Agent
 
 ### Session — Smart Inject Env
 
-`session_start(root)` で全 module に project root を 1 回で注入する。
-各 module は Session から root / timeout / max_output を読むだけ。
-git module の write scope tracking (owned_worktrees) は Session とは別に module 内部で管理。
+`session_start(root)` injects the project root into every module in one call.
+Each module reads `root` / `timeout` / `max_output` from the shared `Session`.
+The git module additionally tracks write scope (`owned_worktrees`) internally,
+separately from `Session`.
 
-**Auto session-start**: サーバ起動時の CWD が ProjectRoot (`.git` または `justfile` を含むディレクトリ) である場合、`session_start` を呼ばなくても最初の tool call で自動的にセッションが開始される。`session_start` は引き続き利用可能で、別の project root に切り替える際に明示的に呼ぶ。自動起動した tool call のレスポンスには `auto_session_start` フィールドが含まれる。
+**Auto session-start**: when the server is launched inside a ProjectRoot
+(a directory containing `.git` or `justfile`), the first tool call
+automatically starts a session using the startup CWD — `session_start` is
+optional in that case. It remains available for switching to a different
+project root explicitly. Auto-started calls include an `auto_session_start`
+field in their response.
 
-**No-session error**: セッションが存在しない状態でツールを呼んだ場合、全ハンドラで JSON-RPC エラーコード `-32603` を返す (メッセージ: `"no session"`)。
+**No-session error**: when a tool is called without an active session, every
+handler returns JSON-RPC error code `-32603` with the message `"no session"`.
 
-**Session root gone error**: `session_start` 後にセッションルートが削除された場合 (例: worktree を手動削除した後も session が残っている場合)、recipe 系 tool (`recipe_run` / `recipe_list` / `recipe_list_plugins`) は `"session root path no longer exists, please call session_start again: <path>"` エラーを返す。`session_start` を有効なルートで再呼び出しすることで回復できる。
+**Session root gone error**: when the session root is removed after
+`session_start` (e.g. a worktree was deleted while the session was still
+active), recipe-family tools (`recipe_run` / `recipe_list` /
+`recipe_list_plugins`) return
+`"session root path no longer exists, please call session_start again: <path>"`.
+Re-invoking `session_start` with a valid root recovers the state.
 
 ### Resolve Chain (recipe)
 
-dotenv-like な階層解決。justfile を以下の優先順 (低 → 高) で探索し、recipe 単位で merge する。name 衝突は後勝ち (Project が最高優先)。
+Dotenv-style hierarchical resolution. Justfiles are scanned in the priority
+order below (low → high) and merged per recipe; later sources win on name
+collision (Project has highest priority).
 
 | Priority | Source | Notes |
 |---|---|---|
 | lowest | `~/.config/lds/justfile` (default global) | always scanned |
-| ↑ | `config.toml` `recipes.dirs` | `~/.config/lds/config.toml` で宣言した追加ディレクトリ群 |
-| ↑ | `LDS_RECIPE_GLOBAL_DIRS` env var | colon-separated dirs; legacy / CI 向け |
-| highest | Project (`{root}/justfile`) | session root のプロジェクト justfile |
+| ↑ | `config.toml` `recipes.dirs` | additional directories declared in `~/.config/lds/config.toml` |
+| ↑ | `LDS_RECIPE_GLOBAL_DIRS` env var | colon-separated dirs; legacy / CI |
+| highest | Project (`{root}/justfile`) | project justfile at the session root |
 
-各 recipe は `ResolveInfo { level, source_path }` を持ち、どこから来たかを追跡する。
-`ResolveLevel` enum に variant を足すだけで Worktree 層等を追加可能。
+Each recipe carries `ResolveInfo { level, source_path }` so its source layer
+is traceable. Adding a new layer (e.g. Worktree) only requires extending the
+`ResolveLevel` enum with a new variant.
 
 ### Output Safety
 
-- **timeout**: recipe / sandbox の実行に `tokio::time::timeout` を適用 (default 60s)
-- **truncation**: stdout / stderr が `max_output` (default 100KB) を超えたら
-  head + tail に切り詰め。UTF-8 char 境界を尊重
+- **timeout**: `tokio::time::timeout` is applied to recipe / sandbox execution (default 60s)
+- **truncation**: when stdout / stderr exceeds `max_output` (default 100KB) it
+  is truncated to a head + tail pair, respecting UTF-8 character boundaries
 
 ## Crate Structure
 
@@ -289,4 +304,5 @@ the contract; they are not optional behaviors.
 
 ## License
 
-MIT
+Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or
+[MIT license](LICENSE-MIT) at your option.
