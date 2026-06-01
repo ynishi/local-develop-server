@@ -1,8 +1,10 @@
 # lds — local-develop-server
 
-Unified MCP server for the orch coding pipeline. Consolidates task-mcp (recipe),
-git-reader / git-workflow (git), and boxed-analysis (sandbox, future) into a single
-process with shared session state.
+Unified MCP server for AI-driven coding agents. Bundles git read/write,
+`just`-based recipe execution, and file-sandbox operations into one process
+backed by a shared `Session` state — so an agent can open a repository once
+with `session_start` and then run git, recipe, and sandbox tools against the
+same project root without re-establishing context per tool call.
 
 ## Architecture
 
@@ -19,12 +21,14 @@ Claude Code / Agent
            │
      ┌─────┼──────────┐
      ▼     ▼          ▼
-  GitModule  RecipeModule  (SandboxModule)
-  git2-rs   just CLI        future: MVP2
-     │         │
-     ▼         ▼
-  Session (core)
-  root / session_id / timeout / max_output / global_recipe_dirs
+  GitModule  RecipeModule  SandboxModule
+  git2-rs    just CLI      fs + snapshot
+     │         │             │
+     └─────────┴─────────────┘
+                 │
+                 ▼
+        Session (core)
+        root / session_id / timeout / max_output / global_recipe_dirs
 ```
 
 ### Session — Smart Inject Env
@@ -125,33 +129,22 @@ another's work.
 | `recipe_list` | List allow-agent recipes (with ResolveInfo source tracking) |
 | `recipe_run` | Run recipe with args + content env vars, timeout + truncation |
 
-## Consolidation Roadmap
+## Roadmap
 
-```
-S1: git write ops (commit/worktree/merge/branch_delete)            ✅ done
-    → replaces git-reader + git-workflow
-    → verified with: committer, workspace-setup, topic-setup, worktree-merge
+| Stage | Scope | Status |
+|---|---|---|
+| S1 | Git write ops (`commit` / `merge` / `worktree_{add,remove,list}` / `branch_delete`) with session-scoped write safety | ✅ done |
+| S2 | Recipe schema validation (typed content-key contract for `recipe_run`) | planned |
+| S3 | Sandbox extensions — optional container / subprocess isolation backends for the sandbox module | planned |
 
-S2: recipe validation (content key validation)
-    → replaces task-mcp
-    → verify with: impl-lead, build-resolver, quality-coding
+## Why one process?
 
-S3: sandbox module (Docker container, subprocess delegation)
-    → replaces boxed-analysis
-    → verify with: quality-gate, context-broad-scout, context-librarian
-    → Docker daemon dependency requires careful liveness design
-```
-
-## Quantitative Justification
-
-```
-                        Current (12 MCP)   lds (top 4)    Δ
-─────────────────────────────────────────────────────────────
-Processes                  12               8            -33%
-session_start / 3-ST run   56              43            -23%
-Agent-MCP references       25              20            -20%
-Install targets (top 5)     5               1            -80%
-```
+Each MCP server an agent has to talk to is one more process to install, one
+more `session_start` call to make, and one more reference to thread through
+prompts. Folding git, recipe, and sandbox into a single binary backed by a
+shared `Session` collapses the install surface to one target, the per-task
+session call to one invocation, and lets every module read the same project
+root / timeout / output limits without duplicate configuration.
 
 ## Usage
 
