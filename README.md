@@ -66,6 +66,7 @@ crates/
 ├── core/    lds-core     Session, SessionConfig, LdsState, truncate_output
 ├── git/     lds-git      GitModule (git2-rs, write scope tracking)
 ├── recipe/  lds-recipe   RecipeModule (just CLI, resolve chain, content args)
+├── sandbox/ lds-sandbox  SandboxModule (file-scoped read/append, snapshot/rollback)
 └── lds/     lds          MCP binary (rmcp v1.7, stdio transport)
 ```
 
@@ -85,16 +86,22 @@ crates/
 | `git_log` | Commit log (configurable max_count) |
 | `git_diff` | Diff working tree vs HEAD |
 
-### Git (write) — S1 in progress
+### Git (write)
 
-| Tool | Description | Status |
-|---|---|---|
-| `git_commit` | Commit staged changes | planned |
-| `git_worktree_add` | Create worktree (session-owned) | planned |
-| `git_worktree_remove` | Remove session-owned worktree | planned |
-| `git_worktree_list` | List worktrees | planned |
-| `git_merge` | Merge branch into current | planned |
-| `git_branch_delete` | Delete branch | planned |
+Session-scoped write operations: `worktree_add` registers the created worktree in
+the session's `owned_worktrees` set, and subsequent write tools (`commit`,
+`merge`, `worktree_remove`, `branch_delete`) refuse to operate on paths /
+branches that are not session-owned. This prevents one agent from destroying
+another's work.
+
+| Tool | Description |
+|---|---|
+| `git_commit` | Stage and commit changes in a session-owned working directory |
+| `git_worktree_add` | Create a worktree under `.worktrees/` with a new branch (session-owned) |
+| `git_worktree_remove` | Remove a session-owned worktree |
+| `git_worktree_list` | List worktrees with session-ownership annotation |
+| `git_merge` | Merge a branch into another in a session-owned working directory |
+| `git_branch_delete` | Delete a session-owned branch |
 
 ### Recipe
 
@@ -106,16 +113,16 @@ crates/
 ## Consolidation Roadmap
 
 ```
-S1: git write ops (commit/worktree/merge/branch_delete)
-    → replace git-reader + git-workflow
-    → verify with: committer, workspace-setup, topic-setup, worktree-merge
+S1: git write ops (commit/worktree/merge/branch_delete)            ✅ done
+    → replaces git-reader + git-workflow
+    → verified with: committer, workspace-setup, topic-setup, worktree-merge
 
 S2: recipe validation (content key validation)
-    → replace task-mcp
+    → replaces task-mcp
     → verify with: impl-lead, build-resolver, quality-coding
 
 S3: sandbox module (Docker container, subprocess delegation)
-    → replace boxed-analysis
+    → replaces boxed-analysis
     → verify with: quality-gate, context-broad-scout, context-librarian
     → Docker daemon dependency requires careful liveness design
 ```
