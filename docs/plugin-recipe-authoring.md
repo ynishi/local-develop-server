@@ -77,14 +77,13 @@ Existing global plugins (reference set, all live in
 | `remote-url` | `git remote get-url origin` | one git invocation, universal |
 | `greet` | echo test | smoke test, intentionally tiny |
 
-Existing AllowAgent task recipes (typical patterns, agent-profiles
-`tasks/`):
+Existing AllowAgent task recipes (typical patterns):
 
 | Name | Why it's a Task (not a Plugin) |
 |---|---|
-| `profile-install` | mutates the consumer project's `.claude/` layout |
+| `profile-install` | mutates the consumer project's local config layout |
 | `q-fix-*` | encodes a multi-step fix workflow |
-| `coding-orch-*` | drives `/orch` pipeline, project-aware |
+| `coding-orch-*` | drives a project-aware pipeline |
 | `deploy-lds-import` | edits the user's `~/.config/lds/justfile` |
 
 ### 1.3 Legacy `# [allow-agent]` doc-comment marker

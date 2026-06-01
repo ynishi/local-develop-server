@@ -377,7 +377,7 @@ fn build_session_modules(
 }
 
 /// Return `true` if `path` is a ProjectRoot: a directory that contains a
-/// `.git` entry or a `justfile`. Equivalent to task-mcp's ProjectRoot check.
+/// `.git` entry or a `justfile`. Conventional project-root probe.
 fn is_project_root(path: &std::path::Path) -> bool {
     path.join(".git").exists() || path.join("justfile").exists()
 }

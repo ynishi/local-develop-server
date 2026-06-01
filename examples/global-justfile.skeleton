@@ -6,15 +6,13 @@
 #
 # Why these four:
 # - complexity: codedash output is the canonical "function fan-in"
-#   signal that several coding-pipeline agents need
-# - search-excluding: rg with comment/string/test post-filter, used
-#   by quality-gate and holistic-reviewer for false-positive control
-# - remote-url: task-graduate needs the origin URL without invoking
-#   gh CLI, and a typed wrapper around `git remote get-url` is small
-#   enough to merit a Plugin
-# - text-stats: plan-gate / context-broad-scout need batch
-#   lines/words/bytes per file; sandbox_python could do it but the
-#   one-liner Plugin keeps the agent prompt tight
+#   signal that pipeline agents commonly need
+# - search-excluding: rg with comment/string/test post-filter, useful
+#   for false-positive control in review-style agents
+# - remote-url: typed wrapper around `git remote get-url` so callers
+#   can fetch the origin URL without shelling out to `gh`
+# - text-stats: batch lines/words/bytes per file; sandbox_python could
+#   do it but the one-liner Plugin keeps the agent prompt tight
 # - greet: smoke-test target, leave it in or strip it once you're
 #   confident the loader is working
 #
