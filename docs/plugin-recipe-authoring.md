@@ -254,6 +254,30 @@ from the shell, just runs in `~/.config/lds/`, which is not a git repo
 it's an invocation mode mismatch. Test plugin recipes by calling them
 through `mcp__lds__<name>`, not through `just` directly.
 
+**Anti-pattern: don't `cd` inside the recipe body.**
+
+`just` provides `invocation_directory()` which expands to the directory
+where `just` was *launched* (typically your project root), NOT the
+session root that lds set as cwd via `--working-directory`. Writing
+this in a recipe body **destroys** the session root that lds carefully
+arranged:
+
+```just
+[group('lds-plugin')]
+cp-check:
+    #!/usr/bin/env bash
+    cd "{{invocation_directory()}}"   # ❌ BREAKS session_root
+    [ -f Cargo.toml ] && cargo check
+```
+
+Symptom: with `mcp__lds__session_start(root=<subdir>)` followed by
+`mcp__lds__recipe_run(recipe="cp-check")`, the recipe's `pwd` lands on
+the just invocation point (project root) instead of `<subdir>`, and
+files under `<subdir>` become invisible. The fix is to **delete the
+`cd` line** — lds already set the cwd correctly. If you need to verify,
+`pwd` at the top of the recipe shows `{session.root}`, not the justfile
+dir.
+
 ### Quoting interpolated parameters
 
 just performs textual substitution. If a parameter contains a
