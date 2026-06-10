@@ -129,6 +129,52 @@ env vars require restarting the lds process (SIGHUP reload is not implemented).
 Project plugins become visible only after `session_start` is called.
 On name collision, project wins.
 
+### 2.1 just-native filename and search order
+
+lds's `find_justfile()` matches the same filename set just itself uses:
+`justfile`, `Justfile` (case-insensitive), and `.justfile`. Arbitrary
+filenames such as `build.just` are **not** picked up by either just's
+default search or by lds's resolve chain — they are only reachable via a
+parent justfile's `import` / `mod` directive, or by passing `--justfile
+<path>` to just directly.
+
+Sources:
+- [just README — Justfile name search](https://github.com/casey/just/blob/master/README.md)
+- [just manual — `import` directive](https://just.systems/man/en/imports.html)
+- [just manual — `mod` directive](https://just.systems/man/en/modules.html)
+
+### 2.2 Multiple justfiles in one repo
+
+When a project wants to split recipes across multiple files, prefer
+just-native composition over reconfiguring lds. The canonical patterns:
+
+| Pattern | When to use | How lds sees it |
+|---|---|---|
+| (A) `{root}/justfile` | Default: 1 file holds the project's recipes (canonical, fits the 1 repo / 1–2 justfile assumption that drives just's design). | Auto-resolved by `session_start(root=...)`; project-level priority. |
+| (B) `{root}/scripts/justfile` (sub-dir, canonical filename) | The recipes live in a dedicated sub-dir but still use the canonical filename. | Add the sub-dir via `lds recipe-dir add {root}/scripts`, or pass `session_start(global_recipe_dir="{root}/scripts")`. |
+| (C) `{root}/scripts/build.just` (arbitrary filename) | The repo treats just as an embedded app runtime — `build.just` / `deploy.just` are application source, not a generic task runner — so files are split per concern. | Add `import 'scripts/build.just'` to `{root}/justfile`; recipes flow into `merged_recipes` through the parent. lds does **not** load arbitrary `.just` filenames directly. |
+| (D) `mod foo` / `mod foo 'path/to/foo.just'` | You need an isolated namespace — recipes, aliases, and variables in `foo` must not leak into the parent. | Same as (C) for lds discovery (the parent justfile owns the module declaration); recipes appear under the module's name. |
+
+Rule of thumb: if you're reaching for (C) or (D), the parent
+`{root}/justfile` is the contract surface lds talks to. Keep that file
+present even if it only contains `import` / `mod` lines.
+
+### 2.3 Anti-patterns
+
+- **Extending `find_justfile()` to discover arbitrary `.just` filenames.**
+  just's own default search deliberately stops at the canonical filename
+  set; mirroring it keeps lds aligned with the upstream contract. Use
+  `import` / `mod` to compose, not lds-side filename expansion.
+- **Pointing `config.toml` / `LDS_RECIPE_GLOBAL_DIRS` / `global_recipe_dir`
+  at a single `.just` file.** All three entries are **directory**-scoped;
+  lds looks for `justfile` / `Justfile` / `.justfile` inside the
+  directory. File-level wire arguments are not supported and not on the
+  roadmap — split by directory, not by filename.
+- **Treating `{root}/scripts/build.just` as something lds should serve
+  directly.** That layout is a project choice (just-as-app); the parent
+  justfile is responsible for stitching it back together so lds (and any
+  other just consumer) sees a single resolve surface.
+
 ## 3. Parameter mapping
 
 Each just recipe parameter becomes a `string` field in the MCP tool's
