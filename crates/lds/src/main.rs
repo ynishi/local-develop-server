@@ -8,6 +8,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use lds_core::config::Config;
 use lds_core::{LdsState, Session, SessionConfig, check_binaries};
+use lds_gh::GhModule;
 use lds_git::GitModule;
 use lds_recipe::RecipeModule;
 use lds_sandbox::fs::SandboxFs;
@@ -33,6 +34,7 @@ struct LdsServer {
 struct Inner {
     lds: LdsState,
     git: Option<GitModule>,
+    gh: Option<GhModule>,
     recipe: Option<RecipeModule>,
     sandbox_fs: Option<SandboxFs>,
     sandbox_python: Option<SandboxPython>,
@@ -196,6 +198,7 @@ impl LdsServer {
             state: Arc::new(RwLock::new(Inner {
                 lds: LdsState::new(),
                 git: None,
+                gh: None,
                 recipe: None,
                 sandbox_fs: None,
                 sandbox_python: None,
@@ -343,6 +346,43 @@ struct RecipeLogsReq {
     tail: Option<usize>,
 }
 
+fn default_limit_30() -> usize {
+    30
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct GhPrListReq {
+    #[serde(default = "default_limit_30")]
+    limit: usize,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct GhPrViewReq {
+    number: u64,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct GhPrDiffReq {
+    number: u64,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct GhIssueListReq {
+    #[serde(default = "default_limit_30")]
+    limit: usize,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct GhIssueViewReq {
+    number: u64,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct GhRunListReq {
+    #[serde(default = "default_limit_30")]
+    limit: usize,
+}
+
 /// Shared factory for the "no session active" MCP error.
 ///
 /// All tool handlers that require an active session use this factory so that
@@ -367,6 +407,7 @@ fn build_session_modules(
         .start_session(config)
         .map_err(|e| McpError::internal_error(e.to_string(), None))?;
     inner.git = Some(GitModule::new(Arc::clone(&session)));
+    inner.gh = Some(GhModule::new(Arc::clone(&session)));
     inner.recipe = Some(RecipeModule::new(Arc::clone(&session)));
     inner.sandbox_fs = Some(
         SandboxFs::new(session.root())
@@ -527,6 +568,118 @@ impl LdsServer {
         let git = inner.git.as_ref().ok_or_else(no_session_error)?;
         let out = git
             .branch_delete(&req.branch)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(out)]))
+    }
+
+    /// Check gh CLI authentication status.
+    #[tool(description = "Check gh CLI authentication status")]
+    async fn gh_auth_status(&self) -> Result<CallToolResult, McpError> {
+        let inner = self.state.read().await;
+        let gh = inner.gh.as_ref().ok_or_else(no_session_error)?;
+        let out = gh
+            .auth_status()
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(out)]))
+    }
+
+    /// List GitHub pull requests (read-only).
+    #[tool(
+        description = "List GitHub pull requests (read-only). Returns JSON array of PRs with number, title, state, author."
+    )]
+    async fn gh_pr_list(
+        &self,
+        Parameters(req): Parameters<GhPrListReq>,
+    ) -> Result<CallToolResult, McpError> {
+        let inner = self.state.read().await;
+        let gh = inner.gh.as_ref().ok_or_else(no_session_error)?;
+        let out = gh
+            .pr_list(req.limit)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(out)]))
+    }
+
+    /// View a single GitHub pull request as JSON (read-only).
+    #[tool(description = "View a single GitHub pull request as JSON (read-only).")]
+    async fn gh_pr_view(
+        &self,
+        Parameters(req): Parameters<GhPrViewReq>,
+    ) -> Result<CallToolResult, McpError> {
+        let inner = self.state.read().await;
+        let gh = inner.gh.as_ref().ok_or_else(no_session_error)?;
+        let out = gh
+            .pr_view(req.number)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(out)]))
+    }
+
+    /// Show diff of a GitHub pull request (read-only).
+    #[tool(description = "Show diff of a GitHub pull request (read-only).")]
+    async fn gh_pr_diff(
+        &self,
+        Parameters(req): Parameters<GhPrDiffReq>,
+    ) -> Result<CallToolResult, McpError> {
+        let inner = self.state.read().await;
+        let gh = inner.gh.as_ref().ok_or_else(no_session_error)?;
+        let out = gh
+            .pr_diff(req.number)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(out)]))
+    }
+
+    /// List GitHub issues (read-only).
+    #[tool(
+        description = "List GitHub issues (read-only). Returns JSON array of issues with number, title, state."
+    )]
+    async fn gh_issue_list(
+        &self,
+        Parameters(req): Parameters<GhIssueListReq>,
+    ) -> Result<CallToolResult, McpError> {
+        let inner = self.state.read().await;
+        let gh = inner.gh.as_ref().ok_or_else(no_session_error)?;
+        let out = gh
+            .issue_list(req.limit)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(out)]))
+    }
+
+    /// View a single GitHub issue as JSON (read-only).
+    #[tool(description = "View a single GitHub issue as JSON (read-only).")]
+    async fn gh_issue_view(
+        &self,
+        Parameters(req): Parameters<GhIssueViewReq>,
+    ) -> Result<CallToolResult, McpError> {
+        let inner = self.state.read().await;
+        let gh = inner.gh.as_ref().ok_or_else(no_session_error)?;
+        let out = gh
+            .issue_view(req.number)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(out)]))
+    }
+
+    /// View repository metadata as JSON (read-only).
+    #[tool(description = "View repository metadata as JSON (read-only).")]
+    async fn gh_repo_view(&self) -> Result<CallToolResult, McpError> {
+        let inner = self.state.read().await;
+        let gh = inner.gh.as_ref().ok_or_else(no_session_error)?;
+        let out = gh
+            .repo_view()
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(out)]))
+    }
+
+    /// List GitHub Actions workflow runs (read-only).
+    #[tool(
+        description = "List GitHub Actions workflow runs (read-only). Returns JSON array with status, conclusion, workflowName."
+    )]
+    async fn gh_run_list(
+        &self,
+        Parameters(req): Parameters<GhRunListReq>,
+    ) -> Result<CallToolResult, McpError> {
+        let inner = self.state.read().await;
+        let gh = inner.gh.as_ref().ok_or_else(no_session_error)?;
+        let out = gh
+            .run_list(req.limit)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         Ok(CallToolResult::success(vec![Content::text(out)]))
     }
