@@ -84,6 +84,7 @@ is traceable. Adding a new layer (e.g. Worktree) only requires extending the
 crates/
 ├── core/    lds-core     Session, SessionConfig, LdsState, truncate_output
 ├── git/     lds-git      GitModule (git2-rs, write scope tracking)
+├── gh/      lds-gh       GhModule (gh CLI subprocess wrapper, read-only API, auth fail-fast)
 ├── recipe/  lds-recipe   RecipeModule (just CLI, resolve chain, content args)
 ├── sandbox/ lds-sandbox  SandboxModule (file-scoped read/append, snapshot/rollback)
 └── lds/     lds          MCP binary (rmcp v1.7, stdio transport)
@@ -104,6 +105,26 @@ crates/
 | `git_status` | Working tree status |
 | `git_log` | Commit log (configurable max_count) |
 | `git_diff` | Diff working tree vs HEAD |
+
+### Gh (read)
+
+GitHub CLI (`gh`) wrapper. Requires `gh auth login` before use; every tool
+invocation checks `gh auth status` and returns a typed error if unauthenticated.
+
+| Tool | Description |
+|---|---|
+| `gh_auth_status` | Check gh CLI authentication status |
+| `gh_pr_list` | List PRs as JSON (number/title/state/author). `limit` optional (default 30). |
+| `gh_pr_view` | View a single PR as JSON. Requires `number`. |
+| `gh_pr_diff` | Show diff of a PR. Requires `number`. |
+| `gh_issue_list` | List issues as JSON (number/title/state). `limit` optional (default 30). |
+| `gh_issue_view` | View a single issue as JSON. Requires `number`. |
+| `gh_repo_view` | Repository metadata as JSON (name/owner/defaultBranchRef). |
+| `gh_run_list` | List Actions workflow runs as JSON. `limit` optional (default 30). |
+
+**Write operations not exposed**: `gh pr create` / `gh issue create` /
+`gh release create` / `gh pr merge` are deliberately not exposed as MCP tools.
+Users invoke these via shell directly.
 
 ### Git (write)
 

@@ -6,6 +6,9 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **`crates/gh` — new `lds-gh` crate with `GhModule` (GitHub CLI subprocess wrapper)** — adds a read-only MCP plugin for `gh` CLI operations. Exposes 8 tools: `gh_auth_status`, `gh_pr_list`, `gh_pr_view`, `gh_pr_diff`, `gh_issue_list`, `gh_issue_view`, `gh_repo_view`, `gh_run_list`. Every tool invocation runs `gh auth status` before the subprocess call and returns a typed authentication error when unauthenticated. All subprocess calls use `Command::new("gh").args(args)` (shell=false, arg-by-arg) — no string concatenation or `sh -c`. Write operations (`gh pr create` / `gh issue create` / `gh release create` / `gh pr merge`) are structurally absent from both `GhModule` and the MCP tool router; they are never exposed as callable tools.
+- **README: `### Gh (read)` section added** — documents the 8 read-only `gh_*` tools with parameters and the write-operations exclusion rationale.
+- **README: `crates/gh` row added to Crate Structure** — `gh/ lds-gh GhModule (gh CLI subprocess wrapper, read-only API, auth fail-fast)`.
 - **Publish metadata for all 5 crates** — added `description` / `license` / `authors` / `repository` / `homepage` / `keywords` / `categories` (workspace-inherited where shared, per-crate `description`). License changed from `MIT` to `MIT OR Apache-2.0` (dual, matching common Rust crate convention). Repository / homepage URLs point to `https://github.com/ynishi/local-develop-server`. `LICENSE-MIT` and `LICENSE-APACHE` files added at the repo root.
 
 ### Documentation

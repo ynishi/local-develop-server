@@ -650,6 +650,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "lds-gh"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "lds-core",
+ "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "lds-git"
 version = "0.1.0"
 dependencies = [
@@ -766,6 +777,7 @@ dependencies = [
  "clap",
  "dirs",
  "lds-core",
+ "lds-gh",
  "lds-git",
  "lds-recipe",
  "lds-sandbox",
