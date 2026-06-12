@@ -1,0 +1,20 @@
+[package]
+name = "lds-gh"
+description = "GitHub CLI wrapper module for local-develop-server (lds) — gh subprocess wrapper with auth fail-fast and structural read-only API"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+lds-core = { path = "../core", version = "0.1.0" }
+anyhow.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["rt", "macros"] }
