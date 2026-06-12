@@ -777,6 +777,7 @@ dependencies = [
  "clap",
  "dirs",
  "lds-core",
+ "lds-gh",
  "lds-git",
  "lds-recipe",
  "lds-sandbox",
