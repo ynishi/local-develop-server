@@ -350,6 +350,10 @@ fn default_limit_30() -> usize {
     30
 }
 
+fn default_tail_20() -> usize {
+    20
+}
+
 #[derive(Debug, Deserialize, JsonSchema)]
 struct GhPrListReq {
     #[serde(default = "default_limit_30")]
@@ -381,6 +385,64 @@ struct GhIssueViewReq {
 struct GhRunListReq {
     #[serde(default = "default_limit_30")]
     limit: usize,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct GhRunViewReq {
+    run_id: u64,
+    #[serde(default)]
+    repo: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct GhRunLogFailedReq {
+    run_id: u64,
+    #[serde(default)]
+    repo: Option<String>,
+    #[serde(default = "default_tail_20")]
+    tail_lines: usize,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct GhRunJobsReq {
+    run_id: u64,
+    #[serde(default)]
+    repo: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct GhReleaseViewReq {
+    tag: String,
+    #[serde(default)]
+    repo: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct GhReleaseListReq {
+    #[serde(default = "default_limit_30")]
+    limit: usize,
+    #[serde(default)]
+    repo: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct GhWorkflowListReq {
+    #[serde(default)]
+    repo: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct GhWorkflowViewReq {
+    name_or_id: String,
+    #[serde(default)]
+    repo: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct GhPrChecksReq {
+    number: u64,
+    #[serde(default)]
+    repo: Option<String>,
 }
 
 /// Shared factory for the "no session active" MCP error.
@@ -680,6 +742,126 @@ impl LdsServer {
         let gh = inner.gh.as_ref().ok_or_else(no_session_error)?;
         let out = gh
             .run_list(req.limit)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(out)]))
+    }
+
+    #[tool(
+        description = "Get details of a single GitHub Actions workflow run (read-only). Returns JSON with run status, conclusion, and job summary."
+    )]
+    async fn gh_run_view(
+        &self,
+        Parameters(req): Parameters<GhRunViewReq>,
+    ) -> Result<CallToolResult, McpError> {
+        let inner = self.state.read().await;
+        let gh = inner.gh.as_ref().ok_or_else(no_session_error)?;
+        let out = gh
+            .run_view(req.run_id, req.repo)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(out)]))
+    }
+
+    #[tool(
+        description = "Get logs of failed steps in a GitHub Actions workflow run (read-only). Returns JSON with failed_steps array containing job_name, step_name, and log_tail."
+    )]
+    async fn gh_run_log_failed(
+        &self,
+        Parameters(req): Parameters<GhRunLogFailedReq>,
+    ) -> Result<CallToolResult, McpError> {
+        let inner = self.state.read().await;
+        let gh = inner.gh.as_ref().ok_or_else(no_session_error)?;
+        let out = gh
+            .run_log_failed(req.run_id, req.repo, Some(req.tail_lines))
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(out)]))
+    }
+
+    #[tool(
+        description = "List jobs of a GitHub Actions workflow run (read-only). Returns JSON array with job name, status, and step details."
+    )]
+    async fn gh_run_jobs(
+        &self,
+        Parameters(req): Parameters<GhRunJobsReq>,
+    ) -> Result<CallToolResult, McpError> {
+        let inner = self.state.read().await;
+        let gh = inner.gh.as_ref().ok_or_else(no_session_error)?;
+        let out = gh
+            .run_jobs(req.run_id, req.repo)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(out)]))
+    }
+
+    #[tool(
+        description = "Get details of a GitHub release by tag (read-only). Returns JSON with tag name, release notes, and asset list."
+    )]
+    async fn gh_release_view(
+        &self,
+        Parameters(req): Parameters<GhReleaseViewReq>,
+    ) -> Result<CallToolResult, McpError> {
+        let inner = self.state.read().await;
+        let gh = inner.gh.as_ref().ok_or_else(no_session_error)?;
+        let out = gh
+            .release_view(req.tag, req.repo)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(out)]))
+    }
+
+    #[tool(
+        description = "List GitHub releases (read-only). Returns JSON array with tag, name, and published date."
+    )]
+    async fn gh_release_list(
+        &self,
+        Parameters(req): Parameters<GhReleaseListReq>,
+    ) -> Result<CallToolResult, McpError> {
+        let inner = self.state.read().await;
+        let gh = inner.gh.as_ref().ok_or_else(no_session_error)?;
+        let out = gh
+            .release_list(req.limit, req.repo)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(out)]))
+    }
+
+    #[tool(
+        description = "List GitHub Actions workflows in the repository (read-only). Returns JSON array with workflow name, id, and state."
+    )]
+    async fn gh_workflow_list(
+        &self,
+        Parameters(req): Parameters<GhWorkflowListReq>,
+    ) -> Result<CallToolResult, McpError> {
+        let inner = self.state.read().await;
+        let gh = inner.gh.as_ref().ok_or_else(no_session_error)?;
+        let out = gh
+            .workflow_list(req.repo)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(out)]))
+    }
+
+    #[tool(
+        description = "Get details of a GitHub Actions workflow by name or id (read-only). Returns JSON with workflow metadata and recent run summary."
+    )]
+    async fn gh_workflow_view(
+        &self,
+        Parameters(req): Parameters<GhWorkflowViewReq>,
+    ) -> Result<CallToolResult, McpError> {
+        let inner = self.state.read().await;
+        let gh = inner.gh.as_ref().ok_or_else(no_session_error)?;
+        let out = gh
+            .workflow_view(req.name_or_id, req.repo)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(out)]))
+    }
+
+    #[tool(
+        description = "List CI check runs for a GitHub pull request (read-only). Returns JSON array with check name, status, and conclusion."
+    )]
+    async fn gh_pr_checks(
+        &self,
+        Parameters(req): Parameters<GhPrChecksReq>,
+    ) -> Result<CallToolResult, McpError> {
+        let inner = self.state.read().await;
+        let gh = inner.gh.as_ref().ok_or_else(no_session_error)?;
+        let out = gh
+            .pr_checks(req.number, req.repo)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         Ok(CallToolResult::success(vec![Content::text(out)]))
     }
