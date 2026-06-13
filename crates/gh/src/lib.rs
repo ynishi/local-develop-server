@@ -440,34 +440,37 @@ impl GhModule {
         gh_cmd(cwd, &args)
     }
 
-    /// Returns details of a single workflow by name or ID.
+    /// Returns details of a single workflow by numeric ID or workflow file name.
+    ///
+    /// Uses `gh api repos/{owner}/{repo}/actions/workflows/{name_or_id}` against
+    /// the GitHub REST API directly. The underlying `gh workflow view`
+    /// subcommand does NOT support `--json` (it only exposes `--ref`, `--web`,
+    /// `--yaml`), so we route through `gh api` instead.
     ///
     /// # Arguments
     ///
-    /// * `name_or_id` — the workflow file name, workflow name, or numeric ID.
+    /// * `name_or_id` — the numeric workflow ID or the workflow file name
+    ///   (e.g. `ci.yml`). Workflow display names are NOT supported by the REST
+    ///   API; resolve via `workflow_list` first if needed.
     /// * `repo`       — optional `OWNER/REPO` to override the current directory context.
     ///
     /// # Returns
     ///
-    /// JSON string with fields: `name`, `state`, `path`, `id`.
+    /// JSON object string returned by the GitHub REST API, containing fields
+    /// such as `id`, `name`, `path`, `state`, `created_at`, `updated_at`,
+    /// `url`, `html_url`, `badge_url`.
     ///
     /// # Errors
     ///
-    /// Returns an error if not authenticated, if the workflow does not exist, or
-    /// if the subprocess fails.
+    /// Returns an error if not authenticated, if the workflow does not exist
+    /// (HTTP 404), or if the subprocess fails.
     pub fn workflow_view(&self, name_or_id: String, repo: Option<String>) -> Result<String> {
         let cwd = self.session.root();
-        let mut args: Vec<&str> = vec![
-            "workflow",
-            "view",
-            &name_or_id,
-            "--json",
-            "name,state,path,id",
-        ];
-        if let Some(r) = repo.as_ref() {
-            args.push("--repo");
-            args.push(r.as_str());
-        }
+        let api_path = match repo.as_ref() {
+            Some(r) => format!("repos/{}/actions/workflows/{}", r, name_or_id),
+            None => format!("repos/{{owner}}/{{repo}}/actions/workflows/{}", name_or_id),
+        };
+        let args: Vec<&str> = vec!["api", api_path.as_str()];
         gh_cmd(cwd, &args)
     }
 
@@ -480,8 +483,10 @@ impl GhModule {
     ///
     /// # Returns
     ///
-    /// JSON string with fields: `name`, `status`, `conclusion`, `link`,
-    /// `workflow`.
+    /// JSON array string with fields: `name`, `state`, `bucket`, `link`,
+    /// `workflow`. `state` is the per-check completion state (e.g. `SUCCESS`,
+    /// `FAILURE`); `bucket` is the outcome category (`pass` / `fail` /
+    /// `pending` / `skipping` / `cancel`).
     ///
     /// # Errors
     ///
@@ -495,7 +500,7 @@ impl GhModule {
             "checks",
             &number_str,
             "--json",
-            "name,status,conclusion,link,workflow",
+            "name,state,bucket,link,workflow",
         ];
         if let Some(r) = repo.as_ref() {
             args.push("--repo");

@@ -317,12 +317,14 @@ fn fetch_latest_release_tag() -> Option<String> {
         .map(|s| s.to_string())
 }
 
-/// Helper: fetch the first workflow name via `gh workflow list --json name --limit 1`.
+/// Helper: fetch the first workflow ID via `gh workflow list --json id --limit 1`.
 ///
-/// Returns `None` when there are no workflows.
-fn fetch_first_workflow_name() -> Option<String> {
+/// Returns the numeric workflow id as a decimal string (suitable for passing
+/// to `gh api repos/{owner}/{repo}/actions/workflows/{id}`). Returns `None`
+/// when there are no workflows.
+fn fetch_first_workflow_id() -> Option<String> {
     let output = Command::new("gh")
-        .args(["workflow", "list", "--json", "name", "--limit", "1"])
+        .args(["workflow", "list", "--json", "id", "--limit", "1"])
         .current_dir(repo_root())
         .output()
         .ok()?;
@@ -331,12 +333,14 @@ fn fetch_first_workflow_name() -> Option<String> {
     }
     let text = String::from_utf8(output.stdout).ok()?;
     let parsed: serde_json::Value = serde_json::from_str(&text).ok()?;
-    parsed
-        .as_array()?
-        .first()?
-        .get("name")?
-        .as_str()
-        .map(|s| s.to_string())
+    let first = parsed.as_array()?.first()?.get("id")?;
+    // `id` is returned as an integer by gh; render it back to a decimal
+    // string. Fall through to the string form for resilience.
+    if let Some(n) = first.as_i64() {
+        Some(n.to_string())
+    } else {
+        first.as_str().map(|s| s.to_string())
+    }
 }
 
 /// T1: `run_view` returns a JSON string for a real run id.
@@ -496,14 +500,14 @@ fn t1_workflow_list_returns_json() {
     );
 }
 
-/// T1: `workflow_view` returns a JSON object for a real workflow name.
+/// T1: `workflow_view` returns a JSON object for a real workflow id.
 #[test]
 fn t1_workflow_view_returns_json() {
     if !gh_authenticated() {
         eprintln!("skip: gh CLI not available or not authenticated");
         return;
     }
-    let name = match fetch_first_workflow_name() {
+    let id = match fetch_first_workflow_id() {
         Some(n) => n,
         None => {
             eprintln!("skip: no workflows in repo");
@@ -513,16 +517,16 @@ fn t1_workflow_view_returns_json() {
     let session = make_session(&repo_root());
     let gh = GhModule::new(session);
 
-    let result = gh.workflow_view(name.clone(), None);
+    let result = gh.workflow_view(id.clone(), None);
     assert!(
         result.is_ok(),
-        "workflow_view({name}) failed: {:?}",
+        "workflow_view({id}) failed: {:?}",
         result.err()
     );
     let output = result.unwrap();
     assert!(
-        output.contains("name") || output.starts_with('{'),
-        "expected JSON object with 'name', got: {output}"
+        output.contains("\"name\"") && output.starts_with('{'),
+        "expected JSON object with \"name\" field, got: {output}"
     );
 }
 

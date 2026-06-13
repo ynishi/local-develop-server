@@ -4,6 +4,22 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`crates/gh` — `gh_workflow_view` upstream impl bug** — the v0.3.0 impl
+  invoked `gh workflow view --json ...`, but the `gh workflow view` subcommand
+  does NOT accept `--json` (only `--ref` / `--web` / `--yaml`). Switched to
+  `gh api repos/{owner}/{repo}/actions/workflows/{name_or_id}` against the
+  GitHub REST API. Input is now restricted to a numeric workflow ID or
+  workflow file name (e.g. `ci.yml`); workflow display names are no longer
+  resolved (use `workflow_list` first if needed). Return shape is the full
+  REST workflow object (`id`, `name`, `path`, `state`, timestamps, URLs).
+- **`crates/gh` — `gh_pr_checks` upstream impl bug** — the v0.3.0 impl passed
+  `--json name,status,conclusion,link,workflow`, but `gh pr checks --json`
+  exposes neither `status` (renamed to `state`) nor `conclusion` (replaced by
+  `bucket`, the outcome category: `pass` / `fail` / `pending` / `skipping` /
+  `cancel`). Replaced with `name,state,bucket,link,workflow`.
+
 ## [0.3.0] - 2026-06-13
 
 ### Added
