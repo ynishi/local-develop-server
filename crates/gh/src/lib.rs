@@ -255,6 +255,254 @@ impl GhModule {
             ],
         )
     }
+
+    /// Returns details of a single workflow run.
+    ///
+    /// # Arguments
+    ///
+    /// * `run_id` — the workflow run ID.
+    /// * `repo`   — optional `OWNER/REPO` to override the current directory context.
+    ///
+    /// # Returns
+    ///
+    /// JSON string with fields: `status`, `conclusion`, `jobs`, `name`,
+    /// `createdAt`, `updatedAt`, `htmlUrl`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if not authenticated, if the run does not exist, or if
+    /// the subprocess fails.
+    pub fn run_view(&self, run_id: u64, repo: Option<String>) -> Result<String> {
+        let cwd = self.session.root();
+        let run_id_str = run_id.to_string();
+        let mut args: Vec<&str> = vec![
+            "run",
+            "view",
+            &run_id_str,
+            "--json",
+            "status,conclusion,jobs,name,createdAt,updatedAt,htmlUrl",
+        ];
+        if let Some(r) = repo.as_ref() {
+            args.push("--repo");
+            args.push(r.as_str());
+        }
+        gh_cmd(cwd, &args)
+    }
+
+    /// Returns the failed-step log of a workflow run, parsed into structured JSON.
+    ///
+    /// # Arguments
+    ///
+    /// * `run_id`     — the workflow run ID.
+    /// * `repo`       — optional `OWNER/REPO` to override the current directory context.
+    /// * `tail_lines` — number of log lines per failed step to include (default 20).
+    ///
+    /// # Returns
+    ///
+    /// JSON string `{ "failed_steps": [{ "job_name", "step_name", "log_tail" }] }`.
+    /// On parse failure: `{ "failed_steps": [], "raw_output": "<raw stdout>" }`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if not authenticated, if the run does not exist, or if
+    /// the subprocess fails. Parse errors produce a fallback JSON (no error).
+    pub fn run_log_failed(
+        &self,
+        run_id: u64,
+        repo: Option<String>,
+        tail_lines: Option<usize>,
+    ) -> Result<String> {
+        let cwd = self.session.root();
+        let run_id_str = run_id.to_string();
+        let mut args: Vec<&str> = vec!["run", "view", &run_id_str, "--log-failed"];
+        if let Some(r) = repo.as_ref() {
+            args.push("--repo");
+            args.push(r.as_str());
+        }
+        let raw = gh_cmd(cwd, &args)?;
+        let n = tail_lines.unwrap_or(20);
+        Ok(parse_log_failed_text(&raw, n))
+    }
+
+    /// Returns the jobs of a workflow run.
+    ///
+    /// # Arguments
+    ///
+    /// * `run_id` — the workflow run ID.
+    /// * `repo`   — optional `OWNER/REPO` to override the current directory context.
+    ///
+    /// # Returns
+    ///
+    /// JSON string with the `jobs` array for the given run.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if not authenticated, if the run does not exist, or if
+    /// the subprocess fails.
+    pub fn run_jobs(&self, run_id: u64, repo: Option<String>) -> Result<String> {
+        let cwd = self.session.root();
+        let run_id_str = run_id.to_string();
+        let mut args: Vec<&str> = vec![
+            "run",
+            "view",
+            &run_id_str,
+            "--json",
+            "jobs",
+            "--jq",
+            ".jobs[]",
+        ];
+        if let Some(r) = repo.as_ref() {
+            args.push("--repo");
+            args.push(r.as_str());
+        }
+        gh_cmd(cwd, &args)
+    }
+
+    /// Returns details of a single release by tag.
+    ///
+    /// # Arguments
+    ///
+    /// * `tag`  — the release tag (e.g. `"v1.0.0"`).
+    /// * `repo` — optional `OWNER/REPO` to override the current directory context.
+    ///
+    /// # Returns
+    ///
+    /// JSON string with fields: `name`, `tagName`, `publishedAt`, `assets`,
+    /// `body`, `url`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if not authenticated, if the tag does not exist, or if
+    /// the subprocess fails.
+    pub fn release_view(&self, tag: String, repo: Option<String>) -> Result<String> {
+        let cwd = self.session.root();
+        let mut args: Vec<&str> = vec![
+            "release",
+            "view",
+            &tag,
+            "--json",
+            "name,tagName,publishedAt,assets,body,url",
+        ];
+        if let Some(r) = repo.as_ref() {
+            args.push("--repo");
+            args.push(r.as_str());
+        }
+        gh_cmd(cwd, &args)
+    }
+
+    /// Lists releases in the repository.
+    ///
+    /// # Arguments
+    ///
+    /// * `limit` — maximum number of releases to return (passed to `--limit`).
+    /// * `repo`  — optional `OWNER/REPO` to override the current directory context.
+    ///
+    /// # Returns
+    ///
+    /// JSON string array of releases.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if not authenticated, if `gh` is unavailable, or if
+    /// the subprocess fails.
+    pub fn release_list(&self, limit: usize, repo: Option<String>) -> Result<String> {
+        let cwd = self.session.root();
+        let limit_str = limit.to_string();
+        let mut args: Vec<&str> = vec!["release", "list", "--limit", &limit_str];
+        if let Some(r) = repo.as_ref() {
+            args.push("--repo");
+            args.push(r.as_str());
+        }
+        gh_cmd(cwd, &args)
+    }
+
+    /// Lists workflows in the repository.
+    ///
+    /// # Arguments
+    ///
+    /// * `repo` — optional `OWNER/REPO` to override the current directory context.
+    ///
+    /// # Returns
+    ///
+    /// JSON string with fields: `name`, `state`, `id`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if not authenticated, if `gh` is unavailable, or if
+    /// the subprocess fails.
+    pub fn workflow_list(&self, repo: Option<String>) -> Result<String> {
+        let cwd = self.session.root();
+        let mut args: Vec<&str> = vec!["workflow", "list", "--json", "name,state,id"];
+        if let Some(r) = repo.as_ref() {
+            args.push("--repo");
+            args.push(r.as_str());
+        }
+        gh_cmd(cwd, &args)
+    }
+
+    /// Returns details of a single workflow by name or ID.
+    ///
+    /// # Arguments
+    ///
+    /// * `name_or_id` — the workflow file name, workflow name, or numeric ID.
+    /// * `repo`       — optional `OWNER/REPO` to override the current directory context.
+    ///
+    /// # Returns
+    ///
+    /// JSON string with fields: `name`, `state`, `path`, `id`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if not authenticated, if the workflow does not exist, or
+    /// if the subprocess fails.
+    pub fn workflow_view(&self, name_or_id: String, repo: Option<String>) -> Result<String> {
+        let cwd = self.session.root();
+        let mut args: Vec<&str> = vec![
+            "workflow",
+            "view",
+            &name_or_id,
+            "--json",
+            "name,state,path,id",
+        ];
+        if let Some(r) = repo.as_ref() {
+            args.push("--repo");
+            args.push(r.as_str());
+        }
+        gh_cmd(cwd, &args)
+    }
+
+    /// Returns the CI check statuses for a pull request.
+    ///
+    /// # Arguments
+    ///
+    /// * `number` — the pull request number.
+    /// * `repo`   — optional `OWNER/REPO` to override the current directory context.
+    ///
+    /// # Returns
+    ///
+    /// JSON string with fields: `name`, `status`, `conclusion`, `link`,
+    /// `workflow`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if not authenticated, if the PR does not exist, or if
+    /// the subprocess fails.
+    pub fn pr_checks(&self, number: u64, repo: Option<String>) -> Result<String> {
+        let cwd = self.session.root();
+        let number_str = number.to_string();
+        let mut args: Vec<&str> = vec![
+            "pr",
+            "checks",
+            &number_str,
+            "--json",
+            "name,status,conclusion,link,workflow",
+        ];
+        if let Some(r) = repo.as_ref() {
+            args.push("--repo");
+            args.push(r.as_str());
+        }
+        gh_cmd(cwd, &args)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -345,4 +593,204 @@ fn gh_cmd(cwd: &Path, args: &[&str]) -> Result<String> {
     }
 
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+// ---------------------------------------------------------------------------
+// Parse helpers
+// ---------------------------------------------------------------------------
+
+/// Parses `gh run view --log-failed` TSV output into a structured JSON string.
+///
+/// Each line of the output is expected to be tab-separated with four columns:
+/// `job_name \t step_name \t timestamp \t log_line`.
+///
+/// Lines that do not conform to this format are silently skipped (defensive
+/// parsing — gh CLI version drift is a known risk).
+///
+/// # Returns
+///
+/// A JSON string of the form:
+/// ```json
+/// { "failed_steps": [{ "job_name": "...", "step_name": "...", "log_tail": "..." }] }
+/// ```
+///
+/// If parsing yields no groups (e.g. malformed input with no valid TSV lines),
+/// the fallback form is returned:
+/// ```json
+/// { "failed_steps": [], "raw_output": "<trimmed raw stdout>" }
+/// ```
+///
+/// This function never panics; `.unwrap()` / `.expect()` are absent.
+pub(crate) fn parse_log_failed_text(raw: &str, tail_lines: usize) -> String {
+    use std::collections::BTreeMap;
+
+    // (job_name, step_name) -> Vec<log_line>
+    let mut groups: BTreeMap<(String, String), Vec<String>> = BTreeMap::new();
+
+    for line in raw.lines() {
+        // Expected format: job_name \t step_name \t timestamp \t log_line
+        let parts: Vec<&str> = line.splitn(4, '\t').collect();
+        if parts.len() < 4 {
+            continue; // defensive: skip malformed / header / blank lines
+        }
+        let job_name = parts[0].to_string();
+        let step_name = parts[1].to_string();
+        // parts[2] = timestamp — intentionally discarded
+        let log_line = parts[3].to_string();
+        groups
+            .entry((job_name, step_name))
+            .or_default()
+            .push(log_line);
+    }
+
+    if groups.is_empty() {
+        // Fallback: no parseable TSV lines found — return raw output for diagnosis.
+        let v = serde_json::json!({
+            "failed_steps": [],
+            "raw_output": raw.trim()
+        });
+        // serde_json::Value::to_string() is infallible for a well-formed Value.
+        return v.to_string();
+    }
+
+    let failed_steps: Vec<serde_json::Value> = groups
+        .into_iter()
+        .map(|((job_name, step_name), lines)| {
+            let tail: Vec<&String> = if lines.len() > tail_lines {
+                lines[lines.len() - tail_lines..].iter().collect()
+            } else {
+                lines.iter().collect()
+            };
+            let log_tail = tail
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+            serde_json::json!({
+                "job_name": job_name,
+                "step_name": step_name,
+                "log_tail": log_tail
+            })
+        })
+        .collect();
+
+    let v = serde_json::json!({ "failed_steps": failed_steps });
+    v.to_string()
+}
+
+// ---------------------------------------------------------------------------
+// Unit tests (gh CLI independent)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// (a) Single job / single step with 5 log lines — all 5 should appear in
+    /// the tail when `tail_lines >= 5`.
+    #[test]
+    fn parse_log_failed_single_step() {
+        let raw = "\
+job1\tstep1\t2024-01-01T00:00:00Z\tline A\n\
+job1\tstep1\t2024-01-01T00:00:01Z\tline B\n\
+job1\tstep1\t2024-01-01T00:00:02Z\tline C\n\
+job1\tstep1\t2024-01-01T00:00:03Z\tline D\n\
+job1\tstep1\t2024-01-01T00:00:04Z\tline E";
+
+        let result = parse_log_failed_text(raw, 20);
+        let v: serde_json::Value = serde_json::from_str(&result).expect("valid JSON");
+
+        let steps = v["failed_steps"].as_array().expect("array");
+        assert_eq!(steps.len(), 1, "expected one failed step");
+
+        let s = &steps[0];
+        assert_eq!(s["job_name"], "job1");
+        assert_eq!(s["step_name"], "step1");
+        let tail = s["log_tail"].as_str().expect("string");
+        assert!(tail.contains("line A"), "all 5 lines should be in tail");
+        assert!(tail.contains("line E"));
+    }
+
+    /// (b) Multiple jobs × multiple steps — groups are keyed by (job, step)
+    /// and BTreeMap ordering is stable.
+    #[test]
+    fn parse_log_failed_multiple_jobs_steps() {
+        let raw = "\
+jobA\tstep1\t2024-01-01T00:00:00Z\tlogA1\n\
+jobA\tstep2\t2024-01-01T00:00:01Z\tlogA2\n\
+jobB\tstep1\t2024-01-01T00:00:02Z\tlogB1\n\
+jobB\tstep1\t2024-01-01T00:00:03Z\tlogB2";
+
+        let result = parse_log_failed_text(raw, 20);
+        let v: serde_json::Value = serde_json::from_str(&result).expect("valid JSON");
+
+        let steps = v["failed_steps"].as_array().expect("array");
+        assert_eq!(steps.len(), 3, "expected three (job, step) groups");
+
+        // BTreeMap order: (jobA, step1), (jobA, step2), (jobB, step1)
+        assert_eq!(steps[0]["job_name"], "jobA");
+        assert_eq!(steps[0]["step_name"], "step1");
+        assert_eq!(steps[1]["job_name"], "jobA");
+        assert_eq!(steps[1]["step_name"], "step2");
+        assert_eq!(steps[2]["job_name"], "jobB");
+        assert_eq!(steps[2]["step_name"], "step1");
+        let tail_b1 = steps[2]["log_tail"].as_str().expect("string");
+        assert!(tail_b1.contains("logB1"));
+        assert!(tail_b1.contains("logB2"));
+    }
+
+    /// (b2) Tail truncation — only the last `tail_lines` entries per group.
+    #[test]
+    fn parse_log_failed_tail_truncation() {
+        // 5 lines for step1, tail_lines=2 → only last 2 should appear
+        let raw = "\
+job1\tstep1\t2024-01-01T00:00:00Z\tline1\n\
+job1\tstep1\t2024-01-01T00:00:01Z\tline2\n\
+job1\tstep1\t2024-01-01T00:00:02Z\tline3\n\
+job1\tstep1\t2024-01-01T00:00:03Z\tline4\n\
+job1\tstep1\t2024-01-01T00:00:04Z\tline5";
+
+        let result = parse_log_failed_text(raw, 2);
+        let v: serde_json::Value = serde_json::from_str(&result).expect("valid JSON");
+
+        let steps = v["failed_steps"].as_array().expect("array");
+        let tail = steps[0]["log_tail"].as_str().expect("string");
+        assert!(!tail.contains("line1"), "line1 should be truncated");
+        assert!(!tail.contains("line2"), "line2 should be truncated");
+        assert!(!tail.contains("line3"), "line3 should be truncated");
+        assert!(tail.contains("line4"), "line4 should be in tail");
+        assert!(tail.contains("line5"), "line5 should be in tail");
+    }
+
+    /// (c) Malformed / empty input → fallback JSON with `failed_steps: []`
+    /// and `raw_output` field present.
+    #[test]
+    fn parse_log_failed_malformed_fallback() {
+        let raw = "this line has no tabs at all\nanother bad line";
+
+        let result = parse_log_failed_text(raw, 20);
+        let v: serde_json::Value = serde_json::from_str(&result).expect("valid JSON");
+
+        let steps = v["failed_steps"].as_array().expect("array");
+        assert!(
+            steps.is_empty(),
+            "failed_steps must be empty for malformed input"
+        );
+
+        let raw_output = v["raw_output"].as_str().expect("raw_output present");
+        assert!(
+            raw_output.contains("no tabs"),
+            "raw_output should contain original text"
+        );
+    }
+
+    /// (c2) Empty input → fallback JSON.
+    #[test]
+    fn parse_log_failed_empty_input() {
+        let result = parse_log_failed_text("", 20);
+        let v: serde_json::Value = serde_json::from_str(&result).expect("valid JSON");
+
+        let steps = v["failed_steps"].as_array().expect("array");
+        assert!(steps.is_empty());
+    }
 }
