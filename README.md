@@ -121,10 +121,21 @@ invocation checks `gh auth status` and returns a typed error if unauthenticated.
 | `gh_issue_view` | View a single issue as JSON. Requires `number`. |
 | `gh_repo_view` | Repository metadata as JSON (name/owner/defaultBranchRef). |
 | `gh_run_list` | List Actions workflow runs as JSON. `limit` optional (default 30). |
+| `gh_run_view` | View a single workflow run as JSON (status/conclusion/jobs/...). Requires `run_id`. |
+| `gh_run_log_failed` | View failed-step logs of a workflow run, parsed into `{failed_steps: [{job_name, step_name, log_tail}]}`. |
+| `gh_run_jobs` | List jobs of a workflow run as JSON. Requires `run_id`. |
+| `gh_release_view` | View a single release (tag, assets, body) as JSON. Requires `tag`. |
+| `gh_release_list` | List releases as JSON. `limit` optional (default 30). |
+| `gh_workflow_list` | List workflows as JSON (name/state/id). |
+| `gh_workflow_view` | View a single workflow (path/state/latest_run) as JSON. Requires `name_or_id`. |
+| `gh_pr_checks` | List CI check results of a PR as JSON. Requires `number`. |
 
 **Write operations not exposed**: `gh pr create` / `gh issue create` /
 `gh release create` / `gh pr merge` are deliberately not exposed as MCP tools.
-Users invoke these via shell directly.
+`gh run cancel` (write op) and `gh run watch` (long-polling, incompatible with
+MCP request-response semantics — use `gh_run_view` + polling instead) are also
+absent. `gh search repos` is out of scope for this release.
+Users invoke write operations via shell directly.
 
 ### Git (write)
 

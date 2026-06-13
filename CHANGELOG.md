@@ -6,6 +6,16 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **`crates/gh` — 8 additional read-only tools** — adds `gh_run_view`,
+  `gh_run_log_failed`, `gh_run_jobs`, `gh_release_view`, `gh_release_list`,
+  `gh_workflow_list`, `gh_workflow_view`, `gh_pr_checks`. All inherit the v0.2.0
+  invariants: per-call `gh auth status` check (no caching),
+  `Command::new("gh").args(&[...])` with shell=false, and structural read-only
+  (write ops like `gh run cancel` / `gh release create` / `gh pr merge` remain
+  absent). `gh_run_log_failed` parses `gh run view --log-failed` text output into
+  `{ failed_steps: [{ job_name, step_name, log_tail }] }`. MCP tool surface grows
+  from 8 to 16 gh tools.
+
 ### Changed
 
 ### Deprecated
