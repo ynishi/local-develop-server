@@ -124,6 +124,8 @@ async fn list_tools_includes_static_surface() {
         "sandbox_history",
         "sandbox_python",
         "sandbox_python_file",
+        "gh_run_view",
+        "gh_run_log_failed",
     ] {
         assert!(
             names.contains(&expected),
