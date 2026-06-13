@@ -4,6 +4,20 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+### Changed
+
+### Deprecated
+
+### Removed
+
+### Fixed
+
+### Security
+
+## [0.3.1] - 2026-06-13
+
 ### Fixed
 
 - **`crates/gh` — `gh_workflow_view` upstream impl bug** — the v0.3.0 impl
