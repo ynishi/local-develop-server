@@ -9,7 +9,7 @@ use anyhow::Result;
 use lds_core::config::Config;
 use lds_core::{LdsState, Session, SessionConfig, check_binaries};
 use lds_gh::GhModule;
-use lds_git::GitModule;
+use lds_git::{GitModule, ResetMode};
 use lds_recipe::RecipeModule;
 use lds_sandbox::fs::SandboxFs;
 use lds_sandbox::python::SandboxPython;
@@ -265,6 +265,71 @@ struct GitBranchDeleteReq {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+struct GitFetchReq {
+    #[serde(default)]
+    remote: Option<String>,
+    #[serde(default)]
+    refspec: Option<String>,
+    #[serde(default)]
+    prune: bool,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct GitBranchStatusReq {
+    branch: String,
+    base: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct GitUnpushedCommitsReq {
+    branch: String,
+    #[serde(default = "default_origin")]
+    remote: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct GitIsPushedReq {
+    commit: String,
+    #[serde(default = "default_origin")]
+    remote: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct GitTagPushedReq {
+    tag: String,
+    #[serde(default = "default_origin")]
+    remote: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct GitWorktreeStateReq {
+    #[serde(default)]
+    branch: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct GitDiffReq {
+    /// `true` -> `git diff --cached` (HEAD vs index).
+    /// `false` (default) -> `git diff` (index vs worktree).
+    #[serde(default)]
+    staged: bool,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct GitResetReq {
+    /// Working directory inside a session-owned worktree.
+    working_dir: String,
+    /// `"soft"` | `"mixed"` | `"hard"`.
+    mode: String,
+    /// Revspec or sha to move HEAD to.
+    target: String,
+}
+
+fn default_origin() -> String {
+    "origin".to_string()
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 struct RecipeRunReq {
     recipe: String,
     #[serde(default)]
@@ -454,6 +519,19 @@ fn no_session_error() -> McpError {
     McpError::internal_error("no session", None)
 }
 
+/// Serialise a tool result into a [`CallToolResult`] whose single text block
+/// is pretty-printed JSON.
+///
+/// Every typed handler funnels through here so the wire shape is uniform:
+/// `Content::text(serde_json::to_string_pretty(&out)?)`. Inlining this at
+/// each handler would duplicate the same map_err six lines deep across ~30
+/// call sites and let formatting drift between them.
+fn json_result<T: serde::Serialize>(value: &T) -> Result<CallToolResult, McpError> {
+    let text = serde_json::to_string_pretty(value)
+        .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+    Ok(CallToolResult::success(vec![Content::text(text)]))
+}
+
 /// Build and initialize all session-dependent modules on `inner`.
 ///
 /// This is the single construction path shared by the explicit `session_start`
@@ -517,17 +595,19 @@ impl LdsServer {
         ))]))
     }
 
-    #[tool(description = "Show git working tree status")]
+    #[tool(
+        description = "Show git working tree status as JSON (branch, head_sha, staged/unstaged/untracked arrays, clean flag)"
+    )]
     async fn git_status(&self) -> Result<CallToolResult, McpError> {
         let inner = self.state.read().await;
         let git = inner.git.as_ref().ok_or_else(no_session_error)?;
         let out = git
             .status()
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        Ok(CallToolResult::success(vec![Content::text(out)]))
+        json_result(&out)
     }
 
-    #[tool(description = "Show git commit log")]
+    #[tool(description = "Show git commit log as JSON ({commits: [{sha, short_sha, summary}]})")]
     async fn git_log(
         &self,
         Parameters(req): Parameters<GitLogReq>,
@@ -537,27 +617,32 @@ impl LdsServer {
         let out = git
             .log(req.max_count)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        Ok(CallToolResult::success(vec![Content::text(out)]))
+        json_result(&out)
     }
 
-    #[tool(description = "Show git diff (working tree vs HEAD)")]
-    async fn git_diff(&self) -> Result<CallToolResult, McpError> {
+    #[tool(
+        description = "Show git diff as JSON. staged=false (default) → index vs worktree; staged=true → HEAD vs index (git diff --cached)"
+    )]
+    async fn git_diff(
+        &self,
+        Parameters(req): Parameters<GitDiffReq>,
+    ) -> Result<CallToolResult, McpError> {
         let inner = self.state.read().await;
         let git = inner.git.as_ref().ok_or_else(no_session_error)?;
         let out = git
-            .diff()
+            .diff(req.staged)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        Ok(CallToolResult::success(vec![Content::text(out)]))
+        json_result(&out)
     }
 
-    #[tool(description = "List git worktrees with session ownership annotation")]
+    #[tool(description = "List git worktrees as JSON, each with session ownership flag")]
     async fn git_worktree_list(&self) -> Result<CallToolResult, McpError> {
         let inner = self.state.read().await;
         let git = inner.git.as_ref().ok_or_else(no_session_error)?;
         let out = git
             .worktree_list()
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        Ok(CallToolResult::success(vec![Content::text(out)]))
+        json_result(&out)
     }
 
     #[tool(description = "Create a git worktree under .worktrees/ with a new branch")]
@@ -570,7 +655,7 @@ impl LdsServer {
         let out = git
             .worktree_add(&req.name, &req.branch, req.base_branch.as_deref())
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        Ok(CallToolResult::success(vec![Content::text(out)]))
+        json_result(&out)
     }
 
     #[tool(description = "Remove a session-owned git worktree")]
@@ -583,7 +668,7 @@ impl LdsServer {
         let out = git
             .worktree_remove(&req.name)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        Ok(CallToolResult::success(vec![Content::text(out)]))
+        json_result(&out)
     }
 
     #[tool(description = "Stage and commit changes in a session-owned working directory")]
@@ -597,7 +682,7 @@ impl LdsServer {
         let out = git
             .commit(&working_dir, &req.message, req.paths.as_deref())
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        Ok(CallToolResult::success(vec![Content::text(out)]))
+        json_result(&out)
     }
 
     #[tool(description = "Merge a branch into another in a session-owned working directory")]
@@ -618,7 +703,7 @@ impl LdsServer {
         let out = git
             .merge(&req.branch, &req.into_branch, &working_dir)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        Ok(CallToolResult::success(vec![Content::text(out)]))
+        json_result(&out)
     }
 
     #[tool(description = "Delete a session-owned branch")]
@@ -631,7 +716,136 @@ impl LdsServer {
         let out = git
             .branch_delete(&req.branch)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        Ok(CallToolResult::success(vec![Content::text(out)]))
+        json_result(&out)
+    }
+
+    #[tool(description = "Fetch from a remote (default origin)")]
+    async fn git_fetch(
+        &self,
+        Parameters(req): Parameters<GitFetchReq>,
+    ) -> Result<CallToolResult, McpError> {
+        let inner = self.state.read().await;
+        let git = inner.git.as_ref().ok_or_else(no_session_error)?;
+        let out = git
+            .fetch(req.remote.as_deref(), req.refspec.as_deref(), req.prune)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        json_result(&out)
+    }
+
+    #[tool(description = "List git remotes as JSON ({remotes: [{name, fetch_url, push_url}]})")]
+    async fn git_remote_list(&self) -> Result<CallToolResult, McpError> {
+        let inner = self.state.read().await;
+        let git = inner.git.as_ref().ok_or_else(no_session_error)?;
+        let out = git
+            .remote_list()
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        json_result(&out)
+    }
+
+    #[tool(description = "Show ahead/behind counts between branch and base (e.g. origin/main)")]
+    async fn git_branch_status(
+        &self,
+        Parameters(req): Parameters<GitBranchStatusReq>,
+    ) -> Result<CallToolResult, McpError> {
+        let inner = self.state.read().await;
+        let git = inner.git.as_ref().ok_or_else(no_session_error)?;
+        let out = git
+            .branch_status(&req.branch, &req.base)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        json_result(&out)
+    }
+
+    #[tool(description = "List commits on branch not yet pushed to <remote>/<branch>")]
+    async fn git_unpushed_commits(
+        &self,
+        Parameters(req): Parameters<GitUnpushedCommitsReq>,
+    ) -> Result<CallToolResult, McpError> {
+        let inner = self.state.read().await;
+        let git = inner.git.as_ref().ok_or_else(no_session_error)?;
+        let out = git
+            .unpushed_commits(&req.branch, &req.remote)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        json_result(&out)
+    }
+
+    #[tool(description = "Check whether a commit is reachable from any remote ref")]
+    async fn git_is_pushed(
+        &self,
+        Parameters(req): Parameters<GitIsPushedReq>,
+    ) -> Result<CallToolResult, McpError> {
+        let inner = self.state.read().await;
+        let git = inner.git.as_ref().ok_or_else(no_session_error)?;
+        let out = git
+            .is_pushed(&req.commit, &req.remote)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        json_result(&out)
+    }
+
+    #[tool(description = "Check whether a tag is pushed to a remote via git ls-remote --tags")]
+    async fn git_tag_pushed(
+        &self,
+        Parameters(req): Parameters<GitTagPushedReq>,
+    ) -> Result<CallToolResult, McpError> {
+        let inner = self.state.read().await;
+        let git = inner.git.as_ref().ok_or_else(no_session_error)?;
+        let out = git
+            .tag_pushed(&req.tag, &req.remote)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        json_result(&out)
+    }
+
+    #[tool(
+        description = "Snapshot of a worktree state as JSON (branch, tracking, ahead, behind, uncommitted, clean, sync)"
+    )]
+    async fn git_worktree_state(
+        &self,
+        Parameters(req): Parameters<GitWorktreeStateReq>,
+    ) -> Result<CallToolResult, McpError> {
+        let inner = self.state.read().await;
+        let git = inner.git.as_ref().ok_or_else(no_session_error)?;
+        let out = git
+            .worktree_state(req.branch.as_deref())
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        json_result(&out)
+    }
+
+    #[tool(
+        description = "Reset HEAD in a session-owned working directory. mode = soft | mixed | hard"
+    )]
+    async fn git_reset(
+        &self,
+        Parameters(req): Parameters<GitResetReq>,
+    ) -> Result<CallToolResult, McpError> {
+        let inner = self.state.read().await;
+        let git = inner.git.as_ref().ok_or_else(no_session_error)?;
+        let mode = match req.mode.as_str() {
+            "soft" => ResetMode::Soft,
+            "mixed" => ResetMode::Mixed,
+            "hard" => ResetMode::Hard,
+            other => {
+                return Err(McpError::internal_error(
+                    format!("unknown reset mode {other:?} (expected soft|mixed|hard)"),
+                    None,
+                ));
+            }
+        };
+        let working_dir = PathBuf::from(&req.working_dir);
+        let out = git
+            .reset(&working_dir, mode, &req.target)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        json_result(&out)
+    }
+
+    #[tool(
+        description = "Adopt orphan worktrees under .worktrees/ left behind by a previous session"
+    )]
+    async fn git_session_release(&self) -> Result<CallToolResult, McpError> {
+        let mut inner = self.state.write().await;
+        let git = inner.git.as_mut().ok_or_else(no_session_error)?;
+        let out = git
+            .session_release()
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        json_result(&out)
     }
 
     /// Check gh CLI authentication status.

@@ -172,27 +172,25 @@ async fn git_status_round_trip() {
         .unwrap();
 
     // --- clean phase ---
-    // A freshly-initialised repo with only a committed README.md.
-    // GitModule::status() uses git2::Repository::statuses() which returns
-    // no entries for a clean tree, producing "".  The .worktrees/ dir created
-    // by TempRepo::new() is untracked and may appear as Status(WT_NEW), so we
-    // accept either an empty string or a Status(…) debug-format entry.
+    // git_status now returns typed JSON. The freshly-initialised repo only
+    // has the committed README.md plus the `.worktrees/` dir, so we expect
+    // staged + unstaged to be empty. (untracked may include `.worktrees`,
+    // which is benign and explicitly allowed.)
     let result_clean = client
         .peer()
         .call_tool(call_params("git_status", json!({})))
         .await
         .unwrap();
     let text_clean = extract_text(&result_clean);
-    assert!(
-        text_clean.trim().is_empty() || text_clean.contains("Status("),
-        "clean repo: expected empty output or Status(...) entries, got: {text_clean:?}"
-    );
+    let json_clean: Value =
+        serde_json::from_str(&text_clean).expect("git_status clean: payload must be JSON");
+    assert_eq!(json_clean["staged"], json!([]), "got: {text_clean}");
+    assert_eq!(json_clean["unstaged"], json!([]), "got: {text_clean}");
+    assert_eq!(json_clean["branch"], json!("main"), "got: {text_clean}");
 
     // --- dirty phase ---
-    // Write an untracked file; git2 will report it as WT_NEW.
-    // The output must contain the Status(…) debug-format token and the
-    // file-path token "dirty.txt", verifying the structural contract of
-    // GitModule::status() on a modified working tree.
+    // An untracked file is now reported under `untracked`, not as a free-
+    // form debug-format token. The path must appear verbatim in that array.
     std::fs::write(repo.dir.path().join("dirty.txt"), "content\n").unwrap();
     let result_dirty = client
         .peer()
@@ -200,9 +198,14 @@ async fn git_status_round_trip() {
         .await
         .unwrap();
     let text_dirty = extract_text(&result_dirty);
+    let json_dirty: Value =
+        serde_json::from_str(&text_dirty).expect("git_status dirty: payload must be JSON");
+    let untracked = json_dirty["untracked"]
+        .as_array()
+        .expect("untracked must be an array");
     assert!(
-        text_dirty.contains("Status(") && text_dirty.contains("dirty.txt"),
-        "dirty repo: expected Status(...) entry mentioning dirty.txt, got: {text_dirty:?}"
+        untracked.iter().any(|v| v.as_str() == Some("dirty.txt")),
+        "expected dirty.txt in untracked, got: {text_dirty}"
     );
 
     client.cancel().await.unwrap();
