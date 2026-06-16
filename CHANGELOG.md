@@ -16,6 +16,33 @@ All notable changes to this project will be documented in this file.
 
 ### Security
 
+## [0.3.2] - 2026-06-16
+
+### Added
+
+- **`crates/git` — 3 new MCP tools** — adds `git_diff(staged: bool)` (separates
+  HEAD-vs-index from index-vs-worktree), `git_reset(working_dir, mode, target)`
+  (soft / mixed / hard reset with ownership check), and `git_session_release`
+  (adopts orphan worktrees from a previous session).
+- **`crates/git` — typed `Output` structs for every method** — `StatusOutput`,
+  `DiffOutput`, `BranchStatusOutput`, etc., serde-derived in `output.rs` as the
+  shared shape boundary. lds MCP wire shape is now uniform pretty-printed JSON
+  via `json_result()` for every `git_*` tool.
+- **`crates/git` — status partitioning** — `git_status` partitions
+  `staged` / `unstaged` / `untracked` via `git2::StatusOptions` instead of
+  flattening the Status debug flags.
+
+### Changed
+
+- **`crates/git` — `lib.rs` split into `read` / `remote` / `write` / `reset` /
+  `session` modules** with `output.rs` as the shared shape boundary. `lib.rs`
+  shrinks from 309 to ~25 lines of module declarations.
+- **`crates/git` — every method return type switched from plain-text `String`
+  to typed `Output` structs** (breaking change for direct `lds-git` library
+  consumers; lds MCP callers see uniform pretty-printed JSON, no change in
+  observed behavior). Tests rewritten for typed assertions; `e2e_mcp` parses
+  the JSON envelope.
+
 ## [0.3.1] - 2026-06-13
 
 ### Fixed

@@ -23,10 +23,7 @@ impl GitModule {
     /// Already-owned entries are skipped silently — calling this repeatedly
     /// is idempotent.
     pub fn session_release(&mut self) -> Result<SessionReleaseOutput> {
-        let raw = git_cmd(
-            self.session().root(),
-            &["worktree", "list", "--porcelain"],
-        )?;
+        let raw = git_cmd(self.session().root(), &["worktree", "list", "--porcelain"])?;
 
         let mut adopted_worktrees: Vec<PathBuf> = Vec::new();
         let mut adopted_branches: Vec<String> = Vec::new();

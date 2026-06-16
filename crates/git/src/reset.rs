@@ -21,12 +21,7 @@ impl GitModule {
     /// * [`ResetMode::Soft`]   — move HEAD only (`git reset --soft`)
     /// * [`ResetMode::Mixed`]  — also reset index but keep worktree (`--mixed`)
     /// * [`ResetMode::Hard`]   — also overwrite worktree (`--hard`)
-    pub fn reset(
-        &self,
-        working_dir: &Path,
-        mode: ResetMode,
-        target: &str,
-    ) -> Result<ResetOutput> {
+    pub fn reset(&self, working_dir: &Path, mode: ResetMode, target: &str) -> Result<ResetOutput> {
         self.ensure_session_scope(working_dir)?;
 
         let previous_head = git_cmd(working_dir, &["rev-parse", "HEAD"])?;

@@ -146,10 +146,7 @@ impl GitModule {
 
     /// List every linked worktree, annotated with session-ownership.
     pub fn worktree_list(&self) -> Result<WorktreeListOutput> {
-        let raw = git_cmd(
-            self.session().root(),
-            &["worktree", "list", "--porcelain"],
-        )?;
+        let raw = git_cmd(self.session().root(), &["worktree", "list", "--porcelain"])?;
 
         let mut worktrees = Vec::new();
         let mut current_path: Option<PathBuf> = None;
@@ -159,7 +156,11 @@ impl GitModule {
         for line in raw.lines() {
             if line.is_empty() {
                 if let Some(p) = current_path.take() {
-                    worktrees.push(self.make_worktree_entry(p, current_head.take(), current_branch.take()));
+                    worktrees.push(self.make_worktree_entry(
+                        p,
+                        current_head.take(),
+                        current_branch.take(),
+                    ));
                 }
                 continue;
             }
@@ -168,9 +169,7 @@ impl GitModule {
             } else if let Some(h) = line.strip_prefix("HEAD ") {
                 current_head = Some(h.to_string());
             } else if let Some(b) = line.strip_prefix("branch ") {
-                current_branch = Some(
-                    b.trim_start_matches("refs/heads/").to_string(),
-                );
+                current_branch = Some(b.trim_start_matches("refs/heads/").to_string());
             }
         }
         if let Some(p) = current_path {
@@ -229,4 +228,3 @@ fn unstaged_kind(st: Status) -> Option<StatusKind> {
         None
     }
 }
-

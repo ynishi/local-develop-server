@@ -179,7 +179,10 @@ fn status_partitions_staged_unstaged_untracked() {
     std::fs::write(tmp.path().join("untracked.txt"), "u\n").unwrap();
     let status = git.status().unwrap();
     assert!(
-        status.untracked.iter().any(|p| p.ends_with("untracked.txt")),
+        status
+            .untracked
+            .iter()
+            .any(|p| p.ends_with("untracked.txt")),
         "untracked was {:?}",
         status.untracked
     );
@@ -192,7 +195,10 @@ fn status_partitions_staged_unstaged_untracked() {
         .unwrap();
     let status = git.status().unwrap();
     assert!(
-        status.staged.iter().any(|e| e.path.ends_with("untracked.txt")),
+        status
+            .staged
+            .iter()
+            .any(|e| e.path.ends_with("untracked.txt")),
         "staged was {:?}",
         status.staged
     );
@@ -324,7 +330,8 @@ fn session_release_adopts_orphan_worktree() {
 
     // After adoption, branch_delete on `left/over` should succeed once the
     // worktree has been removed (a branch can't be deleted while checked out).
-    git.worktree_remove("leftover").expect("worktree_remove after adoption");
+    git.worktree_remove("leftover")
+        .expect("worktree_remove after adoption");
     git.branch_delete("left/over")
         .expect("branch_delete after adoption");
 }
