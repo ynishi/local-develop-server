@@ -21,6 +21,7 @@ lds-git = { path = "../git", version = "0.3.2" }
 lds-gh = { path = "../gh", version = "0.3.2" }
 lds-recipe = { path = "../recipe", version = "0.3.2" }
 lds-sandbox = { path = "../sandbox", version = "0.3.2" }
+lds-journal = { path = "../journal", version = "0.3.2" }
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true

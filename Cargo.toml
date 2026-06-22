@@ -4,6 +4,7 @@ members = [
     "crates/core",
     "crates/gh",
     "crates/git",
+    "crates/journal",
     "crates/recipe",
     "crates/sandbox",
     "crates/session",

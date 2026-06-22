@@ -10,6 +10,16 @@ use lds_core::config::Config;
 use lds_core::{LdsState, Session, SessionConfig, check_binaries};
 use lds_gh::GhModule;
 use lds_git::{GitModule, ResetMode};
+use lds_journal::journal_mcp_core;
+use lds_journal::tools::{
+    ChapterListRow, JournalAppendProgressParams, JournalAppendSectionParams,
+    JournalChapterListParams, JournalCloseChapterParams, JournalGrepParams, JournalImportParams,
+    JournalInfoParams, JournalInfoResult, JournalOpenChapterParams, JournalOpenChaptersParams,
+    JournalProgressOfParams, JournalProjectionAttachParams, JournalProjectionDetachParams,
+    JournalProjectionRebuildParams, JournalSchemaListParams, JournalSchemaLoadParams,
+    JournalSchemaShowParams, JournalTailParams, chapter_replay_to_json, paginate,
+};
+use lds_journal::JournalModule;
 use lds_recipe::RecipeModule;
 use lds_sandbox::fs::SandboxFs;
 use lds_sandbox::python::SandboxPython;
@@ -38,6 +48,7 @@ struct Inner {
     recipe: Option<RecipeModule>,
     sandbox_fs: Option<SandboxFs>,
     sandbox_python: Option<SandboxPython>,
+    journal: Option<JournalModule>,
     startup_cwd: Option<PathBuf>,
     startup_global_dirs: Arc<Vec<PathBuf>>,
 }
@@ -202,6 +213,7 @@ impl LdsServer {
                 recipe: None,
                 sandbox_fs: None,
                 sandbox_python: None,
+                journal: None,
                 startup_cwd,
                 startup_global_dirs,
             })),
@@ -554,6 +566,35 @@ fn build_session_modules(
             .map_err(|e| McpError::internal_error(e.to_string(), None))?,
     );
     inner.sandbox_python = Some(SandboxPython::new(session.root()));
+    inner.journal = Some({
+        let module = JournalModule::new(Arc::clone(&session))
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        // Opt-in file projection: LDS_JOURNAL_FILE_ENABLE turns it on; the
+        // path defaults to <root>/workspace/journal.md but can be overridden
+        // via LDS_JOURNAL_FILE_OUTPUT_PATH (relative paths resolve against
+        // session.root()).
+        if std::env::var_os("LDS_JOURNAL_FILE_ENABLE").is_some() {
+            match std::env::var_os("LDS_JOURNAL_FILE_OUTPUT_PATH") {
+                Some(raw) => {
+                    let p = PathBuf::from(raw);
+                    let resolved = if p.is_absolute() {
+                        p
+                    } else {
+                        session.root().join(p)
+                    };
+                    module
+                        .enable_file_projection_at(resolved)
+                        .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+                }
+                None => {
+                    module
+                        .enable_file_projection()
+                        .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+                }
+            }
+        }
+        module
+    });
     Ok(session)
 }
 
@@ -1370,6 +1411,552 @@ impl LdsServer {
             binary_lines.join("\n"),
         );
         Ok(CallToolResult::success(vec![Content::text(info)]))
+    }
+
+    // -----------------------------------------------------------------------
+    // Journal — 17 tools ported from journal-mcp v0.4.0 (crates.io: journal-mcp-core 0.4.0)
+    //
+    // session.root() is the SoT for all path resolution: per-call
+    // project_root overrides are gone. file projection (the
+    // <root>/workspace/journal.md rendering) is opt-in via:
+    //   (a) LDS_JOURNAL_FILE_ENABLE env at session start, or
+    //   (b) journal_projection_attach { name="file", output_path? } MCP call.
+    // -----------------------------------------------------------------------
+
+    #[tool(
+        description = "Open a new journal chapter (name + schema_id) and return its chapter ID."
+    )]
+    async fn journal_open_chapter(
+        &self,
+        Parameters(req): Parameters<JournalOpenChapterParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let inner = self.state.read().await;
+        let journal = inner.journal.as_ref().ok_or_else(no_session_error)?;
+        let id = journal
+            .lock_core()
+            .open_chapter(&req.name, &req.schema_id)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        json_result(&serde_json::json!({ "chapter_id": id.0 }))
+    }
+
+    #[tool(
+        description = "Append a section row to an open chapter. \
+                       Returns {\"warnings\": [{kind, section, hint}, ...]} (may be empty)."
+    )]
+    async fn journal_append_section(
+        &self,
+        Parameters(req): Parameters<JournalAppendSectionParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let inner = self.state.read().await;
+        let journal = inner.journal.as_ref().ok_or_else(no_session_error)?;
+        let chapter_id = journal_mcp_core::ChapterId(req.chapter_id);
+        let warnings = journal
+            .lock_core()
+            .append_section(&chapter_id, &req.section_name, &req.body)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        let warning_objs: Vec<serde_json::Value> = warnings
+            .iter()
+            .map(|w| {
+                serde_json::json!({
+                    "kind": w.kind,
+                    "section": w.section,
+                    "hint": w.hint,
+                })
+            })
+            .collect();
+        json_result(&serde_json::json!({ "warnings": warning_objs }))
+    }
+
+    #[tool(
+        description = "Append a single line to the 'Progress' section of an open chapter. \
+                       Returns {\"warnings\": [...]} (may be empty)."
+    )]
+    async fn journal_append_progress(
+        &self,
+        Parameters(req): Parameters<JournalAppendProgressParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let inner = self.state.read().await;
+        let journal = inner.journal.as_ref().ok_or_else(no_session_error)?;
+        let chapter_id = journal_mcp_core::ChapterId(req.chapter_id);
+        let warnings = journal
+            .lock_core()
+            .append_progress(&chapter_id, &req.line)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        let warning_objs: Vec<serde_json::Value> = warnings
+            .iter()
+            .map(|w| {
+                serde_json::json!({
+                    "kind": w.kind,
+                    "section": w.section,
+                    "hint": w.hint,
+                })
+            })
+            .collect();
+        json_result(&serde_json::json!({ "warnings": warning_objs }))
+    }
+
+    #[tool(
+        description = "Close an open chapter. \
+                       Validates all schema requires preconditions before writing. \
+                       Returns {\"ok\": true} on success."
+    )]
+    async fn journal_close_chapter(
+        &self,
+        Parameters(req): Parameters<JournalCloseChapterParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let inner = self.state.read().await;
+        let journal = inner.journal.as_ref().ok_or_else(no_session_error)?;
+        let chapter_id = journal_mcp_core::ChapterId(req.chapter_id);
+        journal
+            .lock_core()
+            .close_chapter(&chapter_id)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        json_result(&serde_json::json!({ "ok": true }))
+    }
+
+    #[tool(
+        description = "Load a ChapterSchema YAML literal into the SchemaRegistry L2 layer. \
+                       Returns the registry key that was inserted (e.g. \"journal-mcp-canonical-v1\"). \
+                       Idempotent: repeated calls with the same YAML overwrite with the same value."
+    )]
+    async fn journal_schema_load(
+        &self,
+        Parameters(req): Parameters<JournalSchemaLoadParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let inner = self.state.read().await;
+        let journal = inner.journal.as_ref().ok_or_else(no_session_error)?;
+        let key = journal
+            .lock_core()
+            .load_schema_yaml(&req.yaml)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        json_result(&serde_json::json!({ "key": key }))
+    }
+
+    #[tool(
+        description = "List all available schema registry keys (built-in L1 + project-local L2). \
+                       Returns {\"keys\": [\"...\", ...]}."
+    )]
+    async fn journal_schema_list(
+        &self,
+        Parameters(_req): Parameters<JournalSchemaListParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let inner = self.state.read().await;
+        let journal = inner.journal.as_ref().ok_or_else(no_session_error)?;
+        let keys = journal.lock_core().schema_keys();
+        json_result(&serde_json::json!({ "keys": keys }))
+    }
+
+    #[tool(
+        description = "Show the specification of a given schema registry key as a JSON object. \
+                       Returns an error if the key is not found."
+    )]
+    async fn journal_schema_show(
+        &self,
+        Parameters(req): Parameters<JournalSchemaShowParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let inner = self.state.read().await;
+        let journal = inner.journal.as_ref().ok_or_else(no_session_error)?;
+        let core = journal.lock_core();
+        let spec = core.schema_spec(&req.key).ok_or_else(|| {
+            McpError::invalid_params(format!("schema not found: {}", req.key), None)
+        })?;
+        let sections: serde_json::Map<String, serde_json::Value> = spec
+            .sections()
+            .iter()
+            .map(|(k, v)| {
+                let section_json = serde_json::json!({
+                    "required": v.required,
+                    "evidence_required": v.evidence_required,
+                    "description": v.description,
+                });
+                (k.clone(), section_json)
+            })
+            .collect();
+        let states: Vec<serde_json::Value> = spec
+            .states()
+            .iter()
+            .map(|s| {
+                serde_json::json!({
+                    "id": s.id,
+                    "initial": s.initial,
+                    "terminal": s.terminal,
+                })
+            })
+            .collect();
+        let transitions: Vec<serde_json::Value> = spec
+            .transitions()
+            .iter()
+            .map(|t| serde_json::json!({ "from": t.from, "to": t.to, "on": t.on }))
+            .collect();
+        let val = serde_json::json!({
+            "schema_id": spec.schema_id(),
+            "version": spec.version(),
+            "states": states,
+            "transitions": transitions,
+            "sections": sections,
+            "section_order": spec.section_order(),
+            "chapter_header": spec.chapter_header(),
+            "section_header": spec.section_header(),
+        });
+        json_result(&val)
+    }
+
+    #[tool(
+        description = "Fetch the last N chapters (default 10), newest first. \
+                       Returns a JSON array of chapter objects with metadata and events."
+    )]
+    async fn journal_tail(
+        &self,
+        Parameters(req): Parameters<JournalTailParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let inner = self.state.read().await;
+        let journal = inner.journal.as_ref().ok_or_else(no_session_error)?;
+        let n = req.n.unwrap_or(10);
+        let chapters = journal
+            .lock_core()
+            .tail_chapters(n)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        let values: Vec<serde_json::Value> = chapters.iter().map(chapter_replay_to_json).collect();
+        json_result(&values)
+    }
+
+    #[tool(
+        description = "Search all chapter section bodies for a substring pattern. \
+                       Optional since/until (Unix epoch ms) filter which chapters are scanned \
+                       by their opened_at timestamp. \
+                       Returns a JSON array of {chapter_id, section_name, body} matches."
+    )]
+    async fn journal_grep(
+        &self,
+        Parameters(req): Parameters<JournalGrepParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let inner = self.state.read().await;
+        let journal = inner.journal.as_ref().ok_or_else(no_session_error)?;
+        let core = journal.lock_core();
+
+        let since_ids = core
+            .chapter_ids(req.since)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+
+        let allowed: std::collections::HashSet<String> = if let Some(until_ms) = req.until {
+            let all = core
+                .tail_chapters(usize::MAX)
+                .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+            let since_set: std::collections::HashSet<String> =
+                since_ids.iter().map(|id| id.0.clone()).collect();
+            all.into_iter()
+                .filter(|r| {
+                    r.meta.opened_at <= until_ms && since_set.contains(&r.meta.chapter_id.0)
+                })
+                .map(|r| r.meta.chapter_id.0)
+                .collect()
+        } else {
+            since_ids.into_iter().map(|id| id.0).collect()
+        };
+
+        let raw = core
+            .grep_chapters(&req.pattern)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        let matches: Vec<serde_json::Value> = raw
+            .into_iter()
+            .filter(|(cid, _, _)| allowed.contains(&cid.0))
+            .map(|(cid, section_name, body)| {
+                serde_json::json!({
+                    "chapter_id": cid.0,
+                    "section_name": section_name,
+                    "body": body,
+                })
+            })
+            .collect();
+        json_result(&matches)
+    }
+
+    #[tool(
+        description = "List all chapters as a summary table (Microsoft Decision Log format). \
+                       Returns a JSON array with chapter_id, schema_id, current_state, \
+                       opened_at, closed_at, decided_summary, and link fields."
+    )]
+    async fn journal_chapter_list(
+        &self,
+        Parameters(req): Parameters<JournalChapterListParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let inner = self.state.read().await;
+        let journal = inner.journal.as_ref().ok_or_else(no_session_error)?;
+        let chapters = journal
+            .lock_core()
+            .tail_chapters(usize::MAX)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        let paginated = paginate(chapters, req.offset, req.limit);
+        let rows: Vec<ChapterListRow> = paginated
+            .into_iter()
+            .map(|replay| {
+                let decided_summary = replay
+                    .events
+                    .iter()
+                    .filter(|e| {
+                        e.event_type == "section_append"
+                            && e.section_name.as_deref() == Some("Decided")
+                    })
+                    .find_map(|e| {
+                        serde_json::from_str::<serde_json::Value>(&e.payload)
+                            .ok()
+                            .and_then(|v| {
+                                v.get("body")
+                                    .and_then(|b| b.as_str())
+                                    .map(|s| s.lines().next().unwrap_or("").to_owned())
+                            })
+                    })
+                    .unwrap_or_default();
+                let link = format!("{}#decided", replay.meta.chapter_id.0);
+                ChapterListRow {
+                    chapter_id: replay.meta.chapter_id.0.clone(),
+                    schema_id: replay.meta.schema_id.clone(),
+                    current_state: replay.meta.current_state.clone(),
+                    opened_at: replay.meta.opened_at,
+                    closed_at: replay.meta.closed_at,
+                    decided_summary,
+                    link,
+                }
+            })
+            .collect();
+        json_result(&rows)
+    }
+
+    #[tool(
+        description = "List all chapters that are still open (closed_at IS NULL). \
+                       Returns {\"open_chapter_ids\": [\"...\", ...]}."
+    )]
+    async fn journal_open_chapters(
+        &self,
+        Parameters(_req): Parameters<JournalOpenChaptersParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let inner = self.state.read().await;
+        let journal = inner.journal.as_ref().ok_or_else(no_session_error)?;
+        let ids = journal
+            .lock_core()
+            .open_chapter_ids()
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        let id_strs: Vec<String> = ids.into_iter().map(|id| id.0).collect();
+        json_result(&serde_json::json!({ "open_chapter_ids": id_strs }))
+    }
+
+    #[tool(
+        description = "Read the Progress section of a specific chapter. \
+                       Returns {\"progress\": [\"...\", ...]} in append order."
+    )]
+    async fn journal_progress_of(
+        &self,
+        Parameters(req): Parameters<JournalProgressOfParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let inner = self.state.read().await;
+        let journal = inner.journal.as_ref().ok_or_else(no_session_error)?;
+        let chapter_id = journal_mcp_core::ChapterId(req.chapter_id);
+        let entries = journal
+            .lock_core()
+            .progress_of(&chapter_id)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        json_result(&serde_json::json!({ "progress": entries }))
+    }
+
+    #[tool(
+        description = "Attach a named projection at runtime. Currently only 'file' is supported. \
+                       output_path (optional): relative paths resolve against session.root(), \
+                       absolute paths are used as-is. When omitted, falls back to \
+                       LDS_JOURNAL_FILE_OUTPUT_PATH env or <root>/workspace/journal.md. \
+                       Other names return an error."
+    )]
+    async fn journal_projection_attach(
+        &self,
+        Parameters(req): Parameters<JournalProjectionAttachParams>,
+    ) -> Result<CallToolResult, McpError> {
+        if req.name != "file" {
+            return Err(McpError::invalid_params(
+                format!("projection not found: {}", req.name),
+                None,
+            ));
+        }
+        let inner = self.state.read().await;
+        let journal = inner.journal.as_ref().ok_or_else(no_session_error)?;
+        let session_root = journal.session().root().to_path_buf();
+        let resolved = if let Some(raw) = req.output_path {
+            let p = PathBuf::from(raw);
+            if p.is_absolute() { p } else { session_root.join(p) }
+        } else if let Some(env) = std::env::var_os("LDS_JOURNAL_FILE_OUTPUT_PATH") {
+            let p = PathBuf::from(env);
+            if p.is_absolute() { p } else { session_root.join(p) }
+        } else {
+            session_root.join("workspace").join("journal.md")
+        };
+        journal
+            .enable_file_projection_at(resolved.clone())
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        json_result(&serde_json::json!({
+            "attached": "file",
+            "output_path": resolved,
+        }))
+    }
+
+    #[tool(
+        description = "Detach a named projection. \
+                       NOT YET SUPPORTED in this release (carry from journal-mcp v0.4.0). \
+                       Always returns an error."
+    )]
+    async fn journal_projection_detach(
+        &self,
+        Parameters(_req): Parameters<JournalProjectionDetachParams>,
+    ) -> Result<CallToolResult, McpError> {
+        Err(McpError::invalid_params(
+            "projection detach is not yet supported (carry from journal-mcp v0.4.0)",
+            None,
+        ))
+    }
+
+    #[tool(
+        description = "Rebuild a named projection by replaying the full EventLog. \
+                       Calls rebuild_chapter for every closed chapter. \
+                       Use 'file' to rebuild the journal.md output. \
+                       Optional output_path overrides the default attached path for a one-shot \
+                       rebuild (file projection only; attached projection is unchanged)."
+    )]
+    async fn journal_projection_rebuild(
+        &self,
+        Parameters(req): Parameters<JournalProjectionRebuildParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let inner = self.state.read().await;
+        let journal = inner.journal.as_ref().ok_or_else(no_session_error)?;
+        let effective_root = journal.session().root().to_path_buf();
+
+        if let Some(raw_output) = req.output_path.as_ref() {
+            if req.name == "file" {
+                let output_path = {
+                    let p = PathBuf::from(raw_output);
+                    if p.is_absolute() { p } else { effective_root.join(&p) }
+                };
+                if let Some(parent) = output_path.parent() {
+                    std::fs::create_dir_all(parent).map_err(|e| {
+                        McpError::internal_error(
+                            format!("failed to create output_path parent dir: {e}"),
+                            None,
+                        )
+                    })?;
+                }
+                let registry = journal_mcp_core::SchemaRegistry::with_project_local(
+                    &effective_root,
+                )
+                .map_err(|e| {
+                    McpError::internal_error(
+                        format!("SchemaRegistry::with_project_local: {e}"),
+                        None,
+                    )
+                })?;
+                let registry_arc = Arc::new(registry);
+                let mut temp_proj =
+                    journal_mcp_core::FileProjection::new(output_path.clone(), registry_arc);
+                let all_chapters = journal
+                    .lock_core()
+                    .tail_chapters(usize::MAX)
+                    .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+                for replay in &all_chapters {
+                    if replay.meta.closed_at.is_none() {
+                        continue;
+                    }
+                    use journal_mcp_core::JournalProjection as _;
+                    temp_proj
+                        .rebuild_chapter(replay)
+                        .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+                }
+                return json_result(&serde_json::json!({
+                    "projection": "file",
+                    "mode": "one-shot",
+                    "output_path": output_path,
+                }));
+            } else {
+                tracing::warn!(
+                    name = %req.name,
+                    "journal_projection_rebuild: output_path is only applicable for name='file'; \
+                     ignoring and using default rebuild"
+                );
+            }
+        }
+
+        journal
+            .lock_core()
+            .rebuild_projection(&req.name)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        json_result(&serde_json::json!({
+            "projection": req.name,
+            "mode": "default",
+        }))
+    }
+
+    #[tool(
+        description = "Import chapters from a markdown file (journal-mcp-canonical-v1: h2=chapter, h3=section). \
+                       Relative paths resolve against session.root(). \
+                       Atomic batch insert — any chapter_id collision rolls back the entire batch. \
+                       Returns {\"imported_chapter_ids\": [\"...\", ...]}. \
+                       Does NOT trigger projection rebuild (call journal_projection_rebuild explicitly)."
+    )]
+    async fn journal_import(
+        &self,
+        Parameters(req): Parameters<JournalImportParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let inner = self.state.read().await;
+        let journal = inner.journal.as_ref().ok_or_else(no_session_error)?;
+        let session_root = journal.session().root().to_path_buf();
+        let raw_path = PathBuf::from(&req.path);
+        let resolved = if raw_path.is_absolute() {
+            raw_path
+        } else {
+            session_root.join(raw_path)
+        };
+        let imported = journal
+            .lock_core()
+            .import_chapter(&resolved)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        let ids: Vec<String> = imported.into_iter().map(|id| id.0).collect();
+        json_result(&serde_json::json!({ "imported_chapter_ids": ids }))
+    }
+
+    #[tool(
+        description = "Return journal runtime state (paths, schemas, version, file projection status). \
+                       Read-only diagnostic tool; no side effects."
+    )]
+    async fn journal_info(
+        &self,
+        Parameters(_req): Parameters<JournalInfoParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let inner = self.state.read().await;
+        let journal = inner.journal.as_ref().ok_or_else(no_session_error)?;
+        let session_root = journal.session().root().to_path_buf();
+        let db_path = session_root.join("workspace").join(".journal.db");
+        let db_exists = db_path.exists();
+        let wal_path = {
+            let mut p = db_path.clone().into_os_string();
+            p.push("-wal");
+            PathBuf::from(p)
+        };
+        let shm_path = {
+            let mut p = db_path.clone().into_os_string();
+            p.push("-shm");
+            PathBuf::from(p)
+        };
+        let schema_registry_path = session_root.join(".journal").join("schemas");
+        let available_schemas = journal.lock_core().schema_keys();
+        let file_projection_path = journal.file_projection_path();
+        let file_projection_enabled = file_projection_path.is_some();
+        let result = JournalInfoResult {
+            project_root: session_root,
+            db_path,
+            db_exists,
+            wal_path,
+            shm_path,
+            schema_registry_path,
+            available_schemas,
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            file_projection_enabled,
+            file_projection_path,
+        };
+        json_result(&result)
     }
 }
 
