@@ -385,6 +385,3 @@ to bootstrap a global plugin set.
   `list_global_plugins` (loader internals)
 - `crates/lds/src/main.rs` — `ServerHandler::list_tools` /
   `call_tool` override, `try_plugin_call`, `plugin_to_tool`
-- `workspace/docs/plugin-recipe-design.md` — design rationale and the
-  Plugin vs Task split decision (supersedes the earlier
-  `migration-new-tools.md` typed-tool proposal)
