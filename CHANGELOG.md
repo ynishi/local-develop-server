@@ -16,6 +16,44 @@ All notable changes to this project will be documented in this file.
 
 ### Security
 
+## [0.4.0] - 2026-06-22
+
+### Added
+
+- **`crates/session` — new `lds-session` sub-crate** — split `Session` /
+  `SessionConfig` / `SessionError` / `CoreError` / `LdsState` / `session_id_new`
+  out of `lds-core` into a self-contained crate. `lds-core` re-exports the
+  moved types via `pub use lds_session::*` so existing `use lds_core::Session;`
+  callers compile unchanged. Provides the foundation for upcoming session-mcp
+  separation and KV primitives.
+- **`crates/journal` — new `lds-journal` crate integrating `journal-mcp-core`
+  v0.4.0 SDK** — adds 17 MCP tools (`journal_open_chapter`, `journal_append_section`,
+  `journal_close_chapter`, `journal_tail`, `journal_chapter_list`,
+  `journal_open_chapters`, `journal_progress_of`, `journal_append_progress`,
+  `journal_grep`, `journal_import`, `journal_info`, `journal_projection_attach`,
+  `journal_projection_detach`, `journal_projection_rebuild`,
+  `journal_schema_list`, `journal_schema_load`, `journal_schema_show`).
+  `JournalModule` is session-scoped: `db_path = session.root.join("workspace/.journal.db")`.
+  FileProjection is env-gate opt-in (`LDS_JOURNAL_FILE_ENABLE` /
+  `LDS_JOURNAL_FILE_OUTPUT_PATH`). `journal-mcp` standalone binary unchanged.
+
+### Changed
+
+- **`crates/core` — `Session` lifecycle types moved to `lds-session`, re-exported
+  via `pub use`** — `lds-core` becomes the public facade, `lds-session` is the
+  internal implementation. Downstream consumers (`lds-git` / `lds-gh` /
+  `lds-recipe` / `lds-bin`) require no changes.
+- **workspace members: 6 → 8** — `crates/session` and `crates/journal` added.
+  Internal path deps include `version = "0.3.2"` per project convention.
+
+### Deprecated
+
+### Removed
+
+### Fixed
+
+### Security
+
 ## [0.3.2] - 2026-06-16
 
 ### Added

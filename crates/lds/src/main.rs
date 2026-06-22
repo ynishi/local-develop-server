@@ -10,6 +10,7 @@ use lds_core::config::Config;
 use lds_core::{LdsState, Session, SessionConfig, check_binaries};
 use lds_gh::GhModule;
 use lds_git::{GitModule, ResetMode};
+use lds_journal::JournalModule;
 use lds_journal::journal_mcp_core;
 use lds_journal::tools::{
     ChapterListRow, JournalAppendProgressParams, JournalAppendSectionParams,
@@ -19,7 +20,6 @@ use lds_journal::tools::{
     JournalProjectionRebuildParams, JournalSchemaListParams, JournalSchemaLoadParams,
     JournalSchemaShowParams, JournalTailParams, chapter_replay_to_json, paginate,
 };
-use lds_journal::JournalModule;
 use lds_recipe::RecipeModule;
 use lds_sandbox::fs::SandboxFs;
 use lds_sandbox::python::SandboxPython;
@@ -1439,10 +1439,8 @@ impl LdsServer {
         json_result(&serde_json::json!({ "chapter_id": id.0 }))
     }
 
-    #[tool(
-        description = "Append a section row to an open chapter. \
-                       Returns {\"warnings\": [{kind, section, hint}, ...]} (may be empty)."
-    )]
+    #[tool(description = "Append a section row to an open chapter. \
+                       Returns {\"warnings\": [{kind, section, hint}, ...]} (may be empty).")]
     async fn journal_append_section(
         &self,
         Parameters(req): Parameters<JournalAppendSectionParams>,
@@ -1495,11 +1493,9 @@ impl LdsServer {
         json_result(&serde_json::json!({ "warnings": warning_objs }))
     }
 
-    #[tool(
-        description = "Close an open chapter. \
+    #[tool(description = "Close an open chapter. \
                        Validates all schema requires preconditions before writing. \
-                       Returns {\"ok\": true} on success."
-    )]
+                       Returns {\"ok\": true} on success.")]
     async fn journal_close_chapter(
         &self,
         Parameters(req): Parameters<JournalCloseChapterParams>,
@@ -1601,10 +1597,8 @@ impl LdsServer {
         json_result(&val)
     }
 
-    #[tool(
-        description = "Fetch the last N chapters (default 10), newest first. \
-                       Returns a JSON array of chapter objects with metadata and events."
-    )]
+    #[tool(description = "Fetch the last N chapters (default 10), newest first. \
+                       Returns a JSON array of chapter objects with metadata and events.")]
     async fn journal_tail(
         &self,
         Parameters(req): Parameters<JournalTailParams>,
@@ -1740,10 +1734,8 @@ impl LdsServer {
         json_result(&serde_json::json!({ "open_chapter_ids": id_strs }))
     }
 
-    #[tool(
-        description = "Read the Progress section of a specific chapter. \
-                       Returns {\"progress\": [\"...\", ...]} in append order."
-    )]
+    #[tool(description = "Read the Progress section of a specific chapter. \
+                       Returns {\"progress\": [\"...\", ...]} in append order.")]
     async fn journal_progress_of(
         &self,
         Parameters(req): Parameters<JournalProgressOfParams>,
@@ -1780,10 +1772,18 @@ impl LdsServer {
         let session_root = journal.session().root().to_path_buf();
         let resolved = if let Some(raw) = req.output_path {
             let p = PathBuf::from(raw);
-            if p.is_absolute() { p } else { session_root.join(p) }
+            if p.is_absolute() {
+                p
+            } else {
+                session_root.join(p)
+            }
         } else if let Some(env) = std::env::var_os("LDS_JOURNAL_FILE_OUTPUT_PATH") {
             let p = PathBuf::from(env);
-            if p.is_absolute() { p } else { session_root.join(p) }
+            if p.is_absolute() {
+                p
+            } else {
+                session_root.join(p)
+            }
         } else {
             session_root.join("workspace").join("journal.md")
         };
@@ -1796,11 +1796,9 @@ impl LdsServer {
         }))
     }
 
-    #[tool(
-        description = "Detach a named projection. \
+    #[tool(description = "Detach a named projection. \
                        NOT YET SUPPORTED in this release (carry from journal-mcp v0.4.0). \
-                       Always returns an error."
-    )]
+                       Always returns an error.")]
     async fn journal_projection_detach(
         &self,
         Parameters(_req): Parameters<JournalProjectionDetachParams>,
@@ -1830,7 +1828,11 @@ impl LdsServer {
             if req.name == "file" {
                 let output_path = {
                     let p = PathBuf::from(raw_output);
-                    if p.is_absolute() { p } else { effective_root.join(&p) }
+                    if p.is_absolute() {
+                        p
+                    } else {
+                        effective_root.join(&p)
+                    }
                 };
                 if let Some(parent) = output_path.parent() {
                     std::fs::create_dir_all(parent).map_err(|e| {
