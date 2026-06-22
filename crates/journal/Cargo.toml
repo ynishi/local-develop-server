@@ -1,0 +1,24 @@
+[package]
+name = "lds-journal"
+description = "Journal module for local-develop-server (lds) — journal-mcp-core SDK consumer with Session-scoped EventLog + opt-in FileProjection"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+lds-core = { path = "../core", version = "0.3.2" }
+journal-mcp-core = "0.4.0"
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+schemars.workspace = true
+tracing.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
