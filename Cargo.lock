@@ -640,6 +640,7 @@ name = "lds-core"
 version = "0.3.2"
 dependencies = [
  "dirs",
+ "lds-session",
  "serde",
  "serde_json",
  "tempfile",
@@ -700,6 +701,15 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "lds-session"
+version = "0.3.2"
+dependencies = [
+ "tempfile",
+ "thiserror 2.0.18",
  "tracing",
 ]
 

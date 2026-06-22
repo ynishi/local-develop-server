@@ -1,6 +1,6 @@
 [package]
-name = "lds-core"
-description = "Session state and configuration primitives for local-develop-server (lds)"
+name = "lds-session"
+description = "Session lifecycle primitives for local-develop-server (lds)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -11,13 +11,7 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
-lds-session = { path = "../session", version = "0.3.2" }
-serde.workspace = true
-serde_json.workspace = true
 thiserror.workspace = true
-toml.workspace = true
-toml_edit.workspace = true
-dirs.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
