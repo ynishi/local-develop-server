@@ -16,6 +16,59 @@ All notable changes to this project will be documented in this file.
 
 ### Security
 
+## [0.5.0] - 2026-07-01
+
+### Added
+
+- **`crates/session` — multi-session ledger** — `LdsState` now keeps a
+  `HashMap<session_id, Arc<Session>>` plus a separate alias map and an
+  implicit default session. `create_session` / `resolve` / `set_alias` /
+  `unset_alias` / `close` / `list_sessions` / `describe` form the ledger API;
+  `Session` gained `alias` (interior-mutable via `RwLock`), `created_at`,
+  `last_used_at`, and a `touch()` hook. New error variants
+  `CoreError::SessionNotFound` and `CoreError::AliasConflict`. Existing
+  `start_session` is preserved as a backward-compatible alias for
+  `create_session(_, true)` so legacy `session_start` callers keep working.
+- **`crates/session` — `LdsState::doctor`** — 7-check health probe per session
+  (`root-exists`, `git-bound`, `journal-db-writable`, `stale-lock`,
+  `ownership-drift`, `root-conflict`, `ledger-leak`) with a 3-valued verdict
+  (`CheckStatus::Ok / Warn / Fail`). Returns `DoctorReport` containing the
+  per-check evidence string. `tempfile` is now a runtime dependency (probed
+  via `NamedTempFile::new_in` for the writability check).
+- **`crates/lds` — 7 new MCP tools** — `session_create`, `session_list`,
+  `session_describe`, `session_alias_set`, `session_alias_unset`,
+  `session_close`, `session_doctor`. Each addresses a session by either
+  `session_id` or `alias`; `session_doctor` accepts `key="all"` (or omitted)
+  to scan every session. All payloads are pretty-printed JSON via the shared
+  `json_result` helper.
+- **`crates/lds` — MCP resources for multi-session observation** —
+  `ServerCapabilities` now declares `enable_resources()`. New resources:
+  `lds://sessions` (full ledger), `lds://sessions/doctor` (all-session
+  doctor reports), `lds://sessions/{key}` (single session by id or alias),
+  `lds://sessions/{key}/doctor` (single doctor), and `lds://docs/multi-session`
+  (embedded design / usage doc). Resource templates expose the
+  `lds://sessions/{key}` and `lds://sessions/{key}/doctor` URI shapes for
+  client discovery.
+
+### Changed
+
+- **`crates/core` — re-export surface expanded** — `lds-core` now re-exports
+  `CheckStatus`, `DoctorCheck`, `DoctorReport`, and `SessionEntry` alongside
+  the existing `Session` / `LdsState` / `SessionConfig` / `CoreError` /
+  `SessionError` surface. No breaking change for existing consumers.
+- **Internal path deps bumped to `version = "0.5.0"`** — every workspace
+  member's path-pinned dependency reference (`lds-session`, `lds-core`,
+  `lds-git`, `lds-gh`, `lds-recipe`, `lds-sandbox`, `lds-journal`) advanced
+  in lockstep with the workspace version bump.
+
+### Deprecated
+
+### Removed
+
+### Fixed
+
+### Security
+
 ## [0.4.0] - 2026-06-22
 
 ### Added

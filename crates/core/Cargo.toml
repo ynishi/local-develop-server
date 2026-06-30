@@ -11,7 +11,7 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
-lds-session = { path = "../session", version = "0.4.0" }
+lds-session = { path = "../session", version = "0.5.0" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
