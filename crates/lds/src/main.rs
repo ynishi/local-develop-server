@@ -27,7 +27,9 @@ use rmcp::RoleServer;
 use rmcp::handler::server::tool::ToolCallContext;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{
-    CallToolRequestParams, CallToolResult, Content, ListToolsResult, PaginatedRequestParams,
+    Annotated, CallToolRequestParams, CallToolResult, Content, ListResourceTemplatesResult,
+    ListResourcesResult, ListToolsResult, PaginatedRequestParams, RawResource, RawResourceTemplate,
+    ReadResourceRequestParams, ReadResourceResult, Resource, ResourceContents, ResourceTemplate,
     ServerCapabilities, ServerInfo, Tool,
 };
 use rmcp::service::RequestContext;
@@ -230,6 +232,52 @@ struct SessionStartReq {
     max_output: Option<usize>,
     #[serde(default)]
     global_recipe_dir: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct SessionCreateReq {
+    /// Project root for the new session.
+    root: String,
+    /// Optional human-readable alias for later dispatch.
+    #[serde(default)]
+    alias: Option<String>,
+    /// When true, the new session becomes the implicit default for
+    /// backward-compat tool calls that omit `session_id`.
+    #[serde(default)]
+    make_default: bool,
+    #[serde(default)]
+    timeout_secs: Option<u64>,
+    #[serde(default)]
+    max_output: Option<usize>,
+    #[serde(default)]
+    global_recipe_dir: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct SessionKeyReq {
+    /// session_id or alias.
+    key: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct SessionAliasSetReq {
+    /// session_id or current alias of the target session.
+    key: String,
+    /// New alias to assign.
+    alias: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct SessionAliasUnsetReq {
+    /// Alias to remove (session itself is preserved).
+    alias: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct SessionDoctorReq {
+    /// session_id or alias. Use "all" to run doctor on every session.
+    #[serde(default)]
+    key: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -626,6 +674,7 @@ impl LdsServer {
             root: req.root.into(),
             timeout_secs: req.timeout_secs,
             max_output: req.max_output,
+            alias: None,
             global_recipe_dirs,
         };
         let session = build_session_modules(&mut inner, config)?;
@@ -1414,6 +1463,178 @@ impl LdsServer {
     }
 
     // -----------------------------------------------------------------------
+    // Multi-session ledger — 6 tools.
+    //
+    // session_start (above) remains the backward-compatible entry that always
+    // replaces the implicit default session. The tools below let callers
+    // spawn and address sessions explicitly by id or alias, and inspect /
+    // diagnose them at any turn.
+    // -----------------------------------------------------------------------
+
+    #[tool(
+        description = "Create an additional session bound to an arbitrary root, optionally with a human-readable alias. \
+                       Existing default session is preserved unless make_default=true."
+    )]
+    async fn session_create(
+        &self,
+        Parameters(req): Parameters<SessionCreateReq>,
+    ) -> Result<CallToolResult, McpError> {
+        let mut inner = self.state.write().await;
+        let startup_dirs = inner.startup_global_dirs.clone();
+        let mut global_recipe_dirs: Vec<PathBuf> = req
+            .global_recipe_dir
+            .map(|s| vec![PathBuf::from(s)])
+            .unwrap_or_default();
+        global_recipe_dirs.extend(startup_dirs.iter().cloned());
+        let config = SessionConfig {
+            root: req.root.into(),
+            timeout_secs: req.timeout_secs,
+            max_output: req.max_output,
+            alias: req.alias.clone(),
+            global_recipe_dirs,
+        };
+        let session = inner
+            .lds
+            .create_session(config, req.make_default)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        json_result(&serde_json::json!({
+            "session_id": session.id(),
+            "alias": session.alias(),
+            "root": session.root().display().to_string(),
+            "is_default": inner.lds.default_session_id() == Some(session.id()),
+        }))
+    }
+
+    #[tool(description = "List all live sessions in the ledger (id, alias, root, timestamps, is_default).")]
+    async fn session_list(&self) -> Result<CallToolResult, McpError> {
+        let inner = self.state.read().await;
+        let entries: Vec<serde_json::Value> = inner
+            .lds
+            .list_sessions()
+            .into_iter()
+            .map(|e| {
+                serde_json::json!({
+                    "session_id": e.session_id,
+                    "alias": e.alias,
+                    "root": e.root.display().to_string(),
+                    "created_at": e.created_at,
+                    "last_used_at": e.last_used_at,
+                    "is_default": e.is_default,
+                })
+            })
+            .collect();
+        json_result(&serde_json::json!({ "sessions": entries }))
+    }
+
+    #[tool(description = "Describe a single session by id or alias.")]
+    async fn session_describe(
+        &self,
+        Parameters(req): Parameters<SessionKeyReq>,
+    ) -> Result<CallToolResult, McpError> {
+        let inner = self.state.read().await;
+        let entry = inner
+            .lds
+            .describe(&req.key)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        json_result(&serde_json::json!({
+            "session_id": entry.session_id,
+            "alias": entry.alias,
+            "root": entry.root.display().to_string(),
+            "created_at": entry.created_at,
+            "last_used_at": entry.last_used_at,
+            "is_default": entry.is_default,
+        }))
+    }
+
+    #[tool(description = "Assign (or change) the alias of an existing session.")]
+    async fn session_alias_set(
+        &self,
+        Parameters(req): Parameters<SessionAliasSetReq>,
+    ) -> Result<CallToolResult, McpError> {
+        let mut inner = self.state.write().await;
+        inner
+            .lds
+            .set_alias(&req.key, req.alias.clone())
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        json_result(&serde_json::json!({ "ok": true, "alias": req.alias }))
+    }
+
+    #[tool(description = "Remove an alias from the ledger; the underlying session is preserved.")]
+    async fn session_alias_unset(
+        &self,
+        Parameters(req): Parameters<SessionAliasUnsetReq>,
+    ) -> Result<CallToolResult, McpError> {
+        let mut inner = self.state.write().await;
+        inner
+            .lds
+            .unset_alias(&req.alias)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        json_result(&serde_json::json!({ "ok": true }))
+    }
+
+    #[tool(description = "Close a session by id or alias and remove it from the ledger.")]
+    async fn session_close(
+        &self,
+        Parameters(req): Parameters<SessionKeyReq>,
+    ) -> Result<CallToolResult, McpError> {
+        let mut inner = self.state.write().await;
+        inner
+            .lds
+            .close(&req.key)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        json_result(&serde_json::json!({ "ok": true }))
+    }
+
+    #[tool(
+        description = "Run health checks (root-exists / git-bound / journal-db-writable / stale-lock / \
+                       ownership-drift / root-conflict / ledger-leak) on one or every session. \
+                       Pass key=\"all\" or omit to scan every session."
+    )]
+    async fn session_doctor(
+        &self,
+        Parameters(req): Parameters<SessionDoctorReq>,
+    ) -> Result<CallToolResult, McpError> {
+        let inner = self.state.read().await;
+        let key = req.key.unwrap_or_else(|| "all".to_string());
+        let report_value = |r: &lds_core::DoctorReport| {
+            let checks: Vec<serde_json::Value> = r
+                .checks
+                .iter()
+                .map(|c| {
+                    serde_json::json!({
+                        "name": c.name,
+                        "status": c.status.as_str(),
+                        "evidence": c.evidence,
+                    })
+                })
+                .collect();
+            serde_json::json!({
+                "session_id": r.session_id,
+                "alias": r.alias,
+                "verdict": r.verdict.as_str(),
+                "checks": checks,
+            })
+        };
+        if key == "all" {
+            let mut reports: Vec<serde_json::Value> = Vec::new();
+            for entry in inner.lds.list_sessions() {
+                let r = inner
+                    .lds
+                    .doctor(&entry.session_id)
+                    .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+                reports.push(report_value(&r));
+            }
+            json_result(&serde_json::json!({ "reports": reports }))
+        } else {
+            let r = inner
+                .lds
+                .doctor(&key)
+                .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+            json_result(&report_value(&r))
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // Journal — 17 tools ported from journal-mcp v0.4.0 (crates.io: journal-mcp-core 0.4.0)
     //
     // session.root() is the SoT for all path resolution: per-call
@@ -1967,7 +2188,10 @@ impl ServerHandler for LdsServer {
     fn get_info(&self) -> ServerInfo {
         let mut info = ServerInfo::default();
         info.instructions = Some("local-develop-server: unified MCP for orch pipeline".into());
-        info.capabilities = ServerCapabilities::builder().enable_tools().build();
+        info.capabilities = ServerCapabilities::builder()
+            .enable_tools()
+            .enable_resources()
+            .build();
         info
     }
 
@@ -2035,7 +2259,278 @@ impl ServerHandler for LdsServer {
         let tcc = ToolCallContext::new(self, request, context);
         Self::tool_router().call(tcc).await
     }
+
+    // ── Resources ────────────────────────────────────────────────────────────
+    //
+    // Multi-session ledger introspection surfaced as MCP resources so any
+    // resource-aware client can observe lds state without invoking tools.
+    //
+    //   lds://sessions              — full ledger (= session_list payload)
+    //   lds://sessions/doctor       — doctor reports for every session
+    //   lds://sessions/{key}        — single session description (id or alias)
+    //   lds://sessions/{key}/doctor — doctor report for one session
+    //   lds://docs/multi-session    — design / usage doc for the model
+    async fn list_resources(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListResourcesResult, McpError> {
+        let inner = self.state.read().await;
+        let mut resources: Vec<Resource> = Vec::new();
+        resources.push(
+            Annotated::new(
+                RawResource::new("lds://sessions", "sessions")
+                    .with_description("Full multi-session ledger as JSON")
+                    .with_mime_type("application/json"),
+                None,
+            ),
+        );
+        resources.push(
+            Annotated::new(
+                RawResource::new("lds://sessions/doctor", "sessions/doctor")
+                    .with_description("Doctor reports for every live session")
+                    .with_mime_type("application/json"),
+                None,
+            ),
+        );
+        resources.push(
+            Annotated::new(
+                RawResource::new("lds://docs/multi-session", "docs/multi-session")
+                    .with_description("Multi-session ledger design + usage doc")
+                    .with_mime_type("text/markdown"),
+                None,
+            ),
+        );
+        for entry in inner.lds.list_sessions() {
+            let label = entry.alias.clone().unwrap_or_else(|| entry.session_id.clone());
+            resources.push(
+                Annotated::new(
+                    RawResource::new(
+                        format!("lds://sessions/{label}"),
+                        format!("session/{label}"),
+                    )
+                    .with_description(format!("Session {label} (root={})", entry.root.display()))
+                    .with_mime_type("application/json"),
+                    None,
+                ),
+            );
+            resources.push(
+                Annotated::new(
+                    RawResource::new(
+                        format!("lds://sessions/{label}/doctor"),
+                        format!("session/{label}/doctor"),
+                    )
+                    .with_description(format!("Doctor report for session {label}"))
+                    .with_mime_type("application/json"),
+                    None,
+                ),
+            );
+        }
+        Ok(ListResourcesResult {
+            resources,
+            meta: None,
+            next_cursor: None,
+        })
+    }
+
+    async fn list_resource_templates(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListResourceTemplatesResult, McpError> {
+        let mut templates: Vec<ResourceTemplate> = Vec::new();
+        templates.push(Annotated::new(
+            RawResourceTemplate::new("lds://sessions/{key}", "session by key")
+                .with_description("Describe a session by id or alias")
+                .with_mime_type("application/json"),
+            None,
+        ));
+        templates.push(Annotated::new(
+            RawResourceTemplate::new("lds://sessions/{key}/doctor", "session doctor by key")
+                .with_description("Doctor report for a single session")
+                .with_mime_type("application/json"),
+            None,
+        ));
+        Ok(ListResourceTemplatesResult {
+            resource_templates: templates,
+            meta: None,
+            next_cursor: None,
+        })
+    }
+
+    async fn read_resource(
+        &self,
+        request: ReadResourceRequestParams,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ReadResourceResult, McpError> {
+        let uri = request.uri;
+        let inner = self.state.read().await;
+        let body = read_lds_resource(&uri, &inner.lds)?;
+        Ok(ReadResourceResult::new(vec![body]))
+    }
 }
+
+/// Resolve an `lds://` URI to a single resource body. Pure function so it can
+/// be exercised by unit tests without spinning up a full MCP server.
+fn read_lds_resource(uri: &str, ledger: &LdsState) -> Result<ResourceContents, McpError> {
+    let path = uri.strip_prefix("lds://").ok_or_else(|| {
+        McpError::invalid_params(format!("unknown URI scheme: {uri}"), None)
+    })?;
+
+    if path == "docs/multi-session" {
+        return Ok(ResourceContents::TextResourceContents {
+            uri: uri.to_string(),
+            mime_type: Some("text/markdown".into()),
+            text: MULTI_SESSION_DOC.into(),
+            meta: None,
+        });
+    }
+
+    if path == "sessions" {
+        let entries: Vec<serde_json::Value> = ledger
+            .list_sessions()
+            .into_iter()
+            .map(session_entry_to_json)
+            .collect();
+        let text = serde_json::to_string_pretty(&serde_json::json!({ "sessions": entries }))
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        return Ok(json_resource(uri, text));
+    }
+
+    if path == "sessions/doctor" {
+        let mut reports: Vec<serde_json::Value> = Vec::new();
+        for entry in ledger.list_sessions() {
+            let r = ledger
+                .doctor(&entry.session_id)
+                .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+            reports.push(doctor_report_to_json(&r));
+        }
+        let text = serde_json::to_string_pretty(&serde_json::json!({ "reports": reports }))
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        return Ok(json_resource(uri, text));
+    }
+
+    if let Some(rest) = path.strip_prefix("sessions/") {
+        let (key, want_doctor) = match rest.strip_suffix("/doctor") {
+            Some(k) => (k, true),
+            None => (rest, false),
+        };
+        if key.is_empty() || key.contains('/') {
+            return Err(McpError::invalid_params(
+                format!("malformed session URI: {uri}"),
+                None,
+            ));
+        }
+        if want_doctor {
+            let r = ledger
+                .doctor(key)
+                .map_err(|e| McpError::resource_not_found(e.to_string(), None))?;
+            let text = serde_json::to_string_pretty(&doctor_report_to_json(&r))
+                .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+            return Ok(json_resource(uri, text));
+        } else {
+            let entry = ledger
+                .describe(key)
+                .map_err(|e| McpError::resource_not_found(e.to_string(), None))?;
+            let text = serde_json::to_string_pretty(&session_entry_to_json(entry))
+                .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+            return Ok(json_resource(uri, text));
+        }
+    }
+
+    Err(McpError::resource_not_found(
+        format!("unknown lds resource: {uri}"),
+        None,
+    ))
+}
+
+fn json_resource(uri: &str, text: String) -> ResourceContents {
+    ResourceContents::TextResourceContents {
+        uri: uri.to_string(),
+        mime_type: Some("application/json".into()),
+        text,
+        meta: None,
+    }
+}
+
+fn session_entry_to_json(e: lds_core::SessionEntry) -> serde_json::Value {
+    serde_json::json!({
+        "session_id": e.session_id,
+        "alias": e.alias,
+        "root": e.root.display().to_string(),
+        "created_at": e.created_at,
+        "last_used_at": e.last_used_at,
+        "is_default": e.is_default,
+    })
+}
+
+fn doctor_report_to_json(r: &lds_core::DoctorReport) -> serde_json::Value {
+    let checks: Vec<serde_json::Value> = r
+        .checks
+        .iter()
+        .map(|c| {
+            serde_json::json!({
+                "name": c.name,
+                "status": c.status.as_str(),
+                "evidence": c.evidence,
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "session_id": r.session_id,
+        "alias": r.alias,
+        "verdict": r.verdict.as_str(),
+        "checks": checks,
+    })
+}
+
+const MULTI_SESSION_DOC: &str = r#"# lds Multi-Session Ledger
+
+lds tracks **multiple concurrent sessions** in an in-memory ledger so MainAI
+and SubAgents (or fixture / worktree side-sessions) can coexist without one
+silently overriding another's `root` binding.
+
+## Addressing
+
+Every session has two handles:
+
+- `session_id` — opaque hash assigned at create time
+- `alias`     — optional, human-readable label (`worker-1`, `fixture-A`, ...)
+
+Pass either to `session_describe` / `session_doctor` / `session_close` /
+`session_alias_set`. The legacy `session_start` tool always replaces the
+**default session** for backward-compatible tool calls that omit
+`session_id`.
+
+## Resources
+
+- `lds://sessions`              — full ledger as JSON
+- `lds://sessions/doctor`       — doctor reports for every session
+- `lds://sessions/{key}`        — describe one session (`key` = id or alias)
+- `lds://sessions/{key}/doctor` — doctor report for one session
+- `lds://docs/multi-session`    — this doc
+
+## Doctor checks (3-valued verdict: ok / warn / fail)
+
+| check                 | what it verifies                                    |
+|-----------------------|-----------------------------------------------------|
+| root-exists           | the session root still exists on disk               |
+| git-bound             | `.git` is present (git_* tools will work)           |
+| journal-db-writable   | journal storage directory is writable               |
+| stale-lock            | no leftover `.journal.db.lock` older than 1h        |
+| ownership-drift       | no other session claims the same root               |
+| root-conflict         | escalates to FAIL when ≥2 sessions share the root   |
+| ledger-leak           | warns when a session has been idle > 6h             |
+
+## Patterns
+
+- **MainAI + worker SubAgent** — MainAI keeps the default session; each
+  SubAgent calls `session_create` with its own root + alias.
+- **Fixture / sandbox runs** — spawn an isolated session on a tempdir;
+  close it when done.
+- **Observability sweep** — periodically read `lds://sessions/doctor` to
+  catch root drift, conflicts, and idle leakage.
+"#;
 
 fn plugin_to_tool(plugin: lds_recipe::PluginRecipe) -> Tool {
     let mut properties = serde_json::Map::new();
