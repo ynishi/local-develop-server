@@ -226,6 +226,11 @@ impl LdsServer {
 #[derive(Debug, Deserialize, JsonSchema)]
 struct SessionStartReq {
     root: String,
+    /// Optional human-readable alias for the default session. Enables
+    /// `session_describe` / `session_doctor` / `session_close` /
+    /// `session_alias_set` to address the session by alias.
+    #[serde(default)]
+    alias: Option<String>,
     #[serde(default)]
     timeout_secs: Option<u64>,
     #[serde(default)]
@@ -654,7 +659,9 @@ fn is_project_root(path: &std::path::Path) -> bool {
 
 #[tool_router]
 impl LdsServer {
-    #[tool(description = "Initialize session with project root. Must be called first.")]
+    #[tool(
+        description = "Initialize session with project root (with optional alias). Must be called first. Replaces the implicit default session."
+    )]
     async fn session_start(
         &self,
         Parameters(req): Parameters<SessionStartReq>,
@@ -674,15 +681,16 @@ impl LdsServer {
             root: req.root.into(),
             timeout_secs: req.timeout_secs,
             max_output: req.max_output,
-            alias: None,
+            alias: req.alias.clone(),
             global_recipe_dirs,
         };
         let session = build_session_modules(&mut inner, config)?;
-        Ok(CallToolResult::success(vec![Content::text(format!(
-            "session started: root={}, id={}",
-            session.root().display(),
-            session.id()
-        ))]))
+        json_result(&serde_json::json!({
+            "session_id": session.id(),
+            "alias": session.alias(),
+            "root": session.root().display().to_string(),
+            "is_default": true,
+        }))
     }
 
     #[tool(

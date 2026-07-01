@@ -151,8 +151,49 @@ async fn session_start_returns_id() {
         .unwrap();
 
     let text = extract_text(&result);
-    assert!(text.contains("session started"));
+    assert!(text.contains("session_id"));
     assert!(text.contains(repo.path_str()));
+    assert!(text.contains("\"is_default\": true"));
+
+    client.cancel().await.unwrap();
+}
+
+/// session_start accepts an optional `alias` and the alias round-trips through
+/// `session_describe(key=<alias>)`. Guards against regressing the field back to
+/// the hard-coded `None` that made the parameter useless in v0.5.0.
+#[tokio::test]
+async fn session_start_alias_round_trip() {
+    let repo = TempRepo::new();
+    let client = connect().await;
+
+    let start = client
+        .peer()
+        .call_tool(call_params(
+            "session_start",
+            json!({ "root": repo.path_str(), "alias": "main-worker" }),
+        ))
+        .await
+        .unwrap();
+    let start_text = extract_text(&start);
+    assert!(
+        start_text.contains("\"alias\": \"main-worker\""),
+        "session_start must echo the alias, got: {start_text}"
+    );
+
+    let describe = client
+        .peer()
+        .call_tool(call_params(
+            "session_describe",
+            json!({ "key": "main-worker" }),
+        ))
+        .await
+        .unwrap();
+    let describe_text = extract_text(&describe);
+    assert!(
+        describe_text.contains("\"alias\": \"main-worker\""),
+        "session_describe(key=alias) must resolve, got: {describe_text}"
+    );
+    assert!(describe_text.contains(repo.path_str()));
 
     client.cancel().await.unwrap();
 }
@@ -341,7 +382,7 @@ async fn session_start_recovers_after_previous_root_deleted() {
         .unwrap();
     let text = extract_text(&result);
     assert!(
-        text.contains("session started"),
+        text.contains("session_id"),
         "step 3: session_start(A) should succeed, got: {text}"
     );
 
@@ -404,7 +445,7 @@ async fn session_start_recovers_after_previous_root_deleted() {
         .unwrap();
     let text = extract_text(&result);
     assert!(
-        text.contains("session started"),
+        text.contains("session_id"),
         "step 8: session_start(B) must succeed after root A was deleted, got: {text}"
     );
 
