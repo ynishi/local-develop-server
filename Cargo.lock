@@ -814,6 +814,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "lds-router"
+version = "0.5.1"
+dependencies = [
+ "rmcp",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "toml",
+ "tracing",
+]
+
+[[package]]
 name = "lds-sandbox"
 version = "0.5.1"
 dependencies = [
@@ -926,6 +940,7 @@ dependencies = [
  "lds-git",
  "lds-journal",
  "lds-recipe",
+ "lds-router",
  "lds-sandbox",
  "rmcp",
  "schemars",

@@ -21,6 +21,7 @@ use lds_journal::tools::{
     JournalSchemaShowParams, JournalTailParams, chapter_replay_to_json, paginate,
 };
 use lds_recipe::RecipeModule;
+use lds_router::{ExportRegistry, McpRouter, RouteConfig};
 use lds_sandbox::fs::SandboxFs;
 use lds_sandbox::python::SandboxPython;
 use rmcp::RoleServer;
@@ -37,6 +38,7 @@ use rmcp::{ErrorData as McpError, ServerHandler, ServiceExt, tool, tool_handler,
 use schemars::JsonSchema;
 use serde::Deserialize;
 use tokio::sync::RwLock;
+use tokio::task::spawn_blocking;
 
 #[derive(Clone)]
 struct LdsServer {
@@ -51,6 +53,8 @@ struct Inner {
     sandbox_fs: Option<SandboxFs>,
     sandbox_python: Option<SandboxPython>,
     journal: Option<JournalModule>,
+    router: Option<McpRouter>,
+    export_registry: Option<ExportRegistry>,
     startup_cwd: Option<PathBuf>,
     startup_global_dirs: Arc<Vec<PathBuf>>,
 }
@@ -128,6 +132,50 @@ impl LdsServer {
         }
 
         Ok(plugins.into_iter().map(plugin_to_tool).collect())
+    }
+
+    /// The session's currently materialized `[[export]]` tools, or an empty
+    /// `Vec` if no session is active yet (mirrors `list_plugin_tools`'s
+    /// no-session behavior: `list_tools` must still return the static
+    /// surface before a session starts).
+    async fn list_export_tools(&self) -> Vec<Tool> {
+        let inner = self.state.read().await;
+        let Some(registry) = inner.export_registry.clone() else {
+            return Vec::new();
+        };
+        drop(inner);
+        registry.list_tools().await
+    }
+
+    /// If `name` matches a materialized export tool's public name, dispatch
+    /// it through the router to its upstream `(route, tool)` and return the
+    /// result. Returns `Ok(None)` if `name` is not an export tool (so the
+    /// caller falls through to plugin/static dispatch), or an error if
+    /// export tools exist for a route whose router handle has since gone
+    /// missing (should not happen in practice: both are set together in
+    /// `wire_router_and_exports`).
+    async fn try_export_call(
+        &self,
+        name: &str,
+        arguments: Option<&serde_json::Map<String, serde_json::Value>>,
+    ) -> Result<Option<CallToolResult>, McpError> {
+        let inner = self.state.read().await;
+        let Some(registry) = inner.export_registry.clone() else {
+            return Ok(None);
+        };
+        let router = inner.router.clone();
+        drop(inner);
+
+        let Some((route, upstream_tool)) = registry.resolve(name).await else {
+            return Ok(None);
+        };
+        let router = router.ok_or_else(no_session_error)?;
+        let args = serde_json::Value::Object(arguments.cloned().unwrap_or_default());
+        router
+            .call(&route, &upstream_tool, args)
+            .await
+            .map(Some)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))
     }
 
     async fn try_plugin_call(
@@ -216,6 +264,8 @@ impl LdsServer {
                 sandbox_fs: None,
                 sandbox_python: None,
                 journal: None,
+                router: None,
+                export_registry: None,
                 startup_cwd,
                 startup_global_dirs,
             })),
@@ -575,6 +625,46 @@ struct GhPrChecksReq {
     repo: Option<String>,
 }
 
+/// Default `args` for [`McpCallReq`] when the caller omits the field: an
+/// empty JSON object, which every upstream tool interprets as "no arguments".
+fn default_mcp_call_args() -> serde_json::Value {
+    serde_json::Value::Object(serde_json::Map::new())
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct McpCallReq {
+    /// `<route>://<tool>` URI identifying the upstream route and tool.
+    uri: String,
+    /// Arguments forwarded verbatim to the upstream tool. Must be a JSON
+    /// object; omitting the field defaults to an empty object.
+    #[serde(default = "default_mcp_call_args")]
+    args: serde_json::Value,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct McpRouteRegisterReq {
+    /// Unique route name; the `<route>` component of `<route>://<tool>` URIs.
+    name: String,
+    /// Subprocess command to spawn (resolved via `PATH`).
+    command: String,
+    /// Command-line arguments passed to `command`.
+    #[serde(default)]
+    args: Vec<String>,
+    /// Extra environment variables set on the spawned subprocess.
+    #[serde(default)]
+    env: HashMap<String, String>,
+    /// Per-call timeout, in seconds. Defaults to 30 (matching
+    /// `config.toml`'s `[[route]]` default) when omitted.
+    #[serde(default)]
+    timeout_secs: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct McpRouteRemoveReq {
+    /// Name of the route to remove.
+    name: String,
+}
+
 /// Shared factory for the "no session active" MCP error.
 ///
 /// All tool handlers that require an active session use this factory so that
@@ -597,13 +687,31 @@ fn json_result<T: serde::Serialize>(value: &T) -> Result<CallToolResult, McpErro
     Ok(CallToolResult::success(vec![Content::text(text)]))
 }
 
-/// Build and initialize all session-dependent modules on `inner`.
+/// Resolve the user-global `config.toml` path (`~/.config/lds/config.toml`),
+/// the same file [`Config::load_or_default`] reads for `[recipes]`/`[paths]`.
 ///
-/// This is the single construction path shared by the explicit `session_start`
-/// handler and the auto-start hook in `call_tool`. Inlining the construction
-/// logic in two separate places would allow the two paths to diverge, breaking
-/// session invariants (crux §1).
-fn build_session_modules(
+/// Falls back to a path that cannot exist if the home directory cannot be
+/// determined, so [`RouteConfig::load`]'s "missing file → empty declaration
+/// set" behavior degrades gracefully instead of reading an unrelated file.
+fn user_config_path() -> PathBuf {
+    lds_core::config::user_config_path()
+        .unwrap_or_else(|| PathBuf::from("/nonexistent-home/.config/lds/config.toml"))
+}
+
+/// Build a session and its local (non-network) modules on `inner`.
+///
+/// This is the fast, synchronous half of session construction: starting the
+/// session and wiring `git` / `gh` / `recipe` / `sandbox_fs` /
+/// `sandbox_python` / `journal` touches only local state (no `.await`, no
+/// upstream I/O). Callers hold `Inner`'s write lock for the duration of this
+/// call and nothing more; [`wire_router_and_exports`] performs the
+/// network-bound half (route/export config load + upstream `list_tools`
+/// calls) separately, after the caller has dropped that write lock.
+///
+/// Shared as a single function between the explicit `session_start` handler
+/// and the auto-start hook in `call_tool` so the two paths cannot diverge,
+/// preserving session invariants (crux §1).
+fn start_session_locally(
     inner: &mut Inner,
     config: SessionConfig,
 ) -> Result<Arc<Session>, McpError> {
@@ -651,6 +759,64 @@ fn build_session_modules(
     Ok(session)
 }
 
+/// Load `session`'s route/export config and materialize its export tool
+/// registry, then publish both onto `state` under a short-lived write lock.
+///
+/// # Concurrency
+/// All upstream network I/O — `RouteConfig::load_all`'s filesystem read (via
+/// `spawn_blocking`) and `ExportRegistry::refresh`'s upstream `list_tools`
+/// calls (subprocess spawn + MCP round trip per declared route) — runs
+/// without holding `Inner`'s write lock, so a slow or unreachable route
+/// cannot block every other concurrent tool call for the duration (R3;
+/// Outline `rust` book §4-1, K-4; mirrors `mcp_call`'s clone-then-drop
+/// pattern below). The write lock is reacquired only long enough to assign
+/// the two already-built values onto `inner.router` / `inner.export_registry`
+/// — no `.await` is held across it.
+async fn wire_router_and_exports(
+    state: &Arc<RwLock<Inner>>,
+    session: &Arc<Session>,
+) -> Result<(), McpError> {
+    // Route + export config: `[[route]]`/`[[export]]` sections of the
+    // user-global `~/.config/lds/config.toml`, overridden by the
+    // project-local `<session_root>/config.toml` — the same two files
+    // `Config::load_or_default` reads for `[recipes]`/`[paths]`.
+    // `RouteConfig::load_all` performs synchronous filesystem I/O (see its
+    // doc comment), so it is run on a blocking-pool thread rather than
+    // inline in this async fn.
+    let user_path = user_config_path();
+    let project_path = session.root().join("config.toml");
+    let session_root = session.root().to_path_buf();
+    let (routes, exports) =
+        spawn_blocking(move || RouteConfig::load_all(&user_path, &project_path, &session_root))
+            .await
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+    let router = McpRouter::from_configs(routes);
+
+    // Export registry: re-fetch each `[[export]]` declaration's upstream
+    // tool list and materialize it under a prefixed public name.
+    // `ExportLimitExceeded`/`ExportCollision` are propagated as
+    // session_start failures (a config.toml that cannot be resolved into an
+    // unambiguous tool surface); a single unreachable route's declaration is
+    // instead logged and skipped inside `ExportRegistry::refresh` so it does
+    // not take down an otherwise-healthy session.
+    let static_tool_names: Vec<String> = LdsServer::tool_router()
+        .list_all()
+        .into_iter()
+        .map(|t| t.name.to_string())
+        .collect();
+    let export_registry = ExportRegistry::from_declarations(exports);
+    export_registry
+        .refresh(&router, &static_tool_names)
+        .await
+        .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+
+    let mut inner = state.write().await;
+    inner.router = Some(router);
+    inner.export_registry = Some(export_registry);
+    Ok(())
+}
+
 /// Return `true` if `path` is a ProjectRoot: a directory that contains a
 /// `.git` entry or a `justfile`. Conventional project-root probe.
 fn is_project_root(path: &std::path::Path) -> bool {
@@ -666,25 +832,34 @@ impl LdsServer {
         &self,
         Parameters(req): Parameters<SessionStartReq>,
     ) -> Result<CallToolResult, McpError> {
-        let mut inner = self.state.write().await;
         // Adapter: compose global_recipe_dirs from the MCP single arg (if any)
         // followed by startup_global_dirs (config.toml dirs then env dirs) in
         // declaration order.
         // Precedence (low→high): default ~/.config/lds → config.toml dirs → env dirs → MCP wire arg → project.
-        let startup_dirs = inner.startup_global_dirs.clone();
-        let mut global_recipe_dirs: Vec<PathBuf> = req
-            .global_recipe_dir
-            .map(|s| vec![PathBuf::from(s)])
-            .unwrap_or_default();
-        global_recipe_dirs.extend(startup_dirs.iter().cloned());
-        let config = SessionConfig {
-            root: req.root.into(),
-            timeout_secs: req.timeout_secs,
-            max_output: req.max_output,
-            alias: req.alias.clone(),
-            global_recipe_dirs,
+        let config = {
+            let inner = self.state.read().await;
+            let startup_dirs = inner.startup_global_dirs.clone();
+            let mut global_recipe_dirs: Vec<PathBuf> = req
+                .global_recipe_dir
+                .map(|s| vec![PathBuf::from(s)])
+                .unwrap_or_default();
+            global_recipe_dirs.extend(startup_dirs.iter().cloned());
+            SessionConfig {
+                root: req.root.into(),
+                timeout_secs: req.timeout_secs,
+                max_output: req.max_output,
+                alias: req.alias.clone(),
+                global_recipe_dirs,
+            }
         };
-        let session = build_session_modules(&mut inner, config)?;
+        // Local module construction takes a short-lived write lock; the
+        // route/export network I/O runs after that lock is dropped (see
+        // `wire_router_and_exports`'s doc comment).
+        let session = {
+            let mut inner = self.state.write().await;
+            start_session_locally(&mut inner, config)?
+        };
+        wire_router_and_exports(&self.state, &session).await?;
         json_result(&serde_json::json!({
             "session_id": session.id(),
             "alias": session.alias(),
@@ -1536,6 +1711,124 @@ impl LdsServer {
         json_result(&serde_json::json!({ "sessions": entries }))
     }
 
+    #[tool(
+        description = "Call an external MCP tool via routed subprocess. uri = '<route>://<tool>'.",
+        annotations(idempotent_hint = false)
+    )]
+    async fn mcp_call(
+        &self,
+        Parameters(req): Parameters<McpCallReq>,
+    ) -> Result<CallToolResult, McpError> {
+        if !req.args.is_object() {
+            return Err(McpError::invalid_params("args must be an object", None));
+        }
+        // Read guard is held only long enough to clone the router handle;
+        // dropped before the upstream `.await` so a slow/hung route never
+        // blocks concurrent tool calls against `Inner` (R3/K-4, see
+        // `lds_router::McpRouter` doc comment). The `lds://` self-loop guard
+        // is enforced inside `McpRouter::call_uri` itself.
+        let inner = self.state.read().await;
+        let router = inner.router.clone().ok_or_else(no_session_error)?;
+        drop(inner);
+        router
+            .call_uri(&req.uri, req.args)
+            .await
+            .map_err(|e| McpError::internal_error(e.to_string(), None))
+    }
+
+    #[tool(
+        description = "List registered MCP routes for the active session.",
+        annotations(idempotent_hint = true, destructive_hint = false)
+    )]
+    async fn mcp_route_list(&self) -> Result<CallToolResult, McpError> {
+        let inner = self.state.read().await;
+        let router = inner.router.clone().ok_or_else(no_session_error)?;
+        drop(inner);
+        let routes = router.list_routes().await;
+        json_result(&serde_json::json!({ "routes": routes }))
+    }
+
+    #[tool(
+        description = "Register or replace an MCP route. In-memory only; not persisted to config.toml.",
+        annotations(idempotent_hint = true, destructive_hint = false)
+    )]
+    async fn mcp_route_register(
+        &self,
+        Parameters(req): Parameters<McpRouteRegisterReq>,
+    ) -> Result<CallToolResult, McpError> {
+        let inner = self.state.read().await;
+        let router = inner.router.clone().ok_or_else(no_session_error)?;
+        drop(inner);
+        let name = req.name.clone();
+        let route = RouteConfig {
+            name: req.name,
+            command: req.command,
+            args: req.args,
+            env: req.env,
+            // Mirrors `config.toml`'s `[[route]]` default (30s); the router
+            // crate's own default is a private helper, so it is duplicated
+            // here rather than exposed as a new public API surface.
+            timeout_secs: req.timeout_secs.unwrap_or(30),
+        };
+        router
+            .register(route)
+            .await
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        json_result(&serde_json::json!({ "registered": name }))
+    }
+
+    #[tool(
+        description = "Remove an MCP route and terminate its subprocess.",
+        annotations(idempotent_hint = true, destructive_hint = true)
+    )]
+    async fn mcp_route_remove(
+        &self,
+        Parameters(req): Parameters<McpRouteRemoveReq>,
+    ) -> Result<CallToolResult, McpError> {
+        let inner = self.state.read().await;
+        let router = inner.router.clone().ok_or_else(no_session_error)?;
+        drop(inner);
+        router
+            .remove(&req.name)
+            .await
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        json_result(&serde_json::json!({ "removed": req.name }))
+    }
+
+    #[tool(
+        description = "List the session's currently materialized `[[export]]` tools.",
+        annotations(idempotent_hint = true, destructive_hint = false)
+    )]
+    async fn mcp_export_list(&self) -> Result<CallToolResult, McpError> {
+        let inner = self.state.read().await;
+        let registry = inner.export_registry.clone().ok_or_else(no_session_error)?;
+        drop(inner);
+        let tools = registry.list_tools().await;
+        json_result(&serde_json::json!({ "exports": tools }))
+    }
+
+    #[tool(
+        description = "Re-fetch upstream tool schemas for every declared `[[export]]` route and replace the materialized export tool set.",
+        annotations(idempotent_hint = false, destructive_hint = false)
+    )]
+    async fn mcp_export_refresh(&self) -> Result<CallToolResult, McpError> {
+        let inner = self.state.read().await;
+        let registry = inner.export_registry.clone().ok_or_else(no_session_error)?;
+        let router = inner.router.clone().ok_or_else(no_session_error)?;
+        drop(inner);
+        let static_tool_names: Vec<String> = Self::tool_router()
+            .list_all()
+            .into_iter()
+            .map(|t| t.name.to_string())
+            .collect();
+        registry
+            .refresh(&router, &static_tool_names)
+            .await
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        let tools = registry.list_tools().await;
+        json_result(&serde_json::json!({ "exports": tools }))
+    }
+
     #[tool(description = "Describe a single session by id or alias.")]
     async fn session_describe(
         &self,
@@ -2216,6 +2509,7 @@ impl ServerHandler for LdsServer {
             Vec::new()
         });
         tools.extend(plugins);
+        tools.extend(self.list_export_tools().await);
         tools.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(ListToolsResult {
             tools,
@@ -2236,21 +2530,49 @@ impl ServerHandler for LdsServer {
         // dropped before dispatch so that try_plugin_call can acquire a read
         // guard without deadlocking (R3).
         if request.name != "session_start" {
-            let mut inner = self.state.write().await;
-            if inner.lds.session().is_err()
-                && let Some(cwd) = inner.startup_cwd.clone()
-                && is_project_root(&cwd)
-            {
-                // Auto-start: use startup_global_dirs (config.toml + env) so plugins are resolved correctly.
-                let global_recipe_dirs = (*inner.startup_global_dirs).clone();
-                let config = SessionConfig {
-                    root: cwd,
-                    global_recipe_dirs,
-                    ..Default::default()
-                };
-                build_session_modules(&mut inner, config)?;
+            // The session-creation decision (`session().is_err()` check) and
+            // `start_session_locally` run inside the same write-lock scope
+            // so concurrent auto-start races cannot double-start a session;
+            // the network-bound `wire_router_and_exports` call runs after
+            // the lock is dropped, per its own doc comment.
+            let started_session = {
+                let mut inner = self.state.write().await;
+                if inner.lds.session().is_err()
+                    && let Some(cwd) = inner.startup_cwd.clone()
+                    && is_project_root(&cwd)
+                {
+                    // Auto-start: use startup_global_dirs (config.toml + env) so plugins are resolved correctly.
+                    let global_recipe_dirs = (*inner.startup_global_dirs).clone();
+                    let config = SessionConfig {
+                        root: cwd,
+                        global_recipe_dirs,
+                        ..Default::default()
+                    };
+                    Some(start_session_locally(&mut inner, config)?)
+                } else {
+                    None
+                }
+                // write guard drops here — before try_plugin_call takes a
+                // read guard, and before wire_router_and_exports's upstream
+                // network `.await`s below
+            };
+            if let Some(session) = started_session {
+                wire_router_and_exports(&self.state, &session).await?;
             }
-            // write guard drops here — before try_plugin_call takes a read guard
+        }
+
+        // Export tools take priority over plugins: a route is a
+        // session-bound, intentionally declared name, whereas a plugin's
+        // name comes from whatever recipe files happen to be on disk.
+        // Checked ahead of the `session_start` guard below for consistency,
+        // even though export names never collide with `session_start`
+        // itself.
+        if request.name != "session_start"
+            && let Some(result) = self
+                .try_export_call(&request.name, request.arguments.as_ref())
+                .await?
+        {
+            return Ok(result);
         }
 
         // Skip plugin lookup for `session_start` so it can recover after the

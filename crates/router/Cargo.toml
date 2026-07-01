@@ -1,0 +1,32 @@
+[package]
+name = "lds-router"
+description = "MCP proxy routing: subprocess-backed upstream route registry for local-develop-server (lds)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+toml.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+rmcp.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+# Test-only mock upstream MCP server for `tests/export_test.rs` (spawned as
+# a subprocess like any real `RouteClient` upstream). Not part of the crate's
+# public API; exists solely so integration tests can drive `ExportRegistry`
+# against a live, schema-mutable stdio MCP server without depending on the
+# `lds` binary crate.
+[[bin]]
+name = "lds_router_mock_upstream"
+path = "tests/bin/mock_upstream.rs"
