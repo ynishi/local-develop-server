@@ -6,6 +6,7 @@ members = [
     "crates/git",
     "crates/journal",
     "crates/recipe",
+    "crates/router",
     "crates/sandbox",
     "crates/session",
     "crates/lds",
@@ -29,7 +30,7 @@ serde_json = "1"
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-rmcp = { version = "1.7", features = ["server", "transport-io"] }
+rmcp = { version = "1.7", features = ["server", "transport-io", "client", "transport-child-process"] }
 git2 = "0.20"
 schemars = "1"
 thiserror = "2"
