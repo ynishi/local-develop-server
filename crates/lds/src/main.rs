@@ -823,6 +823,50 @@ fn is_project_root(path: &std::path::Path) -> bool {
     path.join(".git").exists() || path.join("justfile").exists()
 }
 
+/// If no session is active yet and the server was launched from a
+/// ProjectRoot, start one automatically from `startup_cwd` and materialize
+/// its routes/exports.
+///
+/// Shared by the `call_tool` auto-start hook and `serve_mcp`'s eager
+/// startup call so the two paths cannot diverge (crux §1): whichever caller
+/// reaches this first wins, and any caller that finds a session already
+/// active is a no-op (`Ok(None)`).
+///
+/// # Concurrency
+/// The session-creation decision (`session().is_err()` check) and
+/// `start_session_locally` run inside the same write-lock scope so
+/// concurrent callers cannot double-start a session; the network-bound
+/// `wire_router_and_exports` call runs after the lock is dropped, per its
+/// own doc comment.
+async fn maybe_auto_start_session(
+    state: &Arc<RwLock<Inner>>,
+) -> Result<Option<Arc<Session>>, McpError> {
+    let started_session = {
+        let mut inner = state.write().await;
+        if inner.lds.session().is_err()
+            && let Some(cwd) = inner.startup_cwd.clone()
+            && is_project_root(&cwd)
+        {
+            // Auto-start: use startup_global_dirs (config.toml + env) so plugins are resolved correctly.
+            let global_recipe_dirs = (*inner.startup_global_dirs).clone();
+            let config = SessionConfig {
+                root: cwd,
+                global_recipe_dirs,
+                ..Default::default()
+            };
+            Some(start_session_locally(&mut inner, config)?)
+        } else {
+            None
+        }
+        // write guard drops here — before wire_router_and_exports's upstream
+        // network `.await`s below
+    };
+    if let Some(session) = &started_session {
+        wire_router_and_exports(state, session).await?;
+    }
+    Ok(started_session)
+}
+
 #[tool_router]
 impl LdsServer {
     #[tool(
@@ -831,6 +875,7 @@ impl LdsServer {
     async fn session_start(
         &self,
         Parameters(req): Parameters<SessionStartReq>,
+        peer: rmcp::Peer<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
         // Adapter: compose global_recipe_dirs from the MCP single arg (if any)
         // followed by startup_global_dirs (config.toml dirs then env dirs) in
@@ -860,6 +905,12 @@ impl LdsServer {
             start_session_locally(&mut inner, config)?
         };
         wire_router_and_exports(&self.state, &session).await?;
+        // Best-effort: a client that doesn't advertise the notifications
+        // capability simply ignores this; failures here must not fail the
+        // session_start response itself.
+        if let Err(e) = peer.notify_tool_list_changed().await {
+            tracing::warn!(error = %e, "notify_tool_list_changed failed after session_start");
+        }
         json_result(&serde_json::json!({
             "session_id": session.id(),
             "alias": session.alias(),
@@ -1755,6 +1806,7 @@ impl LdsServer {
     async fn mcp_route_register(
         &self,
         Parameters(req): Parameters<McpRouteRegisterReq>,
+        peer: rmcp::Peer<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
         let inner = self.state.read().await;
         let router = inner.router.clone().ok_or_else(no_session_error)?;
@@ -1774,6 +1826,12 @@ impl LdsServer {
             .register(route)
             .await
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        // Best-effort: registering a route doesn't itself add tools, but a
+        // route can be immediately followed by `mcp_call`, and callers that
+        // cache tool lists benefit from a refresh nudge regardless.
+        if let Err(e) = peer.notify_tool_list_changed().await {
+            tracing::warn!(error = %e, "notify_tool_list_changed failed after mcp_route_register");
+        }
         json_result(&serde_json::json!({ "registered": name }))
     }
 
@@ -1784,6 +1842,7 @@ impl LdsServer {
     async fn mcp_route_remove(
         &self,
         Parameters(req): Parameters<McpRouteRemoveReq>,
+        peer: rmcp::Peer<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
         let inner = self.state.read().await;
         let router = inner.router.clone().ok_or_else(no_session_error)?;
@@ -1792,6 +1851,12 @@ impl LdsServer {
             .remove(&req.name)
             .await
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        // Best-effort: removing a route can also drop exports bound to it
+        // (via a subsequent `mcp_export_refresh`), so nudge callers to
+        // re-fetch their cached tool list.
+        if let Err(e) = peer.notify_tool_list_changed().await {
+            tracing::warn!(error = %e, "notify_tool_list_changed failed after mcp_route_remove");
+        }
         json_result(&serde_json::json!({ "removed": req.name }))
     }
 
@@ -1811,7 +1876,10 @@ impl LdsServer {
         description = "Re-fetch upstream tool schemas for every declared `[[export]]` route and replace the materialized export tool set.",
         annotations(idempotent_hint = false, destructive_hint = false)
     )]
-    async fn mcp_export_refresh(&self) -> Result<CallToolResult, McpError> {
+    async fn mcp_export_refresh(
+        &self,
+        peer: rmcp::Peer<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
         let inner = self.state.read().await;
         let registry = inner.export_registry.clone().ok_or_else(no_session_error)?;
         let router = inner.router.clone().ok_or_else(no_session_error)?;
@@ -1826,6 +1894,11 @@ impl LdsServer {
             .await
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         let tools = registry.list_tools().await;
+        // Best-effort: this rebuilds the exported tool set, so callers with
+        // a cached tool list should re-fetch it.
+        if let Err(e) = peer.notify_tool_list_changed().await {
+            tracing::warn!(error = %e, "notify_tool_list_changed failed after mcp_export_refresh");
+        }
         json_result(&serde_json::json!({ "exports": tools }))
     }
 
@@ -2493,6 +2566,7 @@ impl ServerHandler for LdsServer {
         info.instructions = Some("local-develop-server: unified MCP for orch pipeline".into());
         info.capabilities = ServerCapabilities::builder()
             .enable_tools()
+            .enable_tool_list_changed()
             .enable_resources()
             .build();
         info
@@ -2526,39 +2600,11 @@ impl ServerHandler for LdsServer {
         // Auto-start: if the server was launched from a ProjectRoot and no
         // session has been started yet, start one automatically. Skip when the
         // tool being called is session_start itself (that handler will start
-        // the session explicitly). The write guard is kept in a tight scope and
-        // dropped before dispatch so that try_plugin_call can acquire a read
-        // guard without deadlocking (R3).
+        // the session explicitly). `maybe_auto_start_session` keeps its write
+        // guard in a tight scope, dropped before dispatch so that
+        // try_plugin_call can acquire a read guard without deadlocking (R3).
         if request.name != "session_start" {
-            // The session-creation decision (`session().is_err()` check) and
-            // `start_session_locally` run inside the same write-lock scope
-            // so concurrent auto-start races cannot double-start a session;
-            // the network-bound `wire_router_and_exports` call runs after
-            // the lock is dropped, per its own doc comment.
-            let started_session = {
-                let mut inner = self.state.write().await;
-                if inner.lds.session().is_err()
-                    && let Some(cwd) = inner.startup_cwd.clone()
-                    && is_project_root(&cwd)
-                {
-                    // Auto-start: use startup_global_dirs (config.toml + env) so plugins are resolved correctly.
-                    let global_recipe_dirs = (*inner.startup_global_dirs).clone();
-                    let config = SessionConfig {
-                        root: cwd,
-                        global_recipe_dirs,
-                        ..Default::default()
-                    };
-                    Some(start_session_locally(&mut inner, config)?)
-                } else {
-                    None
-                }
-                // write guard drops here — before try_plugin_call takes a
-                // read guard, and before wire_router_and_exports's upstream
-                // network `.await`s below
-            };
-            if let Some(session) = started_session {
-                wire_router_and_exports(&self.state, &session).await?;
-            }
+            maybe_auto_start_session(&self.state).await?;
         }
 
         // Export tools take priority over plugins: a route is a
@@ -2947,19 +2993,15 @@ Subprocess spawn is **lazy**: no subprocess is started until the first
 ```toml
 [[export]]
 route = "outline"
-tool = "search_notes"
+tools = ["search_notes", "get_note"]
 # prefix = "outline_"                     # default: "<route>_"
-
-[[export]]
-route = "outline"
-tool = "get_note"
 ```
 
 Fields:
 
 - `route` (required) — must match a `[[route]]` `name` in the same
   session's config.
-- `tool` (required) — the upstream tool's exact name.
+- `tools` (required) — the upstream tools' exact names, as an array.
 - `prefix` (optional) — override the default `<route>_` prefix.
 
 Declared exports appear in the caller's `list_tools` as
@@ -3079,9 +3121,19 @@ fn plugin_to_tool(plugin: lds_recipe::PluginRecipe) -> Tool {
 }
 
 /// MCP serve mode: initialise the server and run until the transport closes.
+///
+/// The session (and its routes/exports, if any) is eagerly auto-started
+/// here — before the transport starts serving — so that a client's very
+/// first `tools/list` request (issued immediately after the `initialize`
+/// handshake) already observes materialized `[[export]]` tools instead of
+/// racing session construction. Without this, `list_tools` only reflects
+/// exports after some tool call has triggered `call_tool`'s own auto-start
+/// hook, which for a fresh session is typically *after* the client has
+/// already cached an export-less tool list.
 async fn serve_mcp() -> Result<()> {
     tracing::info!("lds v{}", env!("CARGO_PKG_VERSION"));
     let server = LdsServer::new();
+    maybe_auto_start_session(&server.state).await?;
     let service = server.serve(rmcp::transport::io::stdio()).await?;
     service.waiting().await?;
     Ok(())
