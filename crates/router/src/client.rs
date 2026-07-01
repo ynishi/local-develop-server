@@ -11,7 +11,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use rmcp::model::{CallToolRequestParams, CallToolResult};
+use rmcp::model::{CallToolRequestParams, CallToolResult, Tool};
 use rmcp::service::RunningService;
 use rmcp::transport::TokioChildProcess;
 use rmcp::{RoleClient, ServiceExt};
@@ -124,6 +124,58 @@ impl RouteClient {
                     "route call timed out"
                 );
                 Err(RouterError::Timeout(self.timeout_secs, tool.to_string()))
+            }
+        }
+    }
+
+    /// Fetch the upstream subprocess's advertised tool list.
+    ///
+    /// # Concurrency
+    /// Lazily spawns the upstream subprocess on first call, exactly like
+    /// [`RouteClient::call_tool`] — both serialize on the same internal
+    /// `tokio::sync::Mutex`, so a concurrent `call_tool`/`list_tools` pair on
+    /// the same route queues rather than races (a route's subprocess speaks
+    /// one stdio stream). Per-route timeout applies (same as `call_tool`):
+    /// wrapped by `tokio::time::timeout(Duration::from_secs(timeout_secs), ...)`
+    /// so a hung upstream cannot block a session-start/explicit-refresh call
+    /// (and, transitively, every other concurrent tool call waiting on that
+    /// session) indefinitely.
+    pub async fn list_tools(&self) -> Result<Vec<Tool>, RouterError> {
+        let mut guard = self.service.lock().await;
+        if guard.is_none() {
+            let spawned = self.spawn().await?;
+            *guard = Some(spawned);
+        }
+        let Some(service) = guard.as_ref() else {
+            // Unreachable in practice: see the identical comment in
+            // `call_tool` above.
+            return Err(RouterError::Upstream(format!(
+                "route {} lost its subprocess handle unexpectedly",
+                self.name
+            )));
+        };
+
+        match tokio::time::timeout(
+            Duration::from_secs(self.timeout_secs),
+            service.list_all_tools(),
+        )
+        .await
+        {
+            Ok(Ok(tools)) => Ok(tools),
+            Ok(Err(e)) => {
+                tracing::warn!(route = %self.name, error = %e, "upstream mcp list_tools failed");
+                Err(RouterError::Upstream(e.to_string()))
+            }
+            Err(_elapsed) => {
+                tracing::warn!(
+                    route = %self.name,
+                    timeout_secs = self.timeout_secs,
+                    "route list_tools timed out"
+                );
+                Err(RouterError::Timeout(
+                    self.timeout_secs,
+                    "list_tools".to_string(),
+                ))
             }
         }
     }

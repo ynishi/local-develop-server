@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use rmcp::model::CallToolResult;
+use rmcp::model::{CallToolResult, Tool};
 use serde_json::Value;
 use tokio::sync::RwLock;
 
@@ -127,6 +127,30 @@ impl McpRouter {
         client.call_tool(tool, args).await
     }
 
+    /// Fetch the upstream tool list for a specific route by name.
+    ///
+    /// Used by [`crate::ExportRegistry::refresh`] to re-fetch the schemas of
+    /// a route's declared exported tools; not itself routed through a
+    /// `<route>://<tool>` URI since it has no `<tool>` component.
+    ///
+    /// # Concurrency
+    /// Mirrors [`McpRouter::call`]: the registry's read guard is held only
+    /// across the `HashMap` lookup + `Arc<RouteClient>` clone, dropped
+    /// before the upstream `list_tools` `.await` (Outline `rust` book §4-1,
+    /// K-4).
+    ///
+    /// # Errors
+    /// [`RouterError::RouteNotFound`] if `route` is not registered.
+    pub async fn list_upstream_tools(&self, route: &str) -> Result<Vec<Tool>, RouterError> {
+        let guard = self.routes.read().await;
+        let client = guard
+            .get(route)
+            .cloned()
+            .ok_or_else(|| RouterError::RouteNotFound(route.to_string()))?;
+        drop(guard);
+        client.list_tools().await
+    }
+
     /// Proxy a tool call addressed by a `<route>://<tool>` URI.
     ///
     /// Rejects the reserved `lds://` self-loop scheme before attempting a
@@ -223,6 +247,15 @@ mod tests {
     async fn router_call_unregistered_route_returns_not_found() {
         let router = McpRouter::new();
         let result = router.call("missing", "some_tool", Value::Null).await;
+        assert!(matches!(result, Err(RouterError::RouteNotFound(name)) if name == "missing"));
+    }
+
+    /// Boundary: fetching the upstream tool list for an unregistered route
+    /// returns `RouteNotFound` without attempting to spawn anything.
+    #[tokio::test]
+    async fn router_list_upstream_tools_unregistered_route_returns_not_found() {
+        let router = McpRouter::new();
+        let result = router.list_upstream_tools("missing").await;
         assert!(matches!(result, Err(RouterError::RouteNotFound(name)) if name == "missing"));
     }
 }

@@ -21,3 +21,12 @@ rmcp.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+
+# Test-only mock upstream MCP server for `tests/export_test.rs` (spawned as
+# a subprocess like any real `RouteClient` upstream). Not part of the crate's
+# public API; exists solely so integration tests can drive `ExportRegistry`
+# against a live, schema-mutable stdio MCP server without depending on the
+# `lds` binary crate.
+[[bin]]
+name = "lds_router_mock_upstream"
+path = "tests/bin/mock_upstream.rs"
