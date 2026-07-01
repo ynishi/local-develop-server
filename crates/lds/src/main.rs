@@ -2608,25 +2608,34 @@ impl ServerHandler for LdsServer {
         _context: RequestContext<RoleServer>,
     ) -> Result<ListResourcesResult, McpError> {
         let inner = self.state.read().await;
-        let mut resources: Vec<Resource> = Vec::new();
-        resources.push(Annotated::new(
-            RawResource::new("lds://sessions", "sessions")
-                .with_description("Full multi-session ledger as JSON")
-                .with_mime_type("application/json"),
-            None,
-        ));
-        resources.push(Annotated::new(
-            RawResource::new("lds://sessions/doctor", "sessions/doctor")
-                .with_description("Doctor reports for every live session")
-                .with_mime_type("application/json"),
-            None,
-        ));
-        resources.push(Annotated::new(
-            RawResource::new("lds://docs/multi-session", "docs/multi-session")
-                .with_description("Multi-session ledger design + usage doc")
-                .with_mime_type("text/markdown"),
-            None,
-        ));
+        let mut resources: Vec<Resource> = vec![
+            Annotated::new(
+                RawResource::new("lds://sessions", "sessions")
+                    .with_description("Full multi-session ledger as JSON")
+                    .with_mime_type("application/json"),
+                None,
+            ),
+            Annotated::new(
+                RawResource::new("lds://sessions/doctor", "sessions/doctor")
+                    .with_description("Doctor reports for every live session")
+                    .with_mime_type("application/json"),
+                None,
+            ),
+            Annotated::new(
+                RawResource::new("lds://docs/multi-session", "docs/multi-session")
+                    .with_description("Multi-session ledger design + usage doc")
+                    .with_mime_type("text/markdown"),
+                None,
+            ),
+            Annotated::new(
+                RawResource::new("lds://docs/routing", "docs/routing")
+                    .with_description(
+                        "MCP routing + export: config.toml shape, tool contracts, usage examples",
+                    )
+                    .with_mime_type("text/markdown"),
+                None,
+            ),
+        ];
         for entry in inner.lds.list_sessions() {
             let label = entry
                 .alias
@@ -2708,6 +2717,15 @@ fn read_lds_resource(uri: &str, ledger: &LdsState) -> Result<ResourceContents, M
             uri: uri.to_string(),
             mime_type: Some("text/markdown".into()),
             text: MULTI_SESSION_DOC.into(),
+            meta: None,
+        });
+    }
+
+    if path == "docs/routing" {
+        return Ok(ResourceContents::TextResourceContents {
+            uri: uri.to_string(),
+            mime_type: Some("text/markdown".into()),
+            text: ROUTING_DOC.into(),
             meta: None,
         });
     }
@@ -2835,6 +2853,7 @@ Pass either to `session_describe` / `session_doctor` / `session_close` /
 - `lds://sessions/{key}`        — describe one session (`key` = id or alias)
 - `lds://sessions/{key}/doctor` — doctor report for one session
 - `lds://docs/multi-session`    — this doc
+- `lds://docs/routing`          — MCP routing + export design + usage
 
 ## Doctor checks (3-valued verdict: ok / warn / fail)
 
@@ -2856,6 +2875,171 @@ Pass either to `session_describe` / `session_doctor` / `session_close` /
   close it when done.
 - **Observability sweep** — periodically read `lds://sessions/doctor` to
   catch root drift, conflicts, and idle leakage.
+"#;
+
+const ROUTING_DOC: &str = r#"# lds MCP Routing + Export
+
+lds proxies calls to **external MCP servers** via a session-bound gateway so
+callers only need one tool surface (`mcp_call`) instead of loading every
+upstream server's schema. Declared upstream tools can additionally be
+**re-exported** to the caller's tool list with a prefixed name.
+
+## Tools
+
+- `mcp_call(uri, args)` — proxy a single call. `uri = "<route>://<tool>"`.
+  `args` must be a JSON object.
+- `mcp_route_list` — enumerate registered routes for the active session.
+- `mcp_route_register(name, command, args?, env?, timeout_secs?)` — add or
+  replace a route **in-memory only** (not persisted).
+- `mcp_route_remove(name)` — remove a route and terminate its subprocess.
+- `mcp_export_list` — enumerate currently materialized `[[export]]` tools.
+- `mcp_export_refresh` — re-poll each declared export route's upstream
+  `list_tools`, then rebuild the exported tool set atomically.
+
+## Reserved scheme
+
+`lds://` is reserved. `mcp_call(uri="lds://…")` returns
+`RouterError::SelfLoop` before any lookup.
+
+## Config file (`config.toml`)
+
+Routes and exports live in the shared `config.toml` (same file as
+`[recipes]` / `[paths]`). Two locations are merged at `session_start`:
+
+- User-global: `~/.config/lds/config.toml`
+- Project-local: `<session_root>/config.toml` (overrides user by `name` /
+  `route`)
+
+Both files are optional. Unknown top-level keys are ignored, so router
+config coexists with existing `[recipes]` / `[paths]` sections without
+schema conflict.
+
+### `[[route]]`
+
+```toml
+[[route]]
+name = "outline"
+command = "outline-mcp"
+args = ["--stdio"]
+timeout_secs = 30                          # default 30
+env = { OUTLINE_HOME = "${LDS_SESSION_ROOT}/.outline" }
+```
+
+Fields:
+
+- `name` (required) — the `<route>` component of `<route>://<tool>` URIs.
+  Must be unique per session.
+- `command` (required) — subprocess command, resolved via `PATH`.
+- `args` (default `[]`) — CLI arguments.
+- `env` (default `{}`) — extra env vars for the subprocess.
+- `timeout_secs` (default 30) — per-call timeout (applies to both
+  `call_tool` and `list_tools`).
+
+`${LDS_SESSION_ROOT}` is expanded in `args` and `env` values only.
+`name` and `command` are never expanded — an unexpanded literal in
+`command` will fail fast at `Command::new` time.
+
+Subprocess spawn is **lazy**: no subprocess is started until the first
+`mcp_call` (or `mcp_export_refresh`) touches the route.
+
+### `[[export]]`
+
+```toml
+[[export]]
+route = "outline"
+tool = "search_notes"
+# prefix = "outline_"                     # default: "<route>_"
+
+[[export]]
+route = "outline"
+tool = "get_note"
+```
+
+Fields:
+
+- `route` (required) — must match a `[[route]]` `name` in the same
+  session's config.
+- `tool` (required) — the upstream tool's exact name.
+- `prefix` (optional) — override the default `<route>_` prefix.
+
+Declared exports appear in the caller's `list_tools` as
+`<prefix><tool>` (e.g. `outline_search_notes`), with the upstream tool's
+schema copied verbatim. Undeclared upstream tools remain accessible only
+via generic `mcp_call`.
+
+**Limits**:
+
+- Total exported tool count is capped at 16 by default. Exceeding it
+  fails `session_start` with `RouterError::ExportLimitExceeded`.
+- Name collisions between exports (same prefixed name) fail
+  `session_start` with `RouterError::ExportCollision`.
+- Collisions with lds's own static tool names (e.g. `git_status`,
+  `session_start`) also fail — the router keeps the built-in and rejects
+  the export.
+
+## Usage examples
+
+### Proxy a single call
+
+```
+mcp_call(uri="outline://search_notes", args={"query": "changelog"})
+  → JSON returned verbatim from outline-mcp
+```
+
+### Auto-register at session start (persistent)
+
+Add `[[route]]` blocks to `~/.config/lds/config.toml` — they are wired
+automatically the next time `session_start` runs (or on the first
+tool call that triggers auto-start).
+
+### Runtime-only route (not persisted)
+
+```
+mcp_route_register(name="scratch", command="my-experimental-mcp")
+mcp_call(uri="scratch://ping")
+mcp_route_remove(name="scratch")
+```
+
+### Refresh export schemas after an upstream restart
+
+```
+mcp_export_refresh                 # atomic rebuild; export snapshot swaps in one step
+mcp_export_list                    # confirm the new tool surface
+```
+
+## Failure modes
+
+| Error                       | When                                                       |
+|-----------------------------|------------------------------------------------------------|
+| `RouterError::SelfLoop`     | `mcp_call(uri="lds://…")` — reserved scheme rejected       |
+| `RouterError::InvalidUri`   | URI does not match `<route>://<tool>`                      |
+| `RouterError::RouteNotFound`| No route registered for the URI's `<route>`                |
+| `RouterError::Timeout`      | Upstream `call_tool` or `list_tools` exceeded `timeout_secs` |
+| `RouterError::Spawn`        | Subprocess spawn failed (typically `command` not on `PATH`) |
+| `RouterError::Upstream`     | Transparent upstream MCP-level error (message forwarded)    |
+| `RouterError::Config`       | `config.toml` `[[route]]` / `[[export]]` parse error       |
+| `RouterError::ExportLimitExceeded` | `[[export]]` total exceeds 16                       |
+| `RouterError::ExportCollision`     | Two exports produce the same prefixed tool name     |
+
+## Concurrency
+
+- `mcp_call` acquires the router's read lock only for HashMap lookup +
+  `Arc<RouteClient>` clone; the upstream `.await` runs lock-free.
+- Calls to the *same* route serialize on a per-`RouteClient` mutex (one
+  stdio stream per subprocess). Calls to *different* routes are fully
+  concurrent.
+- `session_start` / auto-start hold the session write lock only for the
+  synchronous local module wiring. Network I/O (`list_tools` for each
+  declared export) runs after the lock is dropped; the write lock is
+  reacquired only long enough to assign the built router + export
+  registry.
+
+## See also
+
+- Tool doc: use MCP `tools/list` — each `mcp_*` tool carries its own
+  `description` + `annotations` (idempotent / destructive hints).
+- Resource: `lds://docs/multi-session` — session model this router
+  builds on top of.
 "#;
 
 fn plugin_to_tool(plugin: lds_recipe::PluginRecipe) -> Tool {
