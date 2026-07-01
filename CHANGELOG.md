@@ -16,6 +16,43 @@ All notable changes to this project will be documented in this file.
 
 ### Security
 
+## [0.6.1] - 2026-07-01
+
+### Added
+
+- **`notifications/tools/list_changed` support** — `ServerCapabilities` now
+  advertises `tool_list_changed`; lds emits the notification after
+  `session_start`, `mcp_route_register`, `mcp_route_remove`, and
+  `mcp_export_refresh` so spec-compliant clients (Claude Code included)
+  refresh their tool list without a restart.
+- **Startup-time eager router / export materialization** — the router and
+  export registry are wired during MCP server startup (using `startup_cwd`)
+  so declared `[[route]]` / `[[export]]` blocks in
+  `~/.config/lds/config.toml` are visible on the caller's very first
+  `list_tools` fetch, not just after a lazy auto-start.
+
+### Changed
+
+- **`ExportRegistry::refresh` fan-out is now parallel** — per-route
+  `list_tools` calls run via `futures::future::join_all`, then the
+  collision / limit checks apply to the merged result in the original
+  declaration order. Worst-case latency drops from
+  `sum(timeout_secs × routes)` to `max(timeout_secs)` (holistic Finding 2).
+
+### Fixed
+
+- **`ROUTING_DOC` `[[export]]` example uses the correct `tools` array**
+  form — the resource at `lds://docs/routing` previously showed
+  `tool = "search_notes"` (singular string), which does not match the
+  actual `ExportConfig` schema (`tools: Vec<String>`). Config files
+  following the doc verbatim produced `missing field 'tools'` at parse
+  time.
+- **`RouteClient::spawn` honors `timeout_secs` for the MCP handshake** —
+  the subprocess-start / rmcp handshake path is now wrapped in
+  `tokio::time::timeout(self.timeout_secs, ...)`, closing the gap where a
+  stalled handshake could hang `wire_router_and_exports` indefinitely
+  despite a configured per-route timeout.
+
 ## [0.6.0] - 2026-07-01
 
 ### Added
