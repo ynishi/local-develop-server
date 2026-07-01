@@ -37,25 +37,72 @@ fn default_timeout_secs() -> u64 {
     30
 }
 
-/// The `[[route]]` array-of-tables shape of a `routes.toml` file.
+/// A single upstream tool re-publication declared in a `routes.toml`
+/// `[[export]]` block: republish a subset of `route`'s upstream tools under
+/// this session's own tool surface, prefixed to avoid name collisions.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ExportConfig {
+    /// The `[[route]]` name (see [`RouteConfig::name`]) this declaration
+    /// re-publishes tools from.
+    pub route: String,
+    /// Upstream tool names to re-publish, exactly as advertised by the
+    /// upstream route (not yet prefixed).
+    pub tools: Vec<String>,
+    /// Public tool name prefix; defaults to `"<route>_"` (see
+    /// [`ExportConfig::effective_prefix`]) when omitted.
+    #[serde(default)]
+    pub prefix: Option<String>,
+}
+
+impl ExportConfig {
+    /// The effective public-name prefix: `prefix` if set, else `"<route>_"`.
+    pub fn effective_prefix(&self) -> String {
+        self.prefix
+            .clone()
+            .unwrap_or_else(|| format!("{}_", self.route))
+    }
+}
+
+/// The `[[route]]` / `[[export]]` array-of-tables shape of a `routes.toml`
+/// file.
 #[derive(Debug, Default, Deserialize)]
 struct RoutesFile {
     #[serde(default)]
     route: Vec<RouteConfig>,
+    #[serde(default)]
+    export: Vec<ExportConfig>,
 }
 
 impl RouteConfig {
     /// Load and merge user-global and project-local route declarations.
     ///
-    /// Reads `user_path` first, then `project_path`; a route in
-    /// `project_path` with the same `name` as one from `user_path` replaces
-    /// it entirely (project overrides user). A missing file is treated as an
-    /// empty route set, not an error — `routes.toml` is optional at both
+    /// A thin wrapper over [`RouteConfig::load_all`] that discards the
+    /// `[[export]]` half for callers that only care about routes.
+    ///
+    /// # Errors / Concurrency
+    /// See [`RouteConfig::load_all`].
+    pub fn load(
+        user_path: &Path,
+        project_path: &Path,
+        session_root: &Path,
+    ) -> Result<Vec<RouteConfig>, RouterError> {
+        Self::load_all(user_path, project_path, session_root).map(|(routes, _)| routes)
+    }
+
+    /// Load and merge user-global and project-local `[[route]]` *and*
+    /// `[[export]]` declarations from `routes.toml` files.
+    ///
+    /// Reads `user_path` first, then `project_path`; a declaration in
+    /// `project_path` with the same key as one from `user_path` replaces it
+    /// entirely (project overrides user) — keyed by `name` for routes and by
+    /// `route` for exports. A missing file is treated as an empty
+    /// declaration set, not an error — `routes.toml` is optional at both
     /// levels.
     ///
     /// `${LDS_SESSION_ROOT}` occurrences in each route's `args` and `env`
     /// values are expanded to `session_root`'s string representation before
-    /// the route is returned.
+    /// the route is returned. Export declarations have no
+    /// `${LDS_SESSION_ROOT}`-eligible fields, so none are expanded.
     ///
     /// # Errors
     ///
@@ -67,41 +114,53 @@ impl RouteConfig {
     /// # Concurrency
     /// Performs synchronous filesystem I/O (`std::fs::read_to_string`) and
     /// is not itself `async`. Callers invoking this from an `async fn` (e.g.
-    /// `crates/lds/src/main.rs`'s `build_session_modules`) must wrap the
+    /// the `lds` binary crate's `wire_router_and_exports`) must wrap the
     /// call in `tokio::task::spawn_blocking` to avoid blocking a tokio
     /// worker thread — no exception applies regardless of file size (Rust
     /// Book §4-1-4 / K-110, K-126, K-134).
-    pub fn load(
+    pub fn load_all(
         user_path: &Path,
         project_path: &Path,
         session_root: &Path,
-    ) -> Result<Vec<RouteConfig>, RouterError> {
-        let mut routes = Self::load_file(user_path, session_root)?;
-        let project_routes = Self::load_file(project_path, session_root)?;
+    ) -> Result<(Vec<RouteConfig>, Vec<ExportConfig>), RouterError> {
+        let (mut routes, mut exports) = Self::load_file_all(user_path, session_root)?;
+        let (project_routes, project_exports) = Self::load_file_all(project_path, session_root)?;
         for route in project_routes {
             match routes.iter_mut().find(|r| r.name == route.name) {
                 Some(existing) => *existing = route,
                 None => routes.push(route),
             }
         }
-        Ok(routes)
+        for export in project_exports {
+            match exports.iter_mut().find(|e| e.route == export.route) {
+                Some(existing) => *existing = export,
+                None => exports.push(export),
+            }
+        }
+        Ok((routes, exports))
     }
 
     /// Read and parse a single `routes.toml` file, expanding
-    /// `${LDS_SESSION_ROOT}` in `args`/`env` values. Returns an empty `Vec`
-    /// if `path` does not exist.
-    fn load_file(path: &Path, session_root: &Path) -> Result<Vec<RouteConfig>, RouterError> {
+    /// `${LDS_SESSION_ROOT}` in route `args`/`env` values. Returns empty
+    /// `Vec`s for both halves if `path` does not exist.
+    fn load_file_all(
+        path: &Path,
+        session_root: &Path,
+    ) -> Result<(Vec<RouteConfig>, Vec<ExportConfig>), RouterError> {
         let content = match std::fs::read_to_string(path) {
             Ok(content) => content,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Ok((Vec::new(), Vec::new()));
+            }
             Err(e) => return Err(RouterError::Spawn(e)),
         };
         let file: RoutesFile = toml::from_str(&content)?;
-        Ok(file
+        let routes = file
             .route
             .into_iter()
             .map(|route| route.expand_session_root(session_root))
-            .collect())
+            .collect();
+        Ok((routes, file.export))
     }
 
     /// Return `self` with `${LDS_SESSION_ROOT}` expanded in `args` and `env`
@@ -223,5 +282,87 @@ command = "project-command"
             RouteConfig::load(&user_path, &project_path, Path::new("/tmp/session")).unwrap(); // justification: both routes.toml files are known-good TOML written above; load() cannot fail on this path
         assert_eq!(routes.len(), 1);
         assert_eq!(routes[0].command, "project-command");
+    }
+
+    /// `[[export]]` blocks parse alongside `[[route]]` blocks, with
+    /// `prefix` defaulting to `"<route>_"` when omitted.
+    #[test]
+    fn load_all_parses_export_blocks_with_default_and_explicit_prefix() {
+        let dir = tempfile::tempdir().expect("tempdir"); // justification: tempdir creation mirrors crates/core/src/config.rs test pattern
+        let user_path = dir.path().join("user-routes.toml");
+        let project_path = dir.path().join("project-routes.toml"); // left unwritten: missing file is a valid empty declaration set
+
+        std::fs::write(
+            &user_path,
+            r#"
+[[route]]
+name = "outline"
+command = "outline-mcp"
+
+[[export]]
+route = "outline"
+tools = ["snapshot_create", "snapshot_list"]
+
+[[export]]
+route = "mini-app"
+tools = ["create"]
+prefix = "ma_"
+"#,
+        )
+        .expect("write user routes.toml"); // justification: writing known-good TOML in test
+
+        let (routes, exports) =
+            RouteConfig::load_all(&user_path, &project_path, Path::new("/tmp/session")).unwrap(); // justification: user routes.toml is known-good TOML written above; load_all() cannot fail on this path
+        assert_eq!(routes.len(), 1);
+        assert_eq!(exports.len(), 2);
+
+        let outline_export = exports
+            .iter()
+            .find(|e| e.route == "outline")
+            .expect("outline export declaration should be present");
+        assert_eq!(
+            outline_export.tools,
+            vec!["snapshot_create".to_string(), "snapshot_list".to_string()]
+        );
+        assert_eq!(outline_export.effective_prefix(), "outline_");
+
+        let mini_app_export = exports
+            .iter()
+            .find(|e| e.route == "mini-app")
+            .expect("mini-app export declaration should be present");
+        assert_eq!(mini_app_export.effective_prefix(), "ma_");
+    }
+
+    /// Boundary: a project export declaration for the same `route` as a
+    /// user-global one replaces it entirely (project overrides user).
+    #[test]
+    fn load_all_project_overrides_user_export_by_route() {
+        let dir = tempfile::tempdir().expect("tempdir"); // justification: tempdir creation mirrors crates/core/src/config.rs test pattern
+        let user_path = dir.path().join("user-routes.toml");
+        let project_path = dir.path().join("project-routes.toml");
+
+        std::fs::write(
+            &user_path,
+            r#"
+[[export]]
+route = "outline"
+tools = ["snapshot_create"]
+"#,
+        )
+        .expect("write user routes.toml"); // justification: writing known-good TOML in test
+        std::fs::write(
+            &project_path,
+            r#"
+[[export]]
+route = "outline"
+tools = ["snapshot_list"]
+"#,
+        )
+        .expect("write project routes.toml"); // justification: writing known-good TOML in test
+
+        let (_, exports) =
+            RouteConfig::load_all(&user_path, &project_path, Path::new("/tmp/session")).unwrap(); // justification: both routes.toml files are known-good TOML written above; load_all() cannot fail on this path
+        assert_eq!(exports.len(), 1);
+        assert_eq!(exports[0].tools, vec!["snapshot_list".to_string()]);
     }
 }
