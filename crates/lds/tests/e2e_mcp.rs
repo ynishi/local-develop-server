@@ -126,6 +126,10 @@ async fn list_tools_includes_static_surface() {
         "sandbox_python_file",
         "gh_run_view",
         "gh_run_log_failed",
+        "mcp_call",
+        "mcp_route_list",
+        "mcp_route_register",
+        "mcp_route_remove",
     ] {
         assert!(
             names.contains(&expected),
@@ -354,6 +358,106 @@ async fn no_session_error_has_internal_error_code() {
     }
 
     client.cancel().await.unwrap();
+}
+
+#[tokio::test]
+async fn mcp_call_self_loop_rejected() {
+    // Auto-start via a real TempRepo so `inner.router` is actually populated
+    // (an empty McpRouter) — this exercises the real self-loop guard inside
+    // `McpRouter::call_uri`, not merely the "no session" guard.
+    let repo = TempRepo::new();
+    let client = connect_in(repo.dir.path()).await;
+
+    let outcome = client
+        .peer()
+        .call_tool(call_params(
+            "mcp_call",
+            json!({ "uri": "lds://git_status", "args": {} }),
+        ))
+        .await;
+
+    match outcome {
+        Err(ServiceError::McpError(ref err_data)) => {
+            assert!(
+                err_data.message.contains("self-loop"),
+                "expected self-loop error message, got: {}",
+                err_data.message
+            );
+        }
+        Ok(result) => {
+            let text = extract_text(&result);
+            assert!(
+                result.is_error == Some(true) && text.contains("self-loop"),
+                "expected self-loop error, got Ok: {text}"
+            );
+        }
+        Err(other) => panic!("unexpected error variant: {other:?}"),
+    }
+
+    client.cancel().await.unwrap();
+}
+
+#[tokio::test]
+async fn mcp_call_proxies_to_child_lds_server() {
+    // Parent A: real ProjectRoot so auto-start populates `inner.router`.
+    let repo_a = TempRepo::new();
+    let client_a = connect_in(repo_a.dir.path()).await;
+
+    // Child B: a separate ProjectRoot the parent will proxy into. Its `lds`
+    // subprocess is spawned by `RouteClient` with an unrelated CWD (it does
+    // not set `current_dir`), so child B's session must be started explicitly
+    // via a proxied `session_start` call rather than relying on auto-start.
+    let repo_b = TempRepo::new();
+
+    let register_result = client_a
+        .peer()
+        .call_tool(call_params(
+            "mcp_route_register",
+            json!({ "name": "child_lds", "command": server_bin() }),
+        ))
+        .await
+        .unwrap();
+    assert!(
+        register_result.is_error != Some(true),
+        "mcp_route_register should succeed, got: {:?}",
+        extract_text(&register_result)
+    );
+
+    let start_result = client_a
+        .peer()
+        .call_tool(call_params(
+            "mcp_call",
+            json!({
+                "uri": "child_lds://session_start",
+                "args": { "root": repo_b.path_str() },
+            }),
+        ))
+        .await
+        .unwrap();
+    let start_text = extract_text(&start_result);
+    assert!(
+        start_result.is_error != Some(true) && start_text.contains("session_id"),
+        "proxied session_start on child_lds should succeed, got: {start_text}"
+    );
+
+    let status_result = client_a
+        .peer()
+        .call_tool(call_params(
+            "mcp_call",
+            json!({ "uri": "child_lds://git_status", "args": {} }),
+        ))
+        .await
+        .unwrap();
+    let status_text = extract_text(&status_result);
+    assert!(
+        status_result.is_error != Some(true),
+        "proxied git_status on child_lds should succeed, got: {status_text}"
+    );
+    let status_json: Value = serde_json::from_str(&status_text)
+        .expect("proxied git_status payload must be transparent JSON");
+    assert_eq!(status_json["branch"], json!("main"), "got: {status_text}");
+
+    client_a.cancel().await.unwrap();
 }
 
 #[tokio::test]
