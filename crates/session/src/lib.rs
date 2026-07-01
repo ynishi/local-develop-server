@@ -533,14 +533,15 @@ impl LdsState {
             evidence: format!("idle_secs={idle}"),
         });
 
-        let verdict = checks
-            .iter()
-            .map(|c| c.status.clone())
-            .fold(CheckStatus::Ok, |acc, s| match (&acc, &s) {
-                (CheckStatus::Fail, _) | (_, CheckStatus::Fail) => CheckStatus::Fail,
-                (CheckStatus::Warn, _) | (_, CheckStatus::Warn) => CheckStatus::Warn,
-                _ => CheckStatus::Ok,
-            });
+        let verdict =
+            checks
+                .iter()
+                .map(|c| c.status.clone())
+                .fold(CheckStatus::Ok, |acc, s| match (&acc, &s) {
+                    (CheckStatus::Fail, _) | (_, CheckStatus::Fail) => CheckStatus::Fail,
+                    (CheckStatus::Warn, _) | (_, CheckStatus::Warn) => CheckStatus::Warn,
+                    _ => CheckStatus::Ok,
+                });
 
         Ok(DoctorReport {
             session_id: s.id().to_string(),

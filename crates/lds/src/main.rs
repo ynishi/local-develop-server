@@ -1513,7 +1513,9 @@ impl LdsServer {
         }))
     }
 
-    #[tool(description = "List all live sessions in the ledger (id, alias, root, timestamps, is_default).")]
+    #[tool(
+        description = "List all live sessions in the ledger (id, alias, root, timestamps, is_default)."
+    )]
     async fn session_list(&self) -> Result<CallToolResult, McpError> {
         let inner = self.state.read().await;
         let entries: Vec<serde_json::Value> = inner
@@ -2285,54 +2287,47 @@ impl ServerHandler for LdsServer {
     ) -> Result<ListResourcesResult, McpError> {
         let inner = self.state.read().await;
         let mut resources: Vec<Resource> = Vec::new();
-        resources.push(
-            Annotated::new(
-                RawResource::new("lds://sessions", "sessions")
-                    .with_description("Full multi-session ledger as JSON")
-                    .with_mime_type("application/json"),
-                None,
-            ),
-        );
-        resources.push(
-            Annotated::new(
-                RawResource::new("lds://sessions/doctor", "sessions/doctor")
-                    .with_description("Doctor reports for every live session")
-                    .with_mime_type("application/json"),
-                None,
-            ),
-        );
-        resources.push(
-            Annotated::new(
-                RawResource::new("lds://docs/multi-session", "docs/multi-session")
-                    .with_description("Multi-session ledger design + usage doc")
-                    .with_mime_type("text/markdown"),
-                None,
-            ),
-        );
+        resources.push(Annotated::new(
+            RawResource::new("lds://sessions", "sessions")
+                .with_description("Full multi-session ledger as JSON")
+                .with_mime_type("application/json"),
+            None,
+        ));
+        resources.push(Annotated::new(
+            RawResource::new("lds://sessions/doctor", "sessions/doctor")
+                .with_description("Doctor reports for every live session")
+                .with_mime_type("application/json"),
+            None,
+        ));
+        resources.push(Annotated::new(
+            RawResource::new("lds://docs/multi-session", "docs/multi-session")
+                .with_description("Multi-session ledger design + usage doc")
+                .with_mime_type("text/markdown"),
+            None,
+        ));
         for entry in inner.lds.list_sessions() {
-            let label = entry.alias.clone().unwrap_or_else(|| entry.session_id.clone());
-            resources.push(
-                Annotated::new(
-                    RawResource::new(
-                        format!("lds://sessions/{label}"),
-                        format!("session/{label}"),
-                    )
-                    .with_description(format!("Session {label} (root={})", entry.root.display()))
-                    .with_mime_type("application/json"),
-                    None,
-                ),
-            );
-            resources.push(
-                Annotated::new(
-                    RawResource::new(
-                        format!("lds://sessions/{label}/doctor"),
-                        format!("session/{label}/doctor"),
-                    )
-                    .with_description(format!("Doctor report for session {label}"))
-                    .with_mime_type("application/json"),
-                    None,
-                ),
-            );
+            let label = entry
+                .alias
+                .clone()
+                .unwrap_or_else(|| entry.session_id.clone());
+            resources.push(Annotated::new(
+                RawResource::new(
+                    format!("lds://sessions/{label}"),
+                    format!("session/{label}"),
+                )
+                .with_description(format!("Session {label} (root={})", entry.root.display()))
+                .with_mime_type("application/json"),
+                None,
+            ));
+            resources.push(Annotated::new(
+                RawResource::new(
+                    format!("lds://sessions/{label}/doctor"),
+                    format!("session/{label}/doctor"),
+                )
+                .with_description(format!("Doctor report for session {label}"))
+                .with_mime_type("application/json"),
+                None,
+            ));
         }
         Ok(ListResourcesResult {
             resources,
@@ -2346,19 +2341,20 @@ impl ServerHandler for LdsServer {
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListResourceTemplatesResult, McpError> {
-        let mut templates: Vec<ResourceTemplate> = Vec::new();
-        templates.push(Annotated::new(
-            RawResourceTemplate::new("lds://sessions/{key}", "session by key")
-                .with_description("Describe a session by id or alias")
-                .with_mime_type("application/json"),
-            None,
-        ));
-        templates.push(Annotated::new(
-            RawResourceTemplate::new("lds://sessions/{key}/doctor", "session doctor by key")
-                .with_description("Doctor report for a single session")
-                .with_mime_type("application/json"),
-            None,
-        ));
+        let templates: Vec<ResourceTemplate> = vec![
+            Annotated::new(
+                RawResourceTemplate::new("lds://sessions/{key}", "session by key")
+                    .with_description("Describe a session by id or alias")
+                    .with_mime_type("application/json"),
+                None,
+            ),
+            Annotated::new(
+                RawResourceTemplate::new("lds://sessions/{key}/doctor", "session doctor by key")
+                    .with_description("Doctor report for a single session")
+                    .with_mime_type("application/json"),
+                None,
+            ),
+        ];
         Ok(ListResourceTemplatesResult {
             resource_templates: templates,
             meta: None,
@@ -2381,9 +2377,9 @@ impl ServerHandler for LdsServer {
 /// Resolve an `lds://` URI to a single resource body. Pure function so it can
 /// be exercised by unit tests without spinning up a full MCP server.
 fn read_lds_resource(uri: &str, ledger: &LdsState) -> Result<ResourceContents, McpError> {
-    let path = uri.strip_prefix("lds://").ok_or_else(|| {
-        McpError::invalid_params(format!("unknown URI scheme: {uri}"), None)
-    })?;
+    let path = uri
+        .strip_prefix("lds://")
+        .ok_or_else(|| McpError::invalid_params(format!("unknown URI scheme: {uri}"), None))?;
 
     if path == "docs/multi-session" {
         return Ok(ResourceContents::TextResourceContents {

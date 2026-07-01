@@ -16,6 +16,38 @@ All notable changes to this project will be documented in this file.
 
 ### Security
 
+## [0.5.1] - 2026-07-01
+
+### Added
+
+- **`session_start` accepts an optional `alias`** — pass an alias when
+  starting the default session so it can be addressed later by
+  `session_describe` / `session_doctor` / `session_close` /
+  `session_alias_set`. The field was already present on `SessionConfig` and
+  wired through `session_create`; `session_start` now propagates it too.
+
+### Changed
+
+- **`session_start` return payload is JSON** — `session_start` now returns a
+  structured `{session_id, alias, root, is_default}` object, matching
+  `session_create`. Callers that parsed the previous
+  `"session started: root=..., id=..."` text string need to switch to the
+  JSON fields.
+
+### Deprecated
+
+### Removed
+
+### Fixed
+
+- **`session_start` no longer discards the alias field** — `SessionConfig`
+  had an `alias` slot but `session_start` hard-coded it to `None`, so the
+  default session could never be addressed by alias through the primary
+  entry point. Fixed by reading `req.alias` and forwarding it into
+  `SessionConfig`.
+
+### Security
+
 ## [0.5.0] - 2026-07-01
 
 ### Added
@@ -86,7 +118,8 @@ All notable changes to this project will be documented in this file.
   `journal_grep`, `journal_import`, `journal_info`, `journal_projection_attach`,
   `journal_projection_detach`, `journal_projection_rebuild`,
   `journal_schema_list`, `journal_schema_load`, `journal_schema_show`).
-  `JournalModule` is session-scoped: `db_path = session.root.join("workspace/.journal.db")`.
+  `JournalModule` is session-scoped: the database lives under the session
+  root at the conventional per-session journal path.
   FileProjection is env-gate opt-in (`LDS_JOURNAL_FILE_ENABLE` /
   `LDS_JOURNAL_FILE_OUTPUT_PATH`). `journal-mcp` standalone binary unchanged.
 
