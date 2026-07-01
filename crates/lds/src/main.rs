@@ -21,6 +21,7 @@ use lds_journal::tools::{
     JournalSchemaShowParams, JournalTailParams, chapter_replay_to_json, paginate,
 };
 use lds_recipe::RecipeModule;
+use lds_router::{McpRouter, RouteConfig};
 use lds_sandbox::fs::SandboxFs;
 use lds_sandbox::python::SandboxPython;
 use rmcp::RoleServer;
@@ -37,6 +38,7 @@ use rmcp::{ErrorData as McpError, ServerHandler, ServiceExt, tool, tool_handler,
 use schemars::JsonSchema;
 use serde::Deserialize;
 use tokio::sync::RwLock;
+use tokio::task::spawn_blocking;
 
 #[derive(Clone)]
 struct LdsServer {
@@ -51,6 +53,7 @@ struct Inner {
     sandbox_fs: Option<SandboxFs>,
     sandbox_python: Option<SandboxPython>,
     journal: Option<JournalModule>,
+    router: Option<McpRouter>,
     startup_cwd: Option<PathBuf>,
     startup_global_dirs: Arc<Vec<PathBuf>>,
 }
@@ -216,6 +219,7 @@ impl LdsServer {
                 sandbox_fs: None,
                 sandbox_python: None,
                 journal: None,
+                router: None,
                 startup_cwd,
                 startup_global_dirs,
             })),
@@ -575,6 +579,46 @@ struct GhPrChecksReq {
     repo: Option<String>,
 }
 
+/// Default `args` for [`McpCallReq`] when the caller omits the field: an
+/// empty JSON object, which every upstream tool interprets as "no arguments".
+fn default_mcp_call_args() -> serde_json::Value {
+    serde_json::Value::Object(serde_json::Map::new())
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct McpCallReq {
+    /// `<route>://<tool>` URI identifying the upstream route and tool.
+    uri: String,
+    /// Arguments forwarded verbatim to the upstream tool. Must be a JSON
+    /// object; omitting the field defaults to an empty object.
+    #[serde(default = "default_mcp_call_args")]
+    args: serde_json::Value,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct McpRouteRegisterReq {
+    /// Unique route name; the `<route>` component of `<route>://<tool>` URIs.
+    name: String,
+    /// Subprocess command to spawn (resolved via `PATH`).
+    command: String,
+    /// Command-line arguments passed to `command`.
+    #[serde(default)]
+    args: Vec<String>,
+    /// Extra environment variables set on the spawned subprocess.
+    #[serde(default)]
+    env: HashMap<String, String>,
+    /// Per-call timeout, in seconds. Defaults to 30 (matching
+    /// `routes.toml`'s `[[route]]` default) when omitted.
+    #[serde(default)]
+    timeout_secs: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct McpRouteRemoveReq {
+    /// Name of the route to remove.
+    name: String,
+}
+
 /// Shared factory for the "no session active" MCP error.
 ///
 /// All tool handlers that require an active session use this factory so that
@@ -597,13 +641,24 @@ fn json_result<T: serde::Serialize>(value: &T) -> Result<CallToolResult, McpErro
     Ok(CallToolResult::success(vec![Content::text(text)]))
 }
 
+/// Resolve the user-global `routes.toml` path (`~/.config/lds/routes.toml`).
+///
+/// Falls back to a path that cannot exist if the home directory cannot be
+/// determined, so [`RouteConfig::load`]'s "missing file → empty route set"
+/// behavior degrades gracefully instead of reading an unrelated file.
+fn user_routes_path() -> PathBuf {
+    dirs::home_dir()
+        .map(|home| home.join(".config/lds/routes.toml"))
+        .unwrap_or_else(|| PathBuf::from("/nonexistent-home/.config/lds/routes.toml"))
+}
+
 /// Build and initialize all session-dependent modules on `inner`.
 ///
 /// This is the single construction path shared by the explicit `session_start`
 /// handler and the auto-start hook in `call_tool`. Inlining the construction
 /// logic in two separate places would allow the two paths to diverge, breaking
 /// session invariants (crux §1).
-fn build_session_modules(
+async fn build_session_modules(
     inner: &mut Inner,
     config: SessionConfig,
 ) -> Result<Arc<Session>, McpError> {
@@ -648,6 +703,19 @@ fn build_session_modules(
         }
         module
     });
+    // Route config: user-global `~/.config/lds/routes.toml`, overridden by
+    // project-local `<session_root>/routes.toml`. `RouteConfig::load` performs
+    // synchronous filesystem I/O (see its doc comment), so it is run on a
+    // blocking-pool thread rather than inline in this async fn.
+    let user_path = user_routes_path();
+    let project_path = session.root().join("routes.toml");
+    let session_root = session.root().to_path_buf();
+    let routes =
+        spawn_blocking(move || RouteConfig::load(&user_path, &project_path, &session_root))
+            .await
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+    inner.router = Some(McpRouter::from_configs(routes));
     Ok(session)
 }
 
@@ -684,7 +752,7 @@ impl LdsServer {
             alias: req.alias.clone(),
             global_recipe_dirs,
         };
-        let session = build_session_modules(&mut inner, config)?;
+        let session = build_session_modules(&mut inner, config).await?;
         json_result(&serde_json::json!({
             "session_id": session.id(),
             "alias": session.alias(),
@@ -1536,6 +1604,90 @@ impl LdsServer {
         json_result(&serde_json::json!({ "sessions": entries }))
     }
 
+    #[tool(
+        description = "Call an external MCP tool via routed subprocess. uri = '<route>://<tool>'.",
+        annotations(idempotent_hint = false)
+    )]
+    async fn mcp_call(
+        &self,
+        Parameters(req): Parameters<McpCallReq>,
+    ) -> Result<CallToolResult, McpError> {
+        if !req.args.is_object() {
+            return Err(McpError::invalid_params("args must be an object", None));
+        }
+        // Read guard is held only long enough to clone the router handle;
+        // dropped before the upstream `.await` so a slow/hung route never
+        // blocks concurrent tool calls against `Inner` (R3/K-4, see
+        // `lds_router::McpRouter` doc comment). The `lds://` self-loop guard
+        // is enforced inside `McpRouter::call_uri` itself.
+        let inner = self.state.read().await;
+        let router = inner.router.clone().ok_or_else(no_session_error)?;
+        drop(inner);
+        router
+            .call_uri(&req.uri, req.args)
+            .await
+            .map_err(|e| McpError::internal_error(e.to_string(), None))
+    }
+
+    #[tool(
+        description = "List registered MCP routes for the active session.",
+        annotations(idempotent_hint = true, destructive_hint = false)
+    )]
+    async fn mcp_route_list(&self) -> Result<CallToolResult, McpError> {
+        let inner = self.state.read().await;
+        let router = inner.router.clone().ok_or_else(no_session_error)?;
+        drop(inner);
+        let routes = router.list_routes().await;
+        json_result(&serde_json::json!({ "routes": routes }))
+    }
+
+    #[tool(
+        description = "Register or replace an MCP route. In-memory only; not persisted to routes.toml.",
+        annotations(idempotent_hint = true, destructive_hint = false)
+    )]
+    async fn mcp_route_register(
+        &self,
+        Parameters(req): Parameters<McpRouteRegisterReq>,
+    ) -> Result<CallToolResult, McpError> {
+        let inner = self.state.read().await;
+        let router = inner.router.clone().ok_or_else(no_session_error)?;
+        drop(inner);
+        let name = req.name.clone();
+        let route = RouteConfig {
+            name: req.name,
+            command: req.command,
+            args: req.args,
+            env: req.env,
+            // Mirrors `routes.toml`'s `[[route]]` default (30s); the router
+            // crate's own default is a private helper, so it is duplicated
+            // here rather than exposed as a new public API surface.
+            timeout_secs: req.timeout_secs.unwrap_or(30),
+        };
+        router
+            .register(route)
+            .await
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        json_result(&serde_json::json!({ "registered": name }))
+    }
+
+    #[tool(
+        description = "Remove an MCP route and terminate its subprocess.",
+        annotations(idempotent_hint = true, destructive_hint = true)
+    )]
+    async fn mcp_route_remove(
+        &self,
+        Parameters(req): Parameters<McpRouteRemoveReq>,
+    ) -> Result<CallToolResult, McpError> {
+        let inner = self.state.read().await;
+        let router = inner.router.clone().ok_or_else(no_session_error)?;
+        drop(inner);
+        router
+            .remove(&req.name)
+            .await
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        json_result(&serde_json::json!({ "removed": req.name }))
+    }
+
     #[tool(description = "Describe a single session by id or alias.")]
     async fn session_describe(
         &self,
@@ -2248,7 +2400,7 @@ impl ServerHandler for LdsServer {
                     global_recipe_dirs,
                     ..Default::default()
                 };
-                build_session_modules(&mut inner, config)?;
+                build_session_modules(&mut inner, config).await?;
             }
             // write guard drops here — before try_plugin_call takes a read guard
         }

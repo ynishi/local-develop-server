@@ -22,6 +22,7 @@ lds-gh = { path = "../gh", version = "0.5.1" }
 lds-recipe = { path = "../recipe", version = "0.5.1" }
 lds-sandbox = { path = "../sandbox", version = "0.5.1" }
 lds-journal = { path = "../journal", version = "0.5.1" }
+lds-router = { path = "../router", version = "0.5.1" }
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -35,4 +36,3 @@ dirs.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
-rmcp = { version = "1.7", features = ["client", "transport-child-process"] }
