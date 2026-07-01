@@ -16,6 +16,45 @@ All notable changes to this project will be documented in this file.
 
 ### Security
 
+## [0.6.0] - 2026-07-01
+
+### Added
+
+- **MCP routing + export gateway** — new `crates/router` crate exposes routing
+  primitives (`McpRouter`, `RouteClient`, `RouteConfig`, `RouterError`,
+  `ExportRegistry`) so lds can proxy calls to external MCP servers via a single
+  session-bound gateway. Six new tools on the lds surface: `mcp_call(uri, args)`,
+  `mcp_route_list`, `mcp_route_register`, `mcp_route_remove`, `mcp_export_list`,
+  `mcp_export_refresh`. URI form is `<route>://<tool>`; `lds://` is reserved and
+  rejected up-front (`RouterError::SelfLoop`).
+- **`[[route]]` / `[[export]]` sections in `config.toml`** — routes and exports
+  live in the shared `~/.config/lds/config.toml` (user-global) and
+  `<session_root>/config.toml` (project-local overrides by `name` / `route`).
+  Unknown top-level keys are ignored so router config coexists with existing
+  `[recipes]` / `[paths]` sections. `${LDS_SESSION_ROOT}` is expanded in `args`
+  and `env` values only.
+- **Declared upstream tools re-exported with prefix** — `[[export]]` blocks
+  materialize upstream tools into the caller's `list_tools` as `<prefix><tool>`
+  (default prefix `<route>_`). Export count is capped at 16 by default; prefix
+  collisions and lds built-in name collisions fail `session_start`.
+- **`lds://docs/routing` MCP resource** — full routing / export design + usage
+  doc as `text/markdown`, alongside `lds://docs/multi-session`.
+
+### Changed
+
+- **`build_session_modules` split into `start_session_locally` (sync) +
+  `wire_router_and_exports` (async)** — the session write lock is now held
+  only for local module wiring; upstream `list_tools` calls run lock-free.
+- **rmcp workspace features bumped to `["server", "transport-io", "client",
+  "transport-child-process"]`** — enables client-side subprocess transport
+  used by `RouteClient`. `crates/lds/Cargo.toml` dev-dep duplicate removed.
+
+### Fixed
+
+- **`RouteClient::list_tools` now honors the per-route `timeout_secs`** — a
+  hung upstream can no longer block `session_start` indefinitely; times out
+  with `RouterError::Timeout` (default 30 s).
+
 ## [0.5.1] - 2026-07-01
 
 ### Added
