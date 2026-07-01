@@ -78,7 +78,10 @@ impl RouteClient {
     /// # Concurrency
     /// Lazily spawns the upstream subprocess on first call (race between
     /// concurrent first-callers is resolved by the owning `McpRouter`'s
-    /// `HashMap::entry` + write lock, not by this method). Wrapped by
+    /// `HashMap::entry` + write lock, not by this method); the spawn itself
+    /// is also timeout-wrapped (see [`RouteClient::spawn`]'s doc comment), so
+    /// a first call that must spawn cannot hang past `timeout_secs` even
+    /// before the RPC below is sent. Wrapped by
     /// `tokio::time::timeout(Duration::from_secs(timeout_secs), ...)` at the
     /// call site; per the timeout contract, if this future does not yield
     /// during execution it can exceed the configured timeout without erroring.
@@ -181,6 +184,16 @@ impl RouteClient {
     }
 
     /// Spawn the upstream subprocess and complete the MCP client handshake.
+    ///
+    /// # Concurrency
+    /// The handshake (`ServiceExt::serve`, which drives the child's initial
+    /// `initialize` round trip) is wrapped by the same per-route
+    /// `tokio::time::timeout(Duration::from_secs(timeout_secs), ...)` used by
+    /// `call_tool`/`list_tools`. Without this, an upstream that spawns but
+    /// never completes its half of the handshake would hang this call (and,
+    /// transitively, every other concurrent tool call awaiting this route's
+    /// lazily-spawned subprocess) indefinitely, regardless of the configured
+    /// timeout.
     async fn spawn(&self) -> Result<RunningService<RoleClient, ()>, RouterError> {
         let mut cmd = Command::new(&self.command);
         cmd.args(&self.args);
@@ -188,8 +201,20 @@ impl RouteClient {
             cmd.env(key, value);
         }
         let transport = TokioChildProcess::new(cmd)?;
-        let service = ().serve(transport).await.map_err(|e| RouterError::Upstream(e.to_string()))?;
-        Ok(service)
+        match tokio::time::timeout(Duration::from_secs(self.timeout_secs), ().serve(transport))
+            .await
+        {
+            Ok(Ok(service)) => Ok(service),
+            Ok(Err(e)) => Err(RouterError::Upstream(e.to_string())),
+            Err(_elapsed) => {
+                tracing::warn!(
+                    route = %self.name,
+                    timeout_secs = self.timeout_secs,
+                    "route subprocess handshake timed out"
+                );
+                Err(RouterError::Timeout(self.timeout_secs, "spawn".to_string()))
+            }
+        }
     }
 }
 

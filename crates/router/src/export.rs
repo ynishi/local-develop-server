@@ -102,7 +102,14 @@ impl ExportRegistry {
     /// error rather than silently drop exports.
     ///
     /// # Concurrency
-    /// See the struct-level doc comment.
+    /// See the struct-level doc comment. Additionally, the per-declaration
+    /// upstream `list_tools` round trips are issued concurrently via
+    /// [`futures::future::join_all`] — one slow or unreachable route no
+    /// longer delays every other declaration's fetch. The subsequent
+    /// matching/collision/limit-check pass is strictly sequential and walks
+    /// `self.declarations` in its original (config file) order, so the
+    /// materialized result is deterministic regardless of which upstream
+    /// responded first.
     ///
     /// # Errors
     /// - [`RouterError::ExportLimitExceeded`] if the materialized tool count
@@ -115,9 +122,20 @@ impl ExportRegistry {
         router: &McpRouter,
         static_tool_names: &[String],
     ) -> Result<(), RouterError> {
+        // Fan out: one upstream `list_tools` call per declaration, run
+        // concurrently. `join_all` preserves input order in its output
+        // `Vec`, so zipping it back against `self.declarations` below stays
+        // index-aligned even though completion order is unconstrained.
+        let upstream_results: Vec<Result<Vec<Tool>, RouterError>> = futures::future::join_all(
+            self.declarations
+                .iter()
+                .map(|decl| router.list_upstream_tools(&decl.route)),
+        )
+        .await;
+
         let mut materialized: HashMap<String, ExportedTool> = HashMap::new();
-        for decl in self.declarations.iter() {
-            let upstream_tools = match router.list_upstream_tools(&decl.route).await {
+        for (decl, upstream_result) in self.declarations.iter().zip(upstream_results) {
+            let upstream_tools = match upstream_result {
                 Ok(tools) => tools,
                 Err(e) => {
                     tracing::warn!(

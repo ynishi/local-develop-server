@@ -817,6 +817,7 @@ dependencies = [
 name = "lds-router"
 version = "0.6.0"
 dependencies = [
+ "futures",
  "rmcp",
  "serde",
  "serde_json",
