@@ -62,7 +62,7 @@ async fn export_registry_materializes_declared_tools_with_prefix() {
         prefix: None,
     }]);
 
-    registry.refresh(&router, &[]).await.unwrap(); // justification: routes.toml-shaped declaration and a live mock upstream are both known-good in this test
+    registry.refresh(&router, &[]).await.unwrap(); // justification: config.toml-shaped declaration and a live mock upstream are both known-good in this test
 
     let tools = registry.list_tools().await;
     assert_eq!(tools.len(), 1, "only the declared tool should be exported");

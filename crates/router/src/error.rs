@@ -7,7 +7,7 @@ use thiserror::Error;
 ///
 /// `thiserror` permits at most one `#[from] std::io::Error` conversion per
 /// enum, so [`RouterError::Spawn`] is the crate's sole vehicle for I/O
-/// failures (both subprocess spawn failures and, less commonly, `routes.toml`
+/// failures (both subprocess spawn failures and, less commonly, `config.toml`
 /// read failures other than "file not found" — see
 /// [`crate::RouteConfig::load`]).
 #[derive(Debug, Error)]
@@ -35,12 +35,12 @@ pub enum RouterError {
     #[error("upstream mcp error: {0}")]
     Upstream(String),
 
-    /// Spawning the upstream subprocess failed, or a `routes.toml` file
+    /// Spawning the upstream subprocess failed, or a `config.toml` file
     /// could not be read for a reason other than "not found".
     #[error("subprocess spawn failed: {0}")]
     Spawn(#[from] std::io::Error),
 
-    /// A `routes.toml` file exists but is not valid TOML.
+    /// A `config.toml` file exists but is not valid TOML.
     #[error("config parse error: {0}")]
     Config(#[from] toml::de::Error),
 

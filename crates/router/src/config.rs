@@ -1,4 +1,14 @@
-//! `routes.toml` parsing: user-global + project-local route declarations.
+//! `config.toml` `[[route]]` / `[[export]]` parsing: user-global +
+//! project-local route declarations.
+//!
+//! `[[route]]` and `[[export]]` blocks live in the same `config.toml` file
+//! that `lds_core::config::Config` also reads (`~/.config/lds/config.toml`
+//! for the user-global file, `<session_root>/config.toml` for the
+//! project-local override). This module never depends on `lds-core`'s
+//! `Config` type: it deserializes only the `route`/`export` array-of-tables
+//! out of the file and relies on serde's default "ignore unrecognized keys"
+//! behavior to skip `Config`-owned sections (`[recipes]`, `[paths]`) — see
+//! `lds_core::config`'s module doc comment for the other half of this split.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -7,7 +17,7 @@ use serde::Deserialize;
 
 use crate::error::RouterError;
 
-/// A single upstream MCP route declared in a `routes.toml` `[[route]]`
+/// A single upstream MCP route declared in a `config.toml` `[[route]]`
 /// block.
 ///
 /// `${LDS_SESSION_ROOT}` occurrences in `args` and `env` values are expanded
@@ -31,13 +41,13 @@ pub struct RouteConfig {
     pub timeout_secs: u64,
 }
 
-/// Default per-route timeout when `timeout_secs` is absent from
-/// `routes.toml`.
+/// Default per-route timeout when `timeout_secs` is absent from a
+/// `config.toml` `[[route]]` block.
 fn default_timeout_secs() -> u64 {
     30
 }
 
-/// A single upstream tool re-publication declared in a `routes.toml`
+/// A single upstream tool re-publication declared in a `config.toml`
 /// `[[export]]` block: republish a subset of `route`'s upstream tools under
 /// this session's own tool surface, prefixed to avoid name collisions.
 #[derive(Debug, Clone, Deserialize)]
@@ -63,8 +73,13 @@ impl ExportConfig {
     }
 }
 
-/// The `[[route]]` / `[[export]]` array-of-tables shape of a `routes.toml`
-/// file.
+/// The `[[route]]` / `[[export]]` array-of-tables shape parsed out of a
+/// `config.toml` file.
+///
+/// Has no `#[serde(deny_unknown_fields)]`, so a real `config.toml` — which
+/// also carries `[recipes]` / `[paths]` sections owned by
+/// `lds_core::config::Config` — deserializes here with those sections
+/// silently ignored (see this module's doc comment).
 #[derive(Debug, Default, Deserialize)]
 struct RoutesFile {
     #[serde(default)]
@@ -90,14 +105,18 @@ impl RouteConfig {
     }
 
     /// Load and merge user-global and project-local `[[route]]` *and*
-    /// `[[export]]` declarations from `routes.toml` files.
+    /// `[[export]]` declarations out of `config.toml` files.
     ///
-    /// Reads `user_path` first, then `project_path`; a declaration in
-    /// `project_path` with the same key as one from `user_path` replaces it
-    /// entirely (project overrides user) — keyed by `name` for routes and by
-    /// `route` for exports. A missing file is treated as an empty
-    /// declaration set, not an error — `routes.toml` is optional at both
-    /// levels.
+    /// `user_path` and `project_path` both point at a `config.toml` (the
+    /// same file `lds_core::config::Config` reads for `[recipes]` /
+    /// `[paths]` — typically `~/.config/lds/config.toml` and
+    /// `<session_root>/config.toml`, respectively). Reads `user_path` first,
+    /// then `project_path`; a declaration in `project_path` with the same
+    /// key as one from `user_path` replaces it entirely (project overrides
+    /// user) — keyed by `name` for routes and by `route` for exports. A
+    /// missing file is treated as an empty declaration set, not an error —
+    /// `[[route]]`/`[[export]]` are optional at both levels, and so is the
+    /// file itself.
     ///
     /// `${LDS_SESSION_ROOT}` occurrences in each route's `args` and `env`
     /// values are expanded to `session_root`'s string representation before
@@ -140,9 +159,11 @@ impl RouteConfig {
         Ok((routes, exports))
     }
 
-    /// Read and parse a single `routes.toml` file, expanding
-    /// `${LDS_SESSION_ROOT}` in route `args`/`env` values. Returns empty
-    /// `Vec`s for both halves if `path` does not exist.
+    /// Read and parse a single `config.toml` file's `[[route]]`/`[[export]]`
+    /// sections (ignoring any `[recipes]`/`[paths]` sections it also
+    /// carries), expanding `${LDS_SESSION_ROOT}` in route `args`/`env`
+    /// values. Returns empty `Vec`s for both halves if `path` does not
+    /// exist.
     fn load_file_all(
         path: &Path,
         session_root: &Path,
@@ -186,8 +207,8 @@ mod tests {
     #[test]
     fn route_config_parses_toml_and_expands_session_root() {
         let dir = tempfile::tempdir().expect("tempdir"); // justification: tempdir creation mirrors crates/core/src/config.rs test pattern
-        let user_path = dir.path().join("user-routes.toml");
-        let project_path = dir.path().join("project-routes.toml"); // left unwritten: missing file is a valid empty route set
+        let user_path = dir.path().join("user-config.toml");
+        let project_path = dir.path().join("project-config.toml"); // left unwritten: missing file is a valid empty route set
 
         std::fs::write(
             &user_path,
@@ -204,7 +225,7 @@ name = "mini-app"
 command = "mini-app-mcp"
 "#,
         )
-        .expect("write user routes.toml"); // justification: writing known-good TOML in test, mirrors crates/core/src/config.rs pattern
+        .expect("write user config.toml"); // justification: writing known-good TOML in test, mirrors crates/core/src/config.rs pattern
 
         let session_root = PathBuf::from("/tmp/lds-session-abc");
         let routes = RouteConfig::load(&user_path, &project_path, &session_root)
@@ -247,7 +268,7 @@ command = "mini-app-mcp"
         let project_path = dir.path().join("nonexistent-project.toml");
 
         let routes =
-            RouteConfig::load(&user_path, &project_path, Path::new("/tmp/session")).unwrap(); // justification: both routes.toml files are absent by construction; load() cannot fail on this path
+            RouteConfig::load(&user_path, &project_path, Path::new("/tmp/session")).unwrap(); // justification: both config.toml files are absent by construction; load() cannot fail on this path
         assert!(routes.is_empty());
     }
 
@@ -256,8 +277,8 @@ command = "mini-app-mcp"
     #[test]
     fn route_config_project_overrides_user_route_by_name() {
         let dir = tempfile::tempdir().expect("tempdir"); // justification: tempdir creation mirrors crates/core/src/config.rs test pattern
-        let user_path = dir.path().join("user-routes.toml");
-        let project_path = dir.path().join("project-routes.toml");
+        let user_path = dir.path().join("user-config.toml");
+        let project_path = dir.path().join("project-config.toml");
 
         std::fs::write(
             &user_path,
@@ -267,7 +288,7 @@ name = "outline"
 command = "user-command"
 "#,
         )
-        .expect("write user routes.toml"); // justification: writing known-good TOML in test
+        .expect("write user config.toml"); // justification: writing known-good TOML in test
         std::fs::write(
             &project_path,
             r#"
@@ -276,10 +297,10 @@ name = "outline"
 command = "project-command"
 "#,
         )
-        .expect("write project routes.toml"); // justification: writing known-good TOML in test
+        .expect("write project config.toml"); // justification: writing known-good TOML in test
 
         let routes =
-            RouteConfig::load(&user_path, &project_path, Path::new("/tmp/session")).unwrap(); // justification: both routes.toml files are known-good TOML written above; load() cannot fail on this path
+            RouteConfig::load(&user_path, &project_path, Path::new("/tmp/session")).unwrap(); // justification: both config.toml files are known-good TOML written above; load() cannot fail on this path
         assert_eq!(routes.len(), 1);
         assert_eq!(routes[0].command, "project-command");
     }
@@ -289,8 +310,8 @@ command = "project-command"
     #[test]
     fn load_all_parses_export_blocks_with_default_and_explicit_prefix() {
         let dir = tempfile::tempdir().expect("tempdir"); // justification: tempdir creation mirrors crates/core/src/config.rs test pattern
-        let user_path = dir.path().join("user-routes.toml");
-        let project_path = dir.path().join("project-routes.toml"); // left unwritten: missing file is a valid empty declaration set
+        let user_path = dir.path().join("user-config.toml");
+        let project_path = dir.path().join("project-config.toml"); // left unwritten: missing file is a valid empty declaration set
 
         std::fs::write(
             &user_path,
@@ -309,10 +330,10 @@ tools = ["create"]
 prefix = "ma_"
 "#,
         )
-        .expect("write user routes.toml"); // justification: writing known-good TOML in test
+        .expect("write user config.toml"); // justification: writing known-good TOML in test
 
         let (routes, exports) =
-            RouteConfig::load_all(&user_path, &project_path, Path::new("/tmp/session")).unwrap(); // justification: user routes.toml is known-good TOML written above; load_all() cannot fail on this path
+            RouteConfig::load_all(&user_path, &project_path, Path::new("/tmp/session")).unwrap(); // justification: user config.toml is known-good TOML written above; load_all() cannot fail on this path
         assert_eq!(routes.len(), 1);
         assert_eq!(exports.len(), 2);
 
@@ -338,8 +359,8 @@ prefix = "ma_"
     #[test]
     fn load_all_project_overrides_user_export_by_route() {
         let dir = tempfile::tempdir().expect("tempdir"); // justification: tempdir creation mirrors crates/core/src/config.rs test pattern
-        let user_path = dir.path().join("user-routes.toml");
-        let project_path = dir.path().join("project-routes.toml");
+        let user_path = dir.path().join("user-config.toml");
+        let project_path = dir.path().join("project-config.toml");
 
         std::fs::write(
             &user_path,
@@ -349,7 +370,7 @@ route = "outline"
 tools = ["snapshot_create"]
 "#,
         )
-        .expect("write user routes.toml"); // justification: writing known-good TOML in test
+        .expect("write user config.toml"); // justification: writing known-good TOML in test
         std::fs::write(
             &project_path,
             r#"
@@ -358,11 +379,55 @@ route = "outline"
 tools = ["snapshot_list"]
 "#,
         )
-        .expect("write project routes.toml"); // justification: writing known-good TOML in test
+        .expect("write project config.toml"); // justification: writing known-good TOML in test
 
         let (_, exports) =
-            RouteConfig::load_all(&user_path, &project_path, Path::new("/tmp/session")).unwrap(); // justification: both routes.toml files are known-good TOML written above; load_all() cannot fail on this path
+            RouteConfig::load_all(&user_path, &project_path, Path::new("/tmp/session")).unwrap(); // justification: both config.toml files are known-good TOML written above; load_all() cannot fail on this path
         assert_eq!(exports.len(), 1);
         assert_eq!(exports[0].tools, vec!["snapshot_list".to_string()]);
+    }
+
+    /// `RouteConfig::load_all` parses `[[route]]`/`[[export]]` out of a real
+    /// `config.toml` that also carries `[recipes]`/`[paths]` sections owned
+    /// by `lds_core::config::Config` — the other half of the "shared file,
+    /// decoupled schemas" split (see this module's doc comment and
+    /// `lds_core::config::tests::test_load_ignores_route_and_export_sections`
+    /// for the reverse direction).
+    #[test]
+    fn load_all_ignores_unrelated_config_toml_sections() {
+        let dir = tempfile::tempdir().expect("tempdir"); // justification: tempdir creation mirrors crates/core/src/config.rs test pattern
+        let user_path = dir.path().join("user-config.toml");
+        let project_path = dir.path().join("project-config.toml"); // left unwritten: missing file is a valid empty declaration set
+
+        std::fs::write(
+            &user_path,
+            r#"
+[recipes]
+dirs = ["/opt/shared-recipes"]
+
+[paths]
+global_justfile = "/etc/lds/justfile"
+
+[[route]]
+name = "outline"
+command = "outline-mcp"
+
+[[export]]
+route = "outline"
+tools = ["snapshot_create"]
+"#,
+        )
+        .expect("write user config.toml"); // justification: writing known-good TOML in test
+
+        let (routes, exports) =
+            RouteConfig::load_all(&user_path, &project_path, Path::new("/tmp/session")).unwrap(); // justification: user config.toml is known-good TOML written above; load_all() cannot fail on this path
+        assert_eq!(
+            routes.len(),
+            1,
+            "[recipes]/[paths] must not interfere with [[route]] parsing"
+        );
+        assert_eq!(routes[0].name, "outline");
+        assert_eq!(exports.len(), 1);
+        assert_eq!(exports[0].route, "outline");
     }
 }

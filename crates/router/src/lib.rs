@@ -8,7 +8,11 @@
 //! workspace's build graph. It owns four responsibilities:
 //!
 //! 1. **Configuration** ([`RouteConfig`], [`ExportConfig`]) — parsing and
-//!    merging `routes.toml` files (user-global overridden by project-local).
+//!    merging `[[route]]`/`[[export]]` declarations out of `config.toml`
+//!    files (user-global overridden by project-local). The same file also
+//!    carries `lds_core::config::Config`'s `[recipes]`/`[paths]` sections;
+//!    the two crates share it without a cross-crate type dependency by
+//!    relying on serde's default "ignore unrecognized keys" behavior.
 //! 2. **Subprocess lifecycle** ([`RouteClient`]) — lazily spawning one
 //!    upstream MCP server per route and proxying `call_tool`/`list_tools`
 //!    requests to it over stdio, enforcing a per-route timeout on calls.

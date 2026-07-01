@@ -654,7 +654,7 @@ struct McpRouteRegisterReq {
     #[serde(default)]
     env: HashMap<String, String>,
     /// Per-call timeout, in seconds. Defaults to 30 (matching
-    /// `routes.toml`'s `[[route]]` default) when omitted.
+    /// `config.toml`'s `[[route]]` default) when omitted.
     #[serde(default)]
     timeout_secs: Option<u64>,
 }
@@ -687,15 +687,15 @@ fn json_result<T: serde::Serialize>(value: &T) -> Result<CallToolResult, McpErro
     Ok(CallToolResult::success(vec![Content::text(text)]))
 }
 
-/// Resolve the user-global `routes.toml` path (`~/.config/lds/routes.toml`).
+/// Resolve the user-global `config.toml` path (`~/.config/lds/config.toml`),
+/// the same file [`Config::load_or_default`] reads for `[recipes]`/`[paths]`.
 ///
 /// Falls back to a path that cannot exist if the home directory cannot be
-/// determined, so [`RouteConfig::load`]'s "missing file → empty route set"
-/// behavior degrades gracefully instead of reading an unrelated file.
-fn user_routes_path() -> PathBuf {
-    dirs::home_dir()
-        .map(|home| home.join(".config/lds/routes.toml"))
-        .unwrap_or_else(|| PathBuf::from("/nonexistent-home/.config/lds/routes.toml"))
+/// determined, so [`RouteConfig::load`]'s "missing file → empty declaration
+/// set" behavior degrades gracefully instead of reading an unrelated file.
+fn user_config_path() -> PathBuf {
+    lds_core::config::user_config_path()
+        .unwrap_or_else(|| PathBuf::from("/nonexistent-home/.config/lds/config.toml"))
 }
 
 /// Build a session and its local (non-network) modules on `inner`.
@@ -776,13 +776,15 @@ async fn wire_router_and_exports(
     state: &Arc<RwLock<Inner>>,
     session: &Arc<Session>,
 ) -> Result<(), McpError> {
-    // Route + export config: user-global `~/.config/lds/routes.toml`,
-    // overridden by project-local `<session_root>/routes.toml`.
+    // Route + export config: `[[route]]`/`[[export]]` sections of the
+    // user-global `~/.config/lds/config.toml`, overridden by the
+    // project-local `<session_root>/config.toml` — the same two files
+    // `Config::load_or_default` reads for `[recipes]`/`[paths]`.
     // `RouteConfig::load_all` performs synchronous filesystem I/O (see its
     // doc comment), so it is run on a blocking-pool thread rather than
     // inline in this async fn.
-    let user_path = user_routes_path();
-    let project_path = session.root().join("routes.toml");
+    let user_path = user_config_path();
+    let project_path = session.root().join("config.toml");
     let session_root = session.root().to_path_buf();
     let (routes, exports) =
         spawn_blocking(move || RouteConfig::load_all(&user_path, &project_path, &session_root))
@@ -794,7 +796,7 @@ async fn wire_router_and_exports(
     // Export registry: re-fetch each `[[export]]` declaration's upstream
     // tool list and materialize it under a prefixed public name.
     // `ExportLimitExceeded`/`ExportCollision` are propagated as
-    // session_start failures (a routes.toml that cannot be resolved into an
+    // session_start failures (a config.toml that cannot be resolved into an
     // unambiguous tool surface); a single unreachable route's declaration is
     // instead logged and skipped inside `ExportRegistry::refresh` so it does
     // not take down an otherwise-healthy session.
@@ -1747,7 +1749,7 @@ impl LdsServer {
     }
 
     #[tool(
-        description = "Register or replace an MCP route. In-memory only; not persisted to routes.toml.",
+        description = "Register or replace an MCP route. In-memory only; not persisted to config.toml.",
         annotations(idempotent_hint = true, destructive_hint = false)
     )]
     async fn mcp_route_register(
@@ -1763,7 +1765,7 @@ impl LdsServer {
             command: req.command,
             args: req.args,
             env: req.env,
-            // Mirrors `routes.toml`'s `[[route]]` default (30s); the router
+            // Mirrors `config.toml`'s `[[route]]` default (30s); the router
             // crate's own default is a private helper, so it is duplicated
             // here rather than exposed as a new public API surface.
             timeout_secs: req.timeout_secs.unwrap_or(30),

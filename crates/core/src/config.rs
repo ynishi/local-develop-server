@@ -7,6 +7,16 @@
 //!    the `recipes.dirs` array while preserving comments and unrelated sections.
 //! 2. **tilde expansion** — any path stored on disk must be an absolute path;
 //!    tilde literals are never written to `config.toml`.
+//! 3. **shared file, decoupled schemas** — the same `config.toml` (both the
+//!    user-global file and a session's project-local override) also carries
+//!    `[[route]]` / `[[export]]` array-of-tables consumed by the `lds-router`
+//!    crate (see `lds_router::RouteConfig` / `lds_router::ExportConfig`).
+//!    `Config` has no `route` or `export` field and does not depend on
+//!    `lds-router` — serde's default "ignore unrecognized keys" behavior
+//!    (no `#[serde(deny_unknown_fields)]` here or on `lds_router`'s
+//!    deserialization target) means each side parses the same file and
+//!    silently skips the sections it does not own. This keeps the two crates
+//!    decoupled while letting one physical file hold both.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -114,6 +124,17 @@ pub fn tilde_expand(input: &str) -> Result<PathBuf, ConfigError> {
 // Config impl
 // ---------------------------------------------------------------------------
 
+/// Resolve the well-known path to the user-global config file
+/// (`~/.config/lds/config.toml`).
+///
+/// Returns `None` if the home directory cannot be determined (e.g. `$HOME`
+/// is unset). Shared by [`Config::load_or_default`] and by the `lds` binary
+/// crate, which also points `lds_router::RouteConfig::load_all` at this same
+/// path so `[[route]]` / `[[export]]` declarations live in the one file.
+pub fn user_config_path() -> Option<PathBuf> {
+    dirs::home_dir().map(|home| home.join(".config/lds/config.toml"))
+}
+
 impl Config {
     /// Load configuration from an explicit file path.
     ///
@@ -147,10 +168,9 @@ impl Config {
     ///
     /// A `Config`, falling back to `Default` on any error.
     pub fn load_or_default() -> Self {
-        let Some(home) = dirs::home_dir() else {
+        let Some(path) = user_config_path() else {
             return Self::default();
         };
-        let path = home.join(".config/lds/config.toml");
         match Self::load(&path) {
             Ok(cfg) => cfg,
             Err(ConfigError::Io(e)) if e.kind() == io::ErrorKind::NotFound => Self::default(),
@@ -265,6 +285,17 @@ mod tests {
         }
     }
 
+    /// T1-c0: `user_config_path` resolves to `<home>/.config/lds/config.toml`
+    /// when the home directory is available.
+    #[test]
+    fn test_user_config_path_under_home() {
+        let Some(home) = dirs::home_dir() else {
+            return;
+        };
+        let path = user_config_path().expect("home dir is available in this test branch");
+        assert_eq!(path, home.join(".config/lds/config.toml"));
+    }
+
     /// T1-c: tilde_expand returns an absolute path for a ~/... input.
     #[test]
     fn test_tilde_expand_tilde_slash() {
@@ -354,6 +385,40 @@ mod tests {
             cfg.paths.global_justfile,
             Some(PathBuf::from("/etc/lds/justfile"))
         );
+    }
+
+    /// T2-g: `Config::load` ignores `[[route]]` / `[[export]]` sections.
+    ///
+    /// `lds-router` parses these same array-of-tables out of the same
+    /// physical `config.toml` (see the module doc comment's "shared file,
+    /// decoupled schemas" note); `Config` has no `route`/`export` field, so
+    /// this exercises serde's "unrecognized top-level keys are ignored"
+    /// default behavior rather than a hard failure — this is the sole
+    /// mechanism that lets the two crates share one file without either
+    /// depending on the other's types.
+    #[test]
+    fn test_load_ignores_route_and_export_sections() {
+        let dir = TempDir::new().unwrap(); // justification: test setup
+        let path = dir.path().join("config.toml");
+        fs::write(
+            &path,
+            r#"
+[recipes]
+dirs = ["/opt/shared-recipes"]
+
+[[route]]
+name = "outline"
+command = "outline-mcp"
+
+[[export]]
+route = "outline"
+tools = ["snapshot_create"]
+"#,
+        )
+        .unwrap(); // justification: writing known-good TOML in test
+
+        let cfg = Config::load(&path).expect("route/export sections must not fail Config parsing");
+        assert_eq!(cfg.recipes.dirs, vec![PathBuf::from("/opt/shared-recipes")]);
     }
 
     // ------------------------------------------------------------------

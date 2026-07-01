@@ -19,7 +19,7 @@ use crate::router::McpRouter;
 /// Default maximum number of tools a session's `[[export]]` declarations may
 /// materialize in total, across every declaration.
 ///
-/// v0.6.0 hardcodes this; a `routes.toml`-level override (e.g. a per-session
+/// v0.6.0 hardcodes this; a `config.toml`-level override (e.g. a per-session
 /// `max` field) is a natural follow-up if 16 proves too small in practice.
 pub const DEFAULT_EXPORT_LIMIT: usize = 16;
 
@@ -73,7 +73,7 @@ impl ExportRegistry {
     /// Override the materialized-tool-count ceiling (default
     /// [`DEFAULT_EXPORT_LIMIT`]).
     ///
-    /// v0.6.0 has no `routes.toml`-level way to set this in production; it
+    /// v0.6.0 has no `config.toml`-level way to set this in production; it
     /// exists as a builder method so tests can exercise
     /// [`RouterError::ExportLimitExceeded`] without declaring 17 real
     /// tools, and so a future config-driven override has a landing spot.
@@ -96,7 +96,7 @@ impl ExportRegistry {
     ///
     /// By contrast, [`RouterError::ExportLimitExceeded`] and
     /// [`RouterError::ExportCollision`] are hard failures: both indicate a
-    /// `routes.toml` configuration that cannot be resolved into an
+    /// `config.toml` configuration that cannot be resolved into an
     /// unambiguous tool surface, so callers (`session_start` and
     /// `mcp_export_refresh` in the `lds` binary crate) must propagate the
     /// error rather than silently drop exports.
