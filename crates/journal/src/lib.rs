@@ -1,29 +1,31 @@
+#![warn(missing_docs)]
+
 //! Journal module for local-develop-server (lds).
 //!
-//! Wraps `journal-mcp-core::JournalCore` as a session-scoped lds module.
-//! The EventLog database path is derived from [`lds_core::Session::root`]
-//! as `<root>/workspace/.journal.db` — literal join, no env override / cwd
-//! fallback (consistent with other lds modules: session root is the single
-//! source of truth).
+//! ## Architecture
 //!
-//! See journal-mcp v0.4.0 `docs/design.md` for the underlying chapter /
-//! section / progress / projection state-machine semantics.
+//! Thin wrapper around `journal-mcp-rmcp::JournalMcpServer`. Delegates
+//! `list_tools` / `call_tool` / `list_resources` / `read_resource` to the
+//! upstream MCP server. Unlike `lds-outline`, no name-prefix rewriting is
+//! needed — journal-mcp's 17 tools are already namespaced with the
+//! `journal_` prefix in-crate (`journal_open_chapter`,
+//! `journal_append_section`, …), so the wrapper just detects that prefix
+//! on incoming tool calls and forwards verbatim.
+//!
+//! ## Design
+//!
+//! - Session root is passed at construction (typically
+//!   `session.root().to_path_buf()` from `crates/lds/src/main.rs`); the
+//!   module itself is location-agnostic.
+//! - File projection (rendering the journal to a Markdown file) is
+//!   opt-in: the caller passes `Some(path)` in `RunConfig::file_projection`
+//!   to attach it at startup. Runtime attach/detach continues to work
+//!   through the `journal_projection_*` MCP tools.
+//! - Resource URIs (`journal-mcp://*` if any) are forwarded verbatim
+//!   through the ServerHandler.
 
+/// [`JournalModule`] wrapping the upstream `JournalMcpServer`.
 pub mod module;
-pub mod tools;
 
+pub use journal_mcp_rmcp;
 pub use module::JournalModule;
-
-/// Re-export the underlying SDK crate so downstream consumers
-/// (e.g. `local-develop-server` main.rs) can reference `ChapterId`,
-/// `SchemaRegistry`, `FileProjection`, and the `JournalProjection` trait
-/// without taking a direct path dep.
-pub use journal_mcp_core;
-pub use tools::{
-    ChapterListRow, JournalAppendProgressParams, JournalAppendSectionParams,
-    JournalChapterListParams, JournalCloseChapterParams, JournalGrepParams, JournalImportParams,
-    JournalInfoParams, JournalInfoResult, JournalOpenChapterParams, JournalOpenChaptersParams,
-    JournalProgressOfParams, JournalProjectionAttachParams, JournalProjectionDetachParams,
-    JournalProjectionRebuildParams, JournalSchemaListParams, JournalSchemaLoadParams,
-    JournalSchemaShowParams, JournalTailParams, chapter_replay_to_json, paginate,
-};

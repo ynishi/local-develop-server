@@ -280,6 +280,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "deranged"
+version = "0.5.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7cd812cc2bc1d69d4764bd80df88b4317eaef9e773c75226407d9bc0876b211c"
+
+[[package]]
 name = "digest"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -720,9 +726,9 @@ dependencies = [
 
 [[package]]
 name = "journal-mcp-core"
-version = "0.4.0"
+version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a67bb51e02aff772ce7a7409a579a80270ecd28429d6ec7f361e327134db2ab4"
+checksum = "f45bef497108cef395db6a436aa59638f8fc8cebfd572b5cd2c173856d6a51d7"
 dependencies = [
  "anyhow",
  "rusqlite",
@@ -734,6 +740,26 @@ dependencies = [
  "thiserror 1.0.69",
  "tracing",
  "ulid",
+]
+
+[[package]]
+name = "journal-mcp-rmcp"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "936eaa5c12e3b4ceab971c93ff94aea749669b4dab28eaaa396de67cb7ff4009"
+dependencies = [
+ "anyhow",
+ "journal-mcp-core",
+ "rmcp",
+ "schemars",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "thiserror 1.0.69",
+ "time",
+ "tokio",
+ "tokio-util",
+ "tracing",
 ]
 
 [[package]]
@@ -756,7 +782,7 @@ checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
 
 [[package]]
 name = "lds-core"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "dirs",
  "lds-session",
@@ -771,7 +797,7 @@ dependencies = [
 
 [[package]]
 name = "lds-gh"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "lds-core",
@@ -783,7 +809,7 @@ dependencies = [
 
 [[package]]
 name = "lds-git"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "git2",
@@ -797,22 +823,18 @@ dependencies = [
 
 [[package]]
 name = "lds-journal"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
- "journal-mcp-core",
+ "journal-mcp-rmcp",
  "lds-core",
- "schemars",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.18",
+ "rmcp",
  "tracing",
 ]
 
 [[package]]
 name = "lds-outline"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "lds-core",
@@ -823,7 +845,7 @@ dependencies = [
 
 [[package]]
 name = "lds-recipe"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "lds-core",
@@ -837,7 +859,7 @@ dependencies = [
 
 [[package]]
 name = "lds-router"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "futures",
  "rmcp",
@@ -852,7 +874,7 @@ dependencies = [
 
 [[package]]
 name = "lds-sandbox"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "lds-core",
@@ -866,7 +888,7 @@ dependencies = [
 
 [[package]]
 name = "lds-session"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "tempfile",
  "thiserror 2.0.18",
@@ -953,7 +975,7 @@ checksum = "92daf443525c4cce67b150400bc2316076100ce0b3686209eb8cf3c31612e6f0"
 
 [[package]]
 name = "local-develop-server"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1037,6 +1059,12 @@ checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
  "windows-sys 0.61.2",
 ]
+
+[[package]]
+name = "num-conv"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "521739c6d2bac4aa25192232afe6841231376b2b26d4d9fae5ecf8ca5772e441"
 
 [[package]]
 name = "num-traits"
@@ -1165,6 +1193,12 @@ checksum = "0103b1cef7ec0cf76490e969665504990193874ea05c85ff9bab8b911d0a0564"
 dependencies = [
  "zerovec",
 ]
+
+[[package]]
+name = "powerfmt"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "439ee305def115ba05938db6eb1644ff94165c5ab5e9420d1c1bcedbba909391"
 
 [[package]]
 name = "ppv-lite86"
@@ -1693,6 +1727,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "time"
+version = "0.3.53"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "18dfaaeddcb932337b5e7866ee7d0ce9b76d2fd092997146f187ec09b4558a50"
+dependencies = [
+ "deranged",
+ "num-conv",
+ "powerfmt",
+ "serde_core",
+ "time-core",
+ "time-macros",
+]
+
+[[package]]
+name = "time-core"
+version = "0.1.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9e1c906769ad99c88eaa54e728060edef082f8e358ff32030cb7c7d315e81109"
+
+[[package]]
+name = "time-macros"
+version = "0.2.31"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c431b87111666e491a90baa837f914fb45cd5dc3c268591b0220ff5057f2085f"
+dependencies = [
+ "num-conv",
+ "time-core",
+]
+
+[[package]]
 name = "tinystr"
 version = "0.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2024,7 +2088,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.48.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

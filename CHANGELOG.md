@@ -16,6 +16,34 @@ All notable changes to this project will be documented in this file.
 
 ### Security
 
+## [0.8.0] - 2026-07-02
+
+### Changed
+
+- **Journal module refactored to SDK-consumer pattern** — the 17 journal
+  tools are no longer implemented as inline `#[tool]` handlers in
+  `crates/lds/src/main.rs`. Instead, `lds-journal` now depends on
+  `journal-mcp-rmcp = "0.5.0"` and wraps `JournalMcpServer` in a thin
+  `JournalModule` (~150 LOC) that lds's `ServerHandler` composition
+  points (`list_tools` / `call_tool` / `list_resources` /
+  `read_resource`) forward through. Journal tool names already carry the
+  `journal_` prefix in-crate, so no name rewriting is needed. This
+  matches the `lds-outline` shape and removes ~550 lines of
+  hand-maintained port code from `crates/lds/src/main.rs`.
+- `lds-journal` no longer re-exports `journal-mcp-core`; consumers that
+  need SDK types should depend on `journal-mcp-core` directly.
+
+### Removed
+
+- `lds_journal::tools` module (17 Params structs + `ChapterListRow` /
+  `JournalInfoResult` helpers). All parameter parsing now lives in
+  `journal-mcp-rmcp` and reaches lds through the standard MCP wire
+  format.
+- `JournalModule::enable_file_projection` / `enable_file_projection_at`
+  — startup-time file projection is now passed as `Option<PathBuf>` to
+  `JournalModule::new`. Runtime attach/detach continues to work through
+  the `journal_projection_*` MCP tools.
+
 ## [0.7.0] - 2026-07-02
 
 ### Added

@@ -87,7 +87,7 @@ crates/
 ├── gh/      lds-gh       GhModule (gh CLI subprocess wrapper, read-only API, auth fail-fast)
 ├── recipe/  lds-recipe   RecipeModule (just CLI, resolve chain, content args)
 ├── sandbox/ lds-sandbox  SandboxModule (file-scoped read/append, snapshot/rollback)
-├── journal/ lds-journal  JournalModule (journal-mcp-core SDK consumer, EventLog + FileProjection)
+├── journal/ lds-journal  JournalModule (journal-mcp-rmcp SDK consumer, `journal_*` tools forwarded)
 ├── outline/ lds-outline  OutlineModule (outline-mcp-rmcp SDK consumer, prefixed `outline_*` tools)
 └── lds/     lds          MCP binary (rmcp v1.7, stdio transport)
 ```
