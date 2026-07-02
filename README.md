@@ -87,6 +87,8 @@ crates/
 ├── gh/      lds-gh       GhModule (gh CLI subprocess wrapper, read-only API, auth fail-fast)
 ├── recipe/  lds-recipe   RecipeModule (just CLI, resolve chain, content args)
 ├── sandbox/ lds-sandbox  SandboxModule (file-scoped read/append, snapshot/rollback)
+├── journal/ lds-journal  JournalModule (journal-mcp-core SDK consumer, EventLog + FileProjection)
+├── outline/ lds-outline  OutlineModule (outline-mcp-rmcp SDK consumer, prefixed `outline_*` tools)
 └── lds/     lds          MCP binary (rmcp v1.7, stdio transport)
 ```
 
@@ -160,6 +162,44 @@ another's work.
 |---|---|
 | `recipe_list` | List allow-agent recipes (with ResolveInfo source tracking) |
 | `recipe_run` | Run recipe with args + content env vars, timeout + truncation |
+
+### Outline
+
+Forwarded from the upstream `outline-mcp-rmcp` server. Each tool is exposed
+under the `outline_` prefix (e.g. `mcp__lds__outline_shelf`). Shelf root
+defaults to `$HOME/.config/outline-mcp/books`, overridable via
+`LDS_OUTLINE_SHELF_DIR`. See the upstream [outline-mcp README][outline-mcp]
+for full tool semantics; the surface below lists the wire names.
+
+| Tool | Description |
+|---|---|
+| `outline_shelf` | List available books on the shelf |
+| `outline_select_book` | Select a book (by slug or number) to operate on |
+| `outline_init` | Create a new book |
+| `outline_toc` | Table of contents (numbered IDs) for the selected book |
+| `outline_checklist` | Export a section as a Markdown checklist |
+| `outline_dump` | Full JSON dump of a book |
+| `outline_node_create` | Add a node under a parent (or root) |
+| `outline_node_update` | Edit a node's title/body/type/placeholder |
+| `outline_node_move` | Move a node under a new parent |
+| `outline_node_batch_move` | Bulk move (UUID required) |
+| `outline_node_batch_update` | Bulk update (UUID required) |
+| `outline_node_history` | Change history for a single node |
+| `outline_book_history` | Change history for the whole book |
+| `outline_snapshot_create` | Snapshot the current book state |
+| `outline_snapshot_list` | List snapshots |
+| `outline_snapshot_restore` | Restore a snapshot |
+| `outline_snapshot_tag` | Tag a snapshot with a label |
+| `outline_snapshot_diff` | Diff two snapshots |
+| `outline_snapshot_dump` | Dump one snapshot |
+| `outline_snapshot_dump_all` | Dump every snapshot |
+| `outline_import` | Import a book from JSON |
+| `outline_gen_routing` | Generate routing metadata |
+
+Bundled guide resources are surfaced verbatim under the `outline://guides/*`
+URI scheme via `list_resources` / `read_resource`.
+
+[outline-mcp]: https://github.com/ynishi/outline-mcp
 
 ## Roadmap
 

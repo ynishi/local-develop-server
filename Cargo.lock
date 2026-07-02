@@ -493,8 +493,19 @@ checksum = "899def5c37c4fd7b2664648c28120ecec138e4d395b459e5ca34f9cce2dd77fd"
 dependencies = [
  "cfg-if",
  "libc",
- "r-efi",
+ "r-efi 5.3.0",
  "wasip2",
+]
+
+[[package]]
+name = "getrandom"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "300e883d756b2e4ec94e02791f39b04b522276138852cfc41d9fb7e904106099"
+dependencies = [
+ "cfg-if",
+ "libc",
+ "r-efi 6.0.0",
 ]
 
 [[package]]
@@ -745,7 +756,7 @@ checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
 
 [[package]]
 name = "lds-core"
-version = "0.6.1"
+version = "0.7.0"
 dependencies = [
  "dirs",
  "lds-session",
@@ -760,7 +771,7 @@ dependencies = [
 
 [[package]]
 name = "lds-gh"
-version = "0.6.1"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "lds-core",
@@ -772,7 +783,7 @@ dependencies = [
 
 [[package]]
 name = "lds-git"
-version = "0.6.1"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "git2",
@@ -786,7 +797,7 @@ dependencies = [
 
 [[package]]
 name = "lds-journal"
-version = "0.6.1"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "journal-mcp-core",
@@ -800,8 +811,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "lds-outline"
+version = "0.7.0"
+dependencies = [
+ "anyhow",
+ "lds-core",
+ "outline-mcp-rmcp",
+ "rmcp",
+ "tracing",
+]
+
+[[package]]
 name = "lds-recipe"
-version = "0.6.1"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "lds-core",
@@ -815,7 +837,7 @@ dependencies = [
 
 [[package]]
 name = "lds-router"
-version = "0.6.1"
+version = "0.7.0"
 dependencies = [
  "futures",
  "rmcp",
@@ -830,7 +852,7 @@ dependencies = [
 
 [[package]]
 name = "lds-sandbox"
-version = "0.6.1"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "lds-core",
@@ -844,7 +866,7 @@ dependencies = [
 
 [[package]]
 name = "lds-session"
-version = "0.6.1"
+version = "0.7.0"
 dependencies = [
  "tempfile",
  "thiserror 2.0.18",
@@ -931,7 +953,7 @@ checksum = "92daf443525c4cce67b150400bc2316076100ce0b3686209eb8cf3c31612e6f0"
 
 [[package]]
 name = "local-develop-server"
-version = "0.6.1"
+version = "0.7.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -940,6 +962,7 @@ dependencies = [
  "lds-gh",
  "lds-git",
  "lds-journal",
+ "lds-outline",
  "lds-recipe",
  "lds-router",
  "lds-sandbox",
@@ -1061,6 +1084,33 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
 
 [[package]]
+name = "outline-mcp-core"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "08be45929acd33e0eaf78bb58043a8e0fddb8117ff93cb83e520256850591259"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "uuid",
+]
+
+[[package]]
+name = "outline-mcp-rmcp"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aa2e9baa7619cb9d5de55092e28011362c7f6954d36ca6b3444a13dedf003eb7"
+dependencies = [
+ "anyhow",
+ "outline-mcp-core",
+ "rmcp",
+ "schemars",
+ "serde",
+ "serde_json",
+ "similar",
+]
+
+[[package]]
 name = "parking_lot"
 version = "0.12.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1162,6 +1212,12 @@ name = "r-efi"
 version = "5.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "69cdb34c158ceb288df11e18b4bd39de994f6657d83847bdffdbd7f346754b0f"
+
+[[package]]
+name = "r-efi"
+version = "6.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
 name = "rand"
@@ -1513,6 +1569,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "similar"
+version = "2.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bbbb5d9659141646ae647b42fe094daf6c6192d1620870b449d9557f748b2daa"
+
+[[package]]
 name = "slab"
 version = "0.4.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1575,7 +1637,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
@@ -1847,6 +1909,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "06abde3611657adf66d383f00b093d7faecc7fa57071cce2578660c9f1010821"
 
 [[package]]
+name = "uuid"
+version = "1.23.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bf80a72845275afea99e7f2b434723d3bc7e38470fcd1c7ed39a599c73319a53"
+dependencies = [
+ "getrandom 0.4.3",
+ "js-sys",
+ "serde_core",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "valuable"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1950,7 +2024,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]

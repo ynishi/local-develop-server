@@ -16,6 +16,32 @@ All notable changes to this project will be documented in this file.
 
 ### Security
 
+## [0.7.0] - 2026-07-02
+
+### Added
+
+- **Outline module (`lds-outline` crate)** — thin wrapper around
+  `outline-mcp-rmcp::OutlineMcpServer` that forwards the 21 outline tools
+  (`shelf` / `select_book` / `toc` / `checklist` / `dump` / `node_*` /
+  `snapshot_*` / `book_history` / `import` / `gen_routing`) through lds
+  under an `outline_` name prefix (e.g. `outline_shelf`,
+  `outline_node_create`). Follows the same SDK-consumer shape that
+  `lds-journal` established for `journal-mcp-core`.
+- **Outline resources (`outline://guides/*`)** — bundled guides from the
+  upstream server are exposed via lds `list_resources` / `read_resource`
+  alongside the existing `lds://` URIs.
+- **Shelf root resolution** — the outline module rooted at
+  `$HOME/.config/outline-mcp/books` by default (matches the standalone
+  `outline-mcp` binary, so Outline Books remain a global cross-project
+  SoT), overridable via `LDS_OUTLINE_SHELF_DIR`.
+
+### Changed
+
+- **Consolidated MCP surface** — clients that previously wired an
+  `outline` MCP server alongside `lds` in `.mcp.json` can drop the
+  separate server entry; the outline tools now reach them as
+  `mcp__lds__outline_*`.
+
 ## [0.6.1] - 2026-07-01
 
 ### Added

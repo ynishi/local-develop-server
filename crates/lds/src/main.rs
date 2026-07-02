@@ -20,6 +20,7 @@ use lds_journal::tools::{
     JournalProjectionRebuildParams, JournalSchemaListParams, JournalSchemaLoadParams,
     JournalSchemaShowParams, JournalTailParams, chapter_replay_to_json, paginate,
 };
+use lds_outline::OutlineModule;
 use lds_recipe::RecipeModule;
 use lds_router::{ExportRegistry, McpRouter, RouteConfig};
 use lds_sandbox::fs::SandboxFs;
@@ -53,6 +54,7 @@ struct Inner {
     sandbox_fs: Option<SandboxFs>,
     sandbox_python: Option<SandboxPython>,
     journal: Option<JournalModule>,
+    outline: Option<OutlineModule>,
     router: Option<McpRouter>,
     export_registry: Option<ExportRegistry>,
     startup_cwd: Option<PathBuf>,
@@ -264,6 +266,7 @@ impl LdsServer {
                 sandbox_fs: None,
                 sandbox_python: None,
                 journal: None,
+                outline: None,
                 router: None,
                 export_registry: None,
                 startup_cwd,
@@ -756,6 +759,34 @@ fn start_session_locally(
         }
         module
     });
+    // Outline module: shelf root defaults to $HOME/.config/outline-mcp/books
+    // (matches the standalone outline-mcp binary — Outline Books are a
+    // global SoT shared across projects, not per-session). Override via
+    // LDS_OUTLINE_SHELF_DIR when a session wants an isolated shelf. Init
+    // failure downgrades to None (`outline_*` tools become unavailable);
+    // this keeps session_start resilient to a filesystem hiccup on the
+    // shelf directory rather than aborting the whole session.
+    inner.outline = {
+        let shelf_dir = std::env::var_os("LDS_OUTLINE_SHELF_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                std::env::var("HOME")
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|_| PathBuf::from("."))
+                    .join(".config/outline-mcp/books")
+            });
+        match OutlineModule::new(shelf_dir.clone()) {
+            Ok(m) => Some(m),
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    shelf_dir = %shelf_dir.display(),
+                    "OutlineModule init failed; outline_* tools disabled for this session"
+                );
+                None
+            }
+        }
+    };
     Ok(session)
 }
 
@@ -2574,8 +2605,8 @@ impl ServerHandler for LdsServer {
 
     async fn list_tools(
         &self,
-        _request: Option<PaginatedRequestParams>,
-        _context: RequestContext<RoleServer>,
+        request: Option<PaginatedRequestParams>,
+        context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
         let mut tools = Self::tool_router().list_all();
         let plugins = self.list_plugin_tools().await.unwrap_or_else(|e| {
@@ -2584,6 +2615,23 @@ impl ServerHandler for LdsServer {
         });
         tools.extend(plugins);
         tools.extend(self.list_export_tools().await);
+        // Outline tools: forwarded from outline-mcp-rmcp with an `outline_`
+        // prefix on each name so they slot into lds's flat namespace. Only
+        // available once a session is started (module lives on Inner).
+        {
+            let inner = self.state.read().await;
+            if let Some(outline) = inner.outline.as_ref() {
+                match outline
+                    .list_tools_prefixed(request.clone(), context.clone())
+                    .await
+                {
+                    Ok(mut outline_tools) => tools.append(&mut outline_tools),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "outline.list_tools_prefixed failed");
+                    }
+                }
+            }
+        }
         tools.sort_by(|a, b| a.name.cmp(&b.name));
         Ok(ListToolsResult {
             tools,
@@ -2634,6 +2682,23 @@ impl ServerHandler for LdsServer {
         {
             return Ok(result);
         }
+        // Outline delegation: if the tool name has the `outline_` prefix,
+        // forward to the upstream OutlineMcpServer (which sees the raw
+        // name with the prefix stripped). Consuming `request` here is
+        // fine because the fallback tool_router path below only runs when
+        // outline returns None, and we clone once for the delegation
+        // attempt.
+        if request
+            .name
+            .starts_with(lds_outline::module::OUTLINE_TOOL_PREFIX)
+        {
+            let inner = self.state.read().await;
+            if let Some(outline) = inner.outline.as_ref()
+                && let Some(result) = outline.try_call(request.clone(), context.clone()).await?
+            {
+                return Ok(result);
+            }
+        }
         let tcc = ToolCallContext::new(self, request, context);
         Self::tool_router().call(tcc).await
     }
@@ -2650,8 +2715,8 @@ impl ServerHandler for LdsServer {
     //   lds://docs/multi-session    — design / usage doc for the model
     async fn list_resources(
         &self,
-        _request: Option<PaginatedRequestParams>,
-        _context: RequestContext<RoleServer>,
+        request: Option<PaginatedRequestParams>,
+        context: RequestContext<RoleServer>,
     ) -> Result<ListResourcesResult, McpError> {
         let inner = self.state.read().await;
         let mut resources: Vec<Resource> = vec![
@@ -2706,6 +2771,14 @@ impl ServerHandler for LdsServer {
                 None,
             ));
         }
+        // Outline resources: forwarded verbatim (outline:// URIs) so
+        // agent-profiles guides remain discoverable through lds.
+        if let Some(outline) = inner.outline.as_ref() {
+            match outline.list_resources(request, context).await {
+                Ok(outline_resources) => resources.extend(outline_resources.resources),
+                Err(e) => tracing::warn!(error = %e, "outline.list_resources failed"),
+            }
+        }
         Ok(ListResourcesResult {
             resources,
             meta: None,
@@ -2742,8 +2815,17 @@ impl ServerHandler for LdsServer {
     async fn read_resource(
         &self,
         request: ReadResourceRequestParams,
-        _context: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> Result<ReadResourceResult, McpError> {
+        // Outline resources (outline://*) short-circuit lds's own resolver.
+        if request.uri.starts_with("outline://") {
+            let inner = self.state.read().await;
+            if let Some(outline) = inner.outline.as_ref()
+                && let Some(result) = outline.try_read_resource(request.clone(), context).await?
+            {
+                return Ok(result);
+            }
+        }
         let uri = request.uri;
         let inner = self.state.read().await;
         let body = read_lds_resource(&uri, &inner.lds)?;

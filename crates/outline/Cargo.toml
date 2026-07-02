@@ -1,6 +1,6 @@
 [package]
-name = "lds-git"
-description = "Git module for local-develop-server (lds) — git2-rs backed read/write with session-scoped write safety"
+name = "lds-outline"
+description = "Outline module for local-develop-server (lds) — outline-mcp-rmcp SDK consumer with prefixed tool namespace"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -12,12 +12,7 @@ categories.workspace = true
 
 [dependencies]
 lds-core = { path = "../core", version = "0.7.0" }
+outline-mcp-rmcp = "0.9.1"
 anyhow.workspace = true
-serde.workspace = true
-serde_json.workspace = true
+rmcp.workspace = true
 tracing.workspace = true
-git2.workspace = true
-
-[dev-dependencies]
-tempfile.workspace = true
-tokio = { workspace = true, features = ["rt", "macros"] }
