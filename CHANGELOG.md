@@ -8,6 +8,18 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
+### Deprecated
+
+### Removed
+
+### Fixed
+
+### Security
+
+## [0.9.0] - 2026-07-05
+
+### Changed
+
 - **Bump `journal-mcp-rmcp` `0.5.0` → `0.6.0`** — upstream migration to
   `rusqlite = "0.37"` (`libsqlite3-sys 0.35`), `mini-app-core 0.16`, and
   `Store::list`. lds `crates/journal/src/module.rs` handler is unchanged;

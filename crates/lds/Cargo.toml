@@ -16,14 +16,14 @@ name = "lds"
 path = "src/main.rs"
 
 [dependencies]
-lds-core = { path = "../core", version = "0.8.0" }
-lds-git = { path = "../git", version = "0.8.0" }
-lds-gh = { path = "../gh", version = "0.8.0" }
-lds-recipe = { path = "../recipe", version = "0.8.0" }
-lds-sandbox = { path = "../sandbox", version = "0.8.0" }
-lds-journal = { path = "../journal", version = "0.8.0" }
-lds-outline = { path = "../outline", version = "0.8.0" }
-lds-router = { path = "../router", version = "0.8.0" }
+lds-core = { path = "../core", version = "0.9.0" }
+lds-git = { path = "../git", version = "0.9.0" }
+lds-gh = { path = "../gh", version = "0.9.0" }
+lds-recipe = { path = "../recipe", version = "0.9.0" }
+lds-sandbox = { path = "../sandbox", version = "0.9.0" }
+lds-journal = { path = "../journal", version = "0.9.0" }
+lds-outline = { path = "../outline", version = "0.9.0" }
+lds-router = { path = "../router", version = "0.9.0" }
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
