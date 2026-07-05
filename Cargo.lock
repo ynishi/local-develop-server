@@ -3,24 +3,56 @@
 version = 4
 
 [[package]]
-name = "ahash"
-version = "0.8.12"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5a15f179cd60c4584b8a8c596927aadc462e27f2ca70c04e0071964a73ba7a75"
-dependencies = [
- "cfg-if",
- "once_cell",
- "version_check",
- "zerocopy",
-]
-
-[[package]]
 name = "aho-corasick"
 version = "1.1.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ddd31a130427c27518df266943a5308ed92d4b226cc639f5a8f1002816174301"
 dependencies = [
  "memchr",
+]
+
+[[package]]
+name = "ai-store-core"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "848ad0675bdc61197f0489df92c6722c9d09ef7afd9652ccdd02ce7d460bd651"
+dependencies = [
+ "async-trait",
+ "json-patch",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "time",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "ai-store-sqlite"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bc031f225b2e6bb2c42b2b9d46122db61811f6f963728b372f47ca279b0ca00b"
+dependencies = [
+ "ai-store-core",
+ "async-trait",
+ "rusqlite",
+ "rusqlite-isle",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+]
+
+[[package]]
+name = "ai-store-sync"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "06667a706c4f1dc9b1af1d6ca405eeb36428af1e0cbd99eccd654010dc41556b"
+dependencies = [
+ "ai-store-core",
+ "async-trait",
+ "json-patch",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]
@@ -284,6 +316,9 @@ name = "deranged"
 version = "0.5.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7cd812cc2bc1d69d4764bd80df88b4317eaef9e773c75226407d9bc0876b211c"
+dependencies = [
+ "serde_core",
+]
 
 [[package]]
 name = "digest"
@@ -372,6 +407,12 @@ name = "find-msvc-tools"
 version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582"
+
+[[package]]
+name = "foldhash"
+version = "0.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d9c4f5dac5e15c24eb999c26181a6ca40b39fe946cbe4c263c7209467bc83af2"
 
 [[package]]
 name = "form_urlencoded"
@@ -531,11 +572,11 @@ dependencies = [
 
 [[package]]
 name = "hashbrown"
-version = "0.14.5"
+version = "0.15.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e5274423e17b7c9fc20b6e7e208532f9b19825d82dfd615708b70edd83df41f1"
+checksum = "9229cfe53dfd69f0609a49f65461bd93001ea1ef889cd5529dd176593f5338a1"
 dependencies = [
- "ahash",
+ "foldhash",
 ]
 
 [[package]]
@@ -546,11 +587,11 @@ checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
 
 [[package]]
 name = "hashlink"
-version = "0.9.1"
+version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6ba4ff7128dee98c7dc9794b6a411377e1404dba1c97deb8d1a55297bd25d8af"
+checksum = "7382cf6263419f2d8df38c55d7da83da5c18aef87fc7a7fc1fb1e344edfe14c1"
 dependencies = [
- "hashbrown 0.14.5",
+ "hashbrown 0.15.5",
 ]
 
 [[package]]
@@ -726,9 +767,9 @@ dependencies = [
 
 [[package]]
 name = "journal-mcp-core"
-version = "0.5.0"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f45bef497108cef395db6a436aa59638f8fc8cebfd572b5cd2c173856d6a51d7"
+checksum = "99ea70ec35a899ac56f30da33e52c0774e2096683d1a42f2eb1bde536e29c211"
 dependencies = [
  "anyhow",
  "rusqlite",
@@ -744,9 +785,9 @@ dependencies = [
 
 [[package]]
 name = "journal-mcp-rmcp"
-version = "0.5.0"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "936eaa5c12e3b4ceab971c93ff94aea749669b4dab28eaaa396de67cb7ff4009"
+checksum = "6fe811c81fa3e06399f21f4ee0482483aa9e6ae447a540d7bb647f349b207bd9"
 dependencies = [
  "anyhow",
  "journal-mcp-core",
@@ -772,6 +813,28 @@ dependencies = [
  "futures-util",
  "once_cell",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "json-patch"
+version = "4.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7421438de105a0827e44fadd05377727847d717c80ce29a229f85fd04c427b72"
+dependencies = [
+ "jsonptr",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "jsonptr"
+version = "0.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a5a3cc660ba5d72bce0b3bb295bf20847ccbb40fd423f3f05b61273672e561fe"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -926,9 +989,9 @@ dependencies = [
 
 [[package]]
 name = "libsqlite3-sys"
-version = "0.30.1"
+version = "0.35.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2e99fb7a497b1e3339bc746195567ed8d3e24945ecd636e3619d20b9de9e9149"
+checksum = "133c182a6a2c87864fe97778797e46c7e999672690dc9fa3ee8e241aa4a9c13f"
 dependencies = [
  "cc",
  "pkg-config",
@@ -1113,22 +1176,31 @@ checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
 
 [[package]]
 name = "outline-mcp-core"
-version = "0.9.1"
+version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "08be45929acd33e0eaf78bb58043a8e0fddb8117ff93cb83e520256850591259"
+checksum = "49b8bccd268c8e4021c042c5a0cd92035408a00e54caab5491a12215343841ba"
 dependencies = [
+ "ai-store-core",
+ "ai-store-sqlite",
+ "ai-store-sync",
+ "async-trait",
+ "json-patch",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
+ "tokio",
  "uuid",
 ]
 
 [[package]]
 name = "outline-mcp-rmcp"
-version = "0.9.1"
+version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aa2e9baa7619cb9d5de55092e28011362c7f6954d36ca6b3444a13dedf003eb7"
+checksum = "4c7fb4b6b4621a9b82f5ad5f6f61cc93d7b3b80aed3fb0d3bd8b5f4de332e81c"
 dependencies = [
+ "ai-store-core",
+ "ai-store-sqlite",
+ "ai-store-sync",
  "anyhow",
  "outline-mcp-core",
  "rmcp",
@@ -1136,6 +1208,9 @@ dependencies = [
  "serde",
  "serde_json",
  "similar",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -1378,9 +1453,9 @@ dependencies = [
 
 [[package]]
 name = "rusqlite"
-version = "0.32.1"
+version = "0.37.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7753b721174eb8ff87a9a0e799e2d7bc3749323e773db92e0984debb00019d6e"
+checksum = "165ca6e57b20e1351573e3729b958bc62f0e48025386970b6e4d29e7a7e71f3f"
 dependencies = [
  "bitflags",
  "fallible-iterator",
@@ -1388,6 +1463,17 @@ dependencies = [
  "hashlink",
  "libsqlite3-sys",
  "smallvec",
+]
+
+[[package]]
+name = "rusqlite-isle"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9bb6d6d470ae0c6050af330779c722a0f236a5309a102f391dd24262d1c9818d"
+dependencies = [
+ "rusqlite",
+ "thiserror 2.0.18",
+ "tokio",
 ]
 
 [[package]]

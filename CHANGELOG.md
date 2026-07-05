@@ -8,11 +8,37 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
+- **Bump `journal-mcp-rmcp` `0.5.0` → `0.6.0`** — upstream migration to
+  `rusqlite = "0.37"` (`libsqlite3-sys 0.35`), `mini-app-core 0.16`, and
+  `Store::list`. lds `crates/journal/src/module.rs` handler is unchanged;
+  the bump propagates through the SDK boundary as source-compatible.
+- **Bump `outline-mcp-rmcp` `0.9.1` → `0.10.0`** — upstream moved
+  `BookRepository` / `ChangeLogRepository` to `#[async_trait]` and backed
+  the snapshot subsystem with `ai-store-sqlite` (`Store`,
+  `SnapshotDumpSink`). Wiring is auto-lazy in the upstream server; lds
+  `crates/outline/src/module.rs` handler is unchanged. Existing
+  `.snap.*.json` files on disk stay accessible after running
+  `outline-mcp migrate-snapshots --shelf <path>` once (idempotent).
+
 ### Deprecated
+
+- **`[[export]] route = "outline"` in lds config** — deprecated in favor
+  of the in-process `lds-outline` SDK integration added in v0.7.0. If
+  both are configured, the export block silently shadows the SDK path
+  for the exported tools (subprocess and in-process `OutlineMcpServer`
+  hold separate `selected` state, so `outline_snapshot_*` returns
+  `No book selected` even after `outline_select_book`). See README
+  "Migrating from legacy `[[export]] route = \"outline\"`" section for
+  the migration path.
 
 ### Removed
 
 ### Fixed
+
+- **`libsqlite3-sys` `links = "sqlite3"` conflict** when combining the
+  journal and outline chains — resolved by the two upstream bumps above,
+  which unify the graph on `libsqlite3-sys 0.35.0` via `rusqlite 0.37.0`.
+  Closes [ynishi/local-develop-server#1](https://github.com/ynishi/local-develop-server/issues/1).
 
 ### Security
 

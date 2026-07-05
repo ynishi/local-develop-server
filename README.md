@@ -201,6 +201,45 @@ URI scheme via `list_resources` / `read_resource`.
 
 [outline-mcp]: https://github.com/ynishi/outline-mcp
 
+#### Migrating from legacy `[[export]] route = "outline"` (pre-v0.7.0 users)
+
+Before v0.7.0 the recommended way to reach outline-mcp through lds was to
+declare a `[[route]] name = "outline"` and re-expose its snapshot / history
+tools via `[[export]]` in `~/.config/lds/config.toml` (or the project-local
+equivalent). Since v0.7.0 the outline surface is provided by the in-process
+`lds-outline` SDK integration, so the export block is no longer needed —
+and, if left in place, it silently **shadows** the SDK path for exported
+tool names.
+
+Concretely: lds's `call_tool` dispatch checks `[[export]]` before the
+direct-embed outline delegation, so a config like
+
+```toml
+[[route]]
+name = "outline"
+command = "outline-mcp"
+
+[[export]]
+route = "outline"
+tools = ["snapshot_create", "snapshot_list", "snapshot_dump",
+         "snapshot_dump_all", "snapshot_tag", "snapshot_diff",
+         "book_history"]
+```
+
+routes `outline_snapshot_*` and `outline_book_history` to a subprocess
+`outline-mcp` binary while `outline_shelf` / `outline_select_book` /
+`outline_toc` / `outline_dump` / `outline_node_*` go through the direct
+SDK. The subprocess and the in-process `OutlineMcpServer` hold separate
+`selected` state, so `outline_select_book` from the SDK path never reaches
+the subprocess and the exported snapshot tools return
+`-32602: No book selected` even right after a successful `outline_select_book`.
+
+**Migration**: remove the `[[export]] route = "outline"` block (and, if you
+had no other reason to keep it, the `[[route]] name = "outline"` block as
+well) from your lds config, then restart your MCP client. All `outline_*`
+tools will flow through the in-process SDK and share a single `selected`
+state.
+
 ## Roadmap
 
 | Stage | Scope | Status |

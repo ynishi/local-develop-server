@@ -12,7 +12,7 @@ categories.workspace = true
 
 [dependencies]
 lds-core = { path = "../core", version = "0.8.0" }
-outline-mcp-rmcp = "0.9.1"
+outline-mcp-rmcp = "0.10.0"
 anyhow.workspace = true
 rmcp.workspace = true
 tracing.workspace = true
