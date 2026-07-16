@@ -6,6 +6,7 @@ members = [
     "crates/git",
     "crates/journal",
     "crates/outline",
+    "crates/publicity",
     "crates/recipe",
     "crates/router",
     "crates/sandbox",
@@ -20,6 +21,8 @@ license = "MIT OR Apache-2.0"
 authors = ["Yutaka Nishimura"]
 repository = "https://github.com/ynishi/local-develop-server"
 homepage = "https://github.com/ynishi/local-develop-server"
+documentation = "https://docs.rs/local-develop-server"
+description = "Local Develop Server — MCP server for git, gh, recipes, sessions, sandbox, journal, outline."
 keywords = ["mcp", "development", "agent", "git", "recipe"]
 categories = ["development-tools"]
 readme = "README.md"

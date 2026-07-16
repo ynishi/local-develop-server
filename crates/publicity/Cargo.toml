@@ -1,0 +1,25 @@
+[package]
+name = "lds-publicity"
+description = "Publicity classifier for local-develop-server (lds) — per-platform PUBLIC/PRIVATE/INTERNAL/LOCAL/FORKED/AMBIGUOUS/UNKNOWN detection across github / crates / etc."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+lds-core = { path = "../core", version = "0.9.0" }
+lds-git = { path = "../git", version = "0.9.0" }
+lds-gh = { path = "../gh", version = "0.9.0" }
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["rt", "macros"] }

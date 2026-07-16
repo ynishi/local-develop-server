@@ -508,6 +508,41 @@ impl GhModule {
         }
         gh_cmd(cwd, &args)
     }
+
+    /// Predicate: is gh authenticated for the current session root?
+    ///
+    /// Non-erroring wrapper around [`gh_auth_check`]. Callers that need to
+    /// classify auth-failure vs. other errors (e.g. publicity detection
+    /// mapping unauth → UNKNOWN) probe with this before invoking a method
+    /// that would bail on auth failure.
+    pub fn is_authenticated(&self) -> bool {
+        gh_auth_check(self.session.root()).is_ok()
+    }
+
+    /// View repository visibility / fork / parent metadata as a JSON string.
+    ///
+    /// Runs `gh repo view --json visibility,isFork,parent,url,nameWithOwner`.
+    /// Returns the raw JSON — callers parse the shape they need. Used by the
+    /// publicity module to classify a GitHub remote into
+    /// PUBLIC / PRIVATE / INTERNAL / FORKED (with LOCAL / AMBIGUOUS / UNKNOWN
+    /// handled by the caller from surrounding signals).
+    ///
+    /// # Errors
+    ///
+    /// * Not authenticated (fail-fast via [`gh_cmd`]).
+    /// * `gh` subprocess failure (repo not found, access denied, network).
+    pub fn repo_visibility(&self) -> Result<String> {
+        let cwd = self.session.root();
+        gh_cmd(
+            cwd,
+            &[
+                "repo",
+                "view",
+                "--json",
+                "visibility,isFork,parent,url,nameWithOwner",
+            ],
+        )
+    }
 }
 
 // ---------------------------------------------------------------------------

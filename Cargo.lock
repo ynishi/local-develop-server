@@ -907,6 +907,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "lds-publicity"
+version = "0.9.0"
+dependencies = [
+ "anyhow",
+ "lds-core",
+ "lds-gh",
+ "lds-git",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "toml",
+ "tracing",
+]
+
+[[package]]
 name = "lds-recipe"
 version = "0.9.0"
 dependencies = [
@@ -1048,6 +1064,7 @@ dependencies = [
  "lds-git",
  "lds-journal",
  "lds-outline",
+ "lds-publicity",
  "lds-recipe",
  "lds-router",
  "lds-sandbox",

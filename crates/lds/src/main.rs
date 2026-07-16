@@ -12,6 +12,7 @@ use lds_gh::GhModule;
 use lds_git::{GitModule, ResetMode};
 use lds_journal::JournalModule;
 use lds_outline::OutlineModule;
+use lds_publicity::{Platform, PublicityModule};
 use lds_recipe::RecipeModule;
 use lds_router::{ExportRegistry, McpRouter, RouteConfig};
 use lds_sandbox::fs::SandboxFs;
@@ -41,6 +42,7 @@ struct Inner {
     lds: LdsState,
     git: Option<GitModule>,
     gh: Option<GhModule>,
+    publicity: Option<PublicityModule>,
     recipe: Option<RecipeModule>,
     sandbox_fs: Option<SandboxFs>,
     sandbox_python: Option<SandboxPython>,
@@ -253,6 +255,7 @@ impl LdsServer {
                 lds: LdsState::new(),
                 git: None,
                 gh: None,
+                publicity: None,
                 recipe: None,
                 sandbox_fs: None,
                 sandbox_python: None,
@@ -327,6 +330,15 @@ struct SessionDoctorReq {
     /// session_id or alias. Use "all" to run doctor on every session.
     #[serde(default)]
     key: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct PublicityReq {
+    /// Optional platform label. Recognised: `github` / `gh` / `crates` /
+    /// `crates.io` / `cargo`. When omitted, every applicable platform is
+    /// probed (github always; crates when Cargo.toml is present).
+    #[serde(default)]
+    platform: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -715,6 +727,7 @@ fn start_session_locally(
         .map_err(|e| McpError::internal_error(e.to_string(), None))?;
     inner.git = Some(GitModule::new(Arc::clone(&session)));
     inner.gh = Some(GhModule::new(Arc::clone(&session)));
+    inner.publicity = Some(PublicityModule::new(Arc::clone(&session)));
     inner.recipe = Some(RecipeModule::new(Arc::clone(&session)));
     inner.sandbox_fs = Some(
         SandboxFs::new(session.root())
@@ -1285,6 +1298,42 @@ impl LdsServer {
             .repo_view()
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         Ok(CallToolResult::success(vec![Content::text(out)]))
+    }
+
+    /// Classify per-platform publicity (PUBLIC/PRIVATE/INTERNAL/LOCAL/FORKED/AMBIGUOUS/UNKNOWN).
+    ///
+    /// Without `platform`, probes every applicable platform (github always
+    /// runs; crates runs when a Cargo.toml is present). With `platform`,
+    /// probes only that one. Recognised values: `github` / `gh` /
+    /// `crates` / `crates.io` / `cargo`. Returns
+    /// `{ results: [{ platform, publicity, reason, detail }, ...] }`.
+    #[tool(
+        description = "Classify per-platform publicity for the current session root. Returns one result per platform (github / crates) with a canonical value in {PUBLIC, PRIVATE, INTERNAL, LOCAL, FORKED, AMBIGUOUS, UNKNOWN} plus a reason and detail JSON. Pass `platform` (optional: github / crates) to restrict to a single platform; omit to probe all applicable."
+    )]
+    async fn publicity(
+        &self,
+        Parameters(req): Parameters<PublicityReq>,
+    ) -> Result<CallToolResult, McpError> {
+        let inner = self.state.read().await;
+        let publicity = inner.publicity.as_ref().ok_or_else(no_session_error)?;
+        let results = match req.platform.as_deref() {
+            None => publicity.detect_all(),
+            Some(label) => {
+                let p = Platform::parse(label).ok_or_else(|| {
+                    McpError::invalid_params(
+                        format!(
+                            "unknown platform '{label}' (expected: github / gh / crates / crates.io / cargo)"
+                        ),
+                        None,
+                    )
+                })?;
+                vec![publicity.detect(p)]
+            }
+        };
+        let body = serde_json::json!({ "results": results });
+        let text = serde_json::to_string_pretty(&body)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
     /// List GitHub Actions workflow runs (read-only).

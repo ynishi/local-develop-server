@@ -6,6 +6,22 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **`publicity` MCP tool + `lds-publicity` crate** — classify per-platform
+  publicity for the current session root, returning a canonical value in
+  `{PUBLIC, PRIVATE, INTERNAL, LOCAL, FORKED, AMBIGUOUS, UNKNOWN}` per
+  platform. Phase 1 supports `github` (via `git remote` + `gh repo view`)
+  and `crates` (via `Cargo.toml` `publish` field inspection). Without an
+  argument the tool probes every applicable platform; pass
+  `platform: "github"` / `"crates"` to restrict to one. Removes the
+  dependency on a project-side `tasks/repo-classify` recipe: downstream
+  commit gates can invoke `mcp__lds__publicity` directly.
+- **`GhModule::is_authenticated` / `GhModule::repo_visibility`** — probe
+  for `gh auth status` and fetch `visibility,isFork,parent,url,nameWithOwner`
+  as a JSON string. Used by `lds-publicity` to classify the github
+  platform without swallowing auth failures.
+- **`Cargo.toml [workspace.package].{description,documentation}`** — added
+  for crates.io / docs.rs metadata completeness (`cargo-precheck` gate).
+
 ### Changed
 
 ### Deprecated

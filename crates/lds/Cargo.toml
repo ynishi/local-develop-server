@@ -23,6 +23,7 @@ lds-recipe = { path = "../recipe", version = "0.9.0" }
 lds-sandbox = { path = "../sandbox", version = "0.9.0" }
 lds-journal = { path = "../journal", version = "0.9.0" }
 lds-outline = { path = "../outline", version = "0.9.0" }
+lds-publicity = { path = "../publicity", version = "0.9.0" }
 lds-router = { path = "../router", version = "0.9.0" }
 anyhow.workspace = true
 serde.workspace = true
