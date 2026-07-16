@@ -94,6 +94,13 @@ pub struct PublicityResult {
     pub publicity: Publicity,
     /// One-sentence justification citing the observed signal.
     pub reason: String,
+    /// When `publicity == Forked`, the underlying repository's raw visibility
+    /// (`"PUBLIC"` / `"PRIVATE"` / `"INTERNAL"`). Otherwise `None`.
+    ///
+    /// Surfaces the "is this a public fork or a private fork" answer at the
+    /// top level so callers do not have to inspect `detail.visibility`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub underlying_visibility: Option<String>,
     /// Raw signals the classifier read (`origin_url`, `is_fork`, `publish`, …).
     pub detail: serde_json::Value,
 }
@@ -109,8 +116,14 @@ impl PublicityResult {
             platform: platform.as_str().to_string(),
             publicity,
             reason: reason.into(),
+            underlying_visibility: None,
             detail,
         }
+    }
+
+    fn with_underlying_visibility(mut self, visibility: impl Into<String>) -> Self {
+        self.underlying_visibility = Some(visibility.into());
+        self
     }
 }
 
@@ -155,8 +168,48 @@ impl PublicityModule {
     }
 
     /// Classify the current session root's crates.io publicity.
+    ///
+    /// Runs a declared-side classification via [`classify_crates_toml`], then
+    /// — when the declared value is [`Publicity::Public`] and a crate name is
+    /// present — probes crates.io for actual registration via
+    /// [`check_crates_io_registered`]. A declared-PUBLIC crate that is not
+    /// registered on crates.io downgrades to [`Publicity::Ambiguous`]
+    /// (unpublished-yet or yanked). Live-check failure (offline, curl
+    /// missing) is non-fatal and appends a note to `reason`.
     pub fn detect_crates(&self) -> PublicityResult {
-        detect_crates_impl(self.session.root())
+        let mut result = detect_crates_impl(self.session.root());
+        if result.publicity == Publicity::Public {
+            let name = result
+                .detail
+                .get("name")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            if let Some(ref n) = name {
+                match check_crates_io_registered(n) {
+                    Some(true) => {
+                        result.detail["crates_io_registered"] = serde_json::json!(true);
+                        result.reason =
+                            format!("{} + registered on crates.io", result.reason);
+                    }
+                    Some(false) => {
+                        result.detail["crates_io_registered"] = serde_json::json!(false);
+                        result.publicity = Publicity::Ambiguous;
+                        result.reason = format!(
+                            "{} but not registered on crates.io (unpublished or yanked)",
+                            result.reason
+                        );
+                    }
+                    None => {
+                        result.detail["crates_io_registered"] = serde_json::Value::Null;
+                        result.reason = format!(
+                            "{} (crates.io live check unavailable)",
+                            result.reason
+                        );
+                    }
+                }
+            }
+        }
+        result
     }
 }
 
@@ -289,15 +342,29 @@ pub fn classify_github_json(parsed: &serde_json::Value, origin_url: &str) -> Pub
     });
 
     // Fork status wins over raw visibility: FORKED conveys the primary signal
-    // (this is not our upstream); visibility is retained in `detail` for the
-    // few callers that need to disambiguate a private fork from a public one.
+    // (this is not our upstream). Visibility is surfaced on the top-level
+    // `underlying_visibility` field so callers can distinguish a public fork
+    // from a private one without inspecting `detail`.
     if is_fork {
         return PublicityResult::new(
             Platform::Github,
             Publicity::Forked,
-            format!("gh reports isFork=true (parent={})", parent.as_deref().unwrap_or("unknown")),
+            format!(
+                "gh reports isFork=true (parent={}, underlying visibility={})",
+                parent.as_deref().unwrap_or("unknown"),
+                if visibility_upper.is_empty() {
+                    "unknown"
+                } else {
+                    visibility_upper.as_str()
+                }
+            ),
             detail,
-        );
+        )
+        .with_underlying_visibility(if visibility_upper.is_empty() {
+            "UNKNOWN".to_string()
+        } else {
+            visibility_upper
+        });
     }
 
     match visibility_upper.as_str() {
@@ -374,6 +441,49 @@ fn host_is_github(host: &str) -> bool {
     first_label.contains("github") || first_label.contains("ghe")
         || host.contains(".github.")
         || host.contains(".ghe.")
+}
+
+// ---------------------------------------------------------------------------
+// Crates live check
+// ---------------------------------------------------------------------------
+
+/// Probe crates.io for whether `name` is a registered crate.
+///
+/// Returns `Some(true)` when the API responds 200, `Some(false)` on 404, and
+/// `None` on any other outcome (curl missing, network error, non-2xx/404
+/// response, timeout). Callers should treat `None` as a live-check
+/// unavailability rather than as evidence in either direction.
+///
+/// Implemented via `curl` subprocess to avoid pulling a full HTTP client into
+/// the dependency graph; a 5-second timeout keeps a hung request from
+/// stalling gate evaluation.
+pub fn check_crates_io_registered(name: &str) -> Option<bool> {
+    let url = format!("https://crates.io/api/v1/crates/{name}");
+    let output = std::process::Command::new("curl")
+        .args([
+            "-s",
+            "-o",
+            "/dev/null",
+            "-w",
+            "%{http_code}",
+            "--max-time",
+            "5",
+            "-A",
+            "lds-publicity/0.9.0 (github.com/ynishi/local-develop-server)",
+            &url,
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let code_str = String::from_utf8_lossy(&output.stdout);
+    let code: u16 = code_str.trim().parse().ok()?;
+    match code {
+        200 => Some(true),
+        404 => Some(false),
+        _ => None,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -592,6 +702,33 @@ mod tests {
         });
         let r2 = classify_github_json(&v2, "git@github.com:me/priv-fork.git");
         assert_eq!(r2.publicity, Publicity::Forked);
+    }
+
+    #[test]
+    fn github_fork_surfaces_underlying_visibility() {
+        // Public fork: underlying_visibility = "PUBLIC".
+        let v = serde_json::json!({
+            "visibility": "public",
+            "isFork": true,
+            "parent": { "nameWithOwner": "upstream/orig" },
+        });
+        let r = classify_github_json(&v, "git@github.com:me/fork.git");
+        assert_eq!(r.underlying_visibility.as_deref(), Some("PUBLIC"));
+        // Private fork: underlying_visibility = "PRIVATE".
+        let v2 = serde_json::json!({
+            "visibility": "private",
+            "isFork": true,
+        });
+        let r2 = classify_github_json(&v2, "git@github.com:me/priv-fork.git");
+        assert_eq!(r2.underlying_visibility.as_deref(), Some("PRIVATE"));
+        // Missing visibility field: underlying_visibility = "UNKNOWN".
+        let v3 = serde_json::json!({ "isFork": true });
+        let r3 = classify_github_json(&v3, "git@github.com:me/fork.git");
+        assert_eq!(r3.underlying_visibility.as_deref(), Some("UNKNOWN"));
+        // Non-fork: underlying_visibility must be absent.
+        let v4 = serde_json::json!({ "visibility": "public", "isFork": false });
+        let r4 = classify_github_json(&v4, "git@github.com:owner/repo.git");
+        assert!(r4.underlying_visibility.is_none());
     }
 
     #[test]

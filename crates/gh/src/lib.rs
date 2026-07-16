@@ -408,7 +408,14 @@ impl GhModule {
     pub fn release_list(&self, limit: usize, repo: Option<String>) -> Result<String> {
         let cwd = self.session.root();
         let limit_str = limit.to_string();
-        let mut args: Vec<&str> = vec!["release", "list", "--limit", &limit_str];
+        let mut args: Vec<&str> = vec![
+            "release",
+            "list",
+            "--limit",
+            &limit_str,
+            "--json",
+            "name,tagName,isLatest,isDraft,isPrerelease,publishedAt,createdAt",
+        ];
         if let Some(r) = repo.as_ref() {
             args.push("--repo");
             args.push(r.as_str());

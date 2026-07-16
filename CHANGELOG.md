@@ -21,8 +21,26 @@ All notable changes to this project will be documented in this file.
   platform without swallowing auth failures.
 - **`Cargo.toml [workspace.package].{description,documentation}`** — added
   for crates.io / docs.rs metadata completeness (`cargo-precheck` gate).
+- **`publicity`: crates.io live registration check** — when a Cargo.toml
+  declares publishable (`publish` field absent, `= true`, or an array
+  containing `crates-io`) the classifier now probes crates.io via
+  `curl https://crates.io/api/v1/crates/<name>` to distinguish
+  `PUBLIC + registered` from `AMBIGUOUS + declared-but-unpublished`
+  (yanked, or first release not yet cut). Non-fatal on offline / missing
+  `curl`; falls back to the declared value with a note in `reason`.
+- **`publicity`: `underlying_visibility` field for FORKED results** —
+  fork classification now surfaces the underlying repository's raw
+  visibility (`PUBLIC` / `PRIVATE` / `INTERNAL` / `UNKNOWN`) at the top
+  level so callers can distinguish a public fork from a private one
+  without inspecting `detail`. Absent for non-FORKED results.
 
 ### Changed
+
+- **`GhModule::release_list`: emit JSON, not tab-separated text** — the
+  method now passes `--json name,tagName,isLatest,isDraft,isPrerelease,publishedAt,createdAt`
+  to `gh release list`, matching the JSON contract documented on the
+  method and shared by the sibling `run_list` / `workflow_list` methods.
+  Fixes the pre-existing `t1_release_list_returns_json` failure.
 
 ### Deprecated
 
