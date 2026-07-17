@@ -1,4 +1,6 @@
-//! Publicity classifier — per-platform PUBLIC/PRIVATE/INTERNAL/LOCAL/FORKED/AMBIGUOUS/UNKNOWN.
+#![warn(missing_docs)]
+
+//! Publicity classifier — per-platform PUBLIC/PRIVATE/INTERNAL/LOCAL/NOT_GIT/FORKED/AMBIGUOUS/UNKNOWN.
 //!
 //! Turns a repository root into one or more [`PublicityResult`]s, one per
 //! platform (github, crates, …). Each result carries a canonical
@@ -80,13 +82,26 @@ impl Platform {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum Publicity {
+    /// Visible to anyone (github public, crates.io `publish = true`).
     Public,
+    /// Visibility restricted to explicit collaborators (github private,
+    /// Cargo `publish = false`).
     Private,
+    /// Org-scope visibility (GHE `internal`, Cargo custom-registry list).
     Internal,
+    /// Git repository present but no remotes configured on this platform.
     Local,
+    /// The session root is not a git repository at all (no `.git`, or
+    /// the repository cannot be opened). Distinct from [`Publicity::Local`].
     NotGit,
+    /// Github fork (regardless of upstream visibility). See
+    /// [`PublicityResult::underlying_visibility`] for the raw visibility.
     Forked,
+    /// Data present but not deterministically classifiable (non-github
+    /// host, `gh repo view` error, malformed `Cargo.toml`).
     Ambiguous,
+    /// The tool needed to classify is unavailable (gh not authenticated,
+    /// `Cargo.toml` unreadable).
     Unknown,
 }
 
@@ -139,6 +154,8 @@ pub struct PublicityModule {
 }
 
 impl PublicityModule {
+    /// Construct a new classifier bound to `session`. All probes issued by
+    /// this instance run against `session.root()`.
     pub fn new(session: Arc<Session>) -> Self {
         Self { session }
     }

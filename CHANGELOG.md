@@ -6,6 +6,20 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+### Changed
+
+### Deprecated
+
+### Removed
+
+### Fixed
+
+### Security
+
+## [0.10.0] - 2026-07-17
+
+### Added
+
 - **`publicity` MCP tool + `lds-publicity` crate** — classify per-platform
   publicity for the current session root, returning a canonical value in
   `{PUBLIC, PRIVATE, INTERNAL, LOCAL, NOT_GIT, FORKED, AMBIGUOUS, UNKNOWN}`
@@ -22,6 +36,10 @@ All notable changes to this project will be documented in this file.
   "git repo present but no remotes configured". Lets callers tell
   "path has no .git" from "git init done, no push target" without
   inspecting `reason`.
+- **`lds-publicity` opts in to `#![warn(missing_docs)]`** — every
+  public item now carries a `///` docstring, so `cargo rustdoc
+  --all-features -- -D missing_docs` and downstream `code-doc-as-
+  design-discipline` gates are satisfied for the new crate.
 - **`GhModule::is_authenticated` / `GhModule::repo_visibility`** — probe
   for `gh auth status` and fetch `visibility,isFork,parent,url,nameWithOwner`
   as a JSON string. Used by `lds-publicity` to classify the github
