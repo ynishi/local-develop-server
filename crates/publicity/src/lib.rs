@@ -60,14 +60,18 @@ impl Platform {
     }
 }
 
-/// Canonical publicity value. All platforms return one of these seven states.
+/// Canonical publicity value. All platforms return one of these eight states.
 ///
 /// - `Public` — visible to anyone (github public, crates.io publish=true).
 /// - `Private` — visibility restricted to explicit collaborators
 ///   (github private, Cargo `publish = false`).
 /// - `Internal` — org-scope visibility (GHE `internal`, Cargo custom
 ///   registry list).
-/// - `Local` — no remote presence detected on this platform.
+/// - `Local` — git repository present but no remotes configured on this
+///   platform.
+/// - `NotGit` — the session root is not a git repository at all
+///   (no `.git`, or the repository cannot be opened). Distinct from
+///   `Local`, which implies `git init` has run.
 /// - `Forked` — github fork (regardless of upstream visibility).
 /// - `Ambiguous` — data present but not deterministically classifiable
 ///   (non-github host, `gh repo view` error, malformed Cargo.toml).
@@ -80,6 +84,7 @@ pub enum Publicity {
     Private,
     Internal,
     Local,
+    NotGit,
     Forked,
     Ambiguous,
     Unknown,
@@ -140,9 +145,10 @@ impl PublicityModule {
 
     /// Classify every platform that has any signal in the current session root.
     ///
-    /// The github probe always runs (a repository with no remotes returns
-    /// `LOCAL`, which is a meaningful signal to callers). The crates probe
-    /// runs only when a `Cargo.toml` is present.
+    /// The github probe always runs — a non-git root returns `NOT_GIT`,
+    /// a git root with no remotes returns `LOCAL`, and either is a
+    /// meaningful signal to callers. The crates probe runs only when a
+    /// `Cargo.toml` is present.
     pub fn detect_all(&self) -> Vec<PublicityResult> {
         let mut out = Vec::new();
         out.push(self.detect_github());
@@ -215,14 +221,19 @@ impl PublicityModule {
 // ---------------------------------------------------------------------------
 
 fn detect_github_impl(git: &GitModule, gh: &GhModule) -> PublicityResult {
-    // 1. Enumerate remotes; failure to open the repo → LOCAL.
+    // 1. Enumerate remotes; failure to open the repo → NOT_GIT.
+    //    `remote_list` shells out through `git`, so the error surfaces
+    //    "not a git repository" / "repository at <root> not found" the
+    //    same way `git remote -v` does. Distinct from LOCAL (git repo
+    //    present but no remotes) so callers can tell "path has no .git"
+    //    from "git init done, no push target".
     let remotes = match git.remote_list() {
         Ok(r) => r.remotes,
         Err(e) => {
             return PublicityResult::new(
                 Platform::Github,
-                Publicity::Local,
-                format!("git remote_list failed: {e}"),
+                Publicity::NotGit,
+                format!("git remote_list failed (not a git repository?): {e}"),
                 serde_json::json!({}),
             );
         }
@@ -840,6 +851,34 @@ serde = "1"
     }
 
     // -- Platform parse -----------------------------------------------------
+
+    #[test]
+    fn detect_github_non_git_root_returns_not_git() {
+        // A tempdir with no `.git` inside must classify as NOT_GIT — the
+        // classifier distinguishes "not a git repository at all" from
+        // "git repo present but no remotes" (LOCAL).
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let session = std::sync::Arc::new(
+            lds_core::Session::new(lds_core::SessionConfig {
+                root: tmp.path().to_path_buf(),
+                timeout_secs: None,
+                max_output: None,
+                alias: None,
+                global_recipe_dirs: Vec::new(),
+            })
+            .expect("session"),
+        );
+        let module = PublicityModule::new(session);
+        let result = module.detect_github();
+        assert_eq!(
+            result.publicity,
+            Publicity::NotGit,
+            "expected NOT_GIT for non-git tempdir, got {:?}: {}",
+            result.publicity,
+            result.reason
+        );
+        assert_eq!(result.platform, "github");
+    }
 
     #[test]
     fn platform_parse_accepts_aliases() {

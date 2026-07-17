@@ -8,13 +8,20 @@ All notable changes to this project will be documented in this file.
 
 - **`publicity` MCP tool + `lds-publicity` crate** — classify per-platform
   publicity for the current session root, returning a canonical value in
-  `{PUBLIC, PRIVATE, INTERNAL, LOCAL, FORKED, AMBIGUOUS, UNKNOWN}` per
-  platform. Phase 1 supports `github` (via `git remote` + `gh repo view`)
+  `{PUBLIC, PRIVATE, INTERNAL, LOCAL, NOT_GIT, FORKED, AMBIGUOUS, UNKNOWN}`
+  per platform. Phase 1 supports `github` (via `git remote` + `gh repo view`)
   and `crates` (via `Cargo.toml` `publish` field inspection). Without an
   argument the tool probes every applicable platform; pass
   `platform: "github"` / `"crates"` to restrict to one. Removes the
   dependency on a project-side `tasks/repo-classify` recipe: downstream
   commit gates can invoke `mcp__lds__publicity` directly.
+- **`publicity`: `NOT_GIT` value** — new eighth variant on the
+  `Publicity` enum, returned by `detect_github` when the session root
+  is not a git repository at all (no `.git`, or the repository cannot
+  be opened). Distinct from `LOCAL`, which now specifically means
+  "git repo present but no remotes configured". Lets callers tell
+  "path has no .git" from "git init done, no push target" without
+  inspecting `reason`.
 - **`GhModule::is_authenticated` / `GhModule::repo_visibility`** — probe
   for `gh auth status` and fetch `visibility,isFork,parent,url,nameWithOwner`
   as a JSON string. Used by `lds-publicity` to classify the github
