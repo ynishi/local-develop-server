@@ -15,8 +15,7 @@
 //! - Shelf directory is resolved by the caller (typically `main.rs`);
 //!   the module itself is location-agnostic. Default in lds is
 //!   `$HOME/.config/outline-mcp/books` (matches standalone outline-mcp
-//!   binary — Book SoT is global across projects, see agent-profiles
-//!   `subagent-first.md` §Outline Book canonical).
+//!   binary — Book SoT is global across projects, not per-session).
 //! - The `outline_` tool-name prefix is applied in `list_tools` and
 //!   stripped in `call_tool`; upstream tool identity (`shelf`,
 //!   `node_create`, `toc`, …) is preserved on the wire between lds and

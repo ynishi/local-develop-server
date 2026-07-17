@@ -48,6 +48,14 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **`crates/outline/src/lib.rs` crate-root docstring** — dropped an
+  internal cross-repo reference that would have shipped in the
+  crate's rustdoc / crates.io tarball. Reworded to keep the
+  design-intent sentence without pointing at private tooling.
+- **`crates/publicity/src/lib.rs` rustfmt drift** — 4 blocks
+  reformatted (imports, match arms, string continuations) so
+  `cargo fmt --check` is clean.
+
 ### Security
 
 ## [0.9.0] - 2026-07-05

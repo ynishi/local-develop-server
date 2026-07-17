@@ -188,8 +188,7 @@ impl PublicityModule {
                 match check_crates_io_registered(n) {
                     Some(true) => {
                         result.detail["crates_io_registered"] = serde_json::json!(true);
-                        result.reason =
-                            format!("{} + registered on crates.io", result.reason);
+                        result.reason = format!("{} + registered on crates.io", result.reason);
                     }
                     Some(false) => {
                         result.detail["crates_io_registered"] = serde_json::json!(false);
@@ -201,10 +200,8 @@ impl PublicityModule {
                     }
                     None => {
                         result.detail["crates_io_registered"] = serde_json::Value::Null;
-                        result.reason = format!(
-                            "{} (crates.io live check unavailable)",
-                            result.reason
-                        );
+                        result.reason =
+                            format!("{} (crates.io live check unavailable)", result.reason);
                     }
                 }
             }
@@ -438,7 +435,8 @@ fn host_is_github(host: &str) -> bool {
     // positive here downgrades to AMBIGUOUS at the next step (gh repo view
     // will fail) rather than mislabelling.
     let first_label = host.split('.').next().unwrap_or("");
-    first_label.contains("github") || first_label.contains("ghe")
+    first_label.contains("github")
+        || first_label.contains("ghe")
         || host.contains(".github.")
         || host.contains(".ghe.")
 }
@@ -523,21 +521,19 @@ pub fn classify_crates_toml(text: &str) -> PublicityResult {
     };
 
     // Prefer [workspace.package] (workspace crate), fall back to [package].
-    let (section_name, section) = if let Some(wp) = parsed
-        .get("workspace")
-        .and_then(|w| w.get("package"))
-    {
-        ("workspace.package", wp)
-    } else if let Some(p) = parsed.get("package") {
-        ("package", p)
-    } else {
-        return PublicityResult::new(
-            Platform::Crates,
-            Publicity::Unknown,
-            "Cargo.toml has neither [workspace.package] nor [package]",
-            serde_json::json!({}),
-        );
-    };
+    let (section_name, section) =
+        if let Some(wp) = parsed.get("workspace").and_then(|w| w.get("package")) {
+            ("workspace.package", wp)
+        } else if let Some(p) = parsed.get("package") {
+            ("package", p)
+        } else {
+            return PublicityResult::new(
+                Platform::Crates,
+                Publicity::Unknown,
+                "Cargo.toml has neither [workspace.package] nor [package]",
+                serde_json::json!({}),
+            );
+        };
 
     let name = section
         .get("name")
