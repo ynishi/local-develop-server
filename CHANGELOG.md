@@ -16,6 +16,31 @@ All notable changes to this project will be documented in this file.
 
 ### Security
 
+## [0.11.0] - 2026-07-18
+
+### Added
+
+- **`GitModule::commit`: transactional per-file commit via `other_staged` mode** —
+  extend the commit signature to accept an explicit `paths` list plus an
+  `other_staged: {Stop, Restage}` mode. When the caller supplies `paths`,
+  `Stop` (default) aborts with an unchanged index if paths outside the
+  requested set are already staged; `Restage` unstages the intruders,
+  commits, then re-stages them so pre-existing staged work survives the
+  round-trip. Wired through the `lds` MCP `git_commit` tool as an
+  `other_staged` string parameter; `paths` omitted or empty keeps the
+  previous `git add -A` sweep behaviour. New integration tests cover the
+  three modes plus the "unstaged noise ignored" boundary.
+- **`OtherStagedMode` public export from `lds-git`** — new enum re-exported
+  alongside `ResetMode` etc., serde-compatible with snake_case wire values
+  (`"stop"` / `"restage"`).
+
+### Fixed
+
+- **`crates/sandbox/src/fs.rs::edit_replace_all` fixture literal** — swap
+  the `"aa"` placeholder for `"foo"` so downstream `secret-pre-commit-checker`
+  persona-id sweeps (word-regex `\baa\b`) no longer collide with the test
+  fixture.
+
 ## [0.10.0] - 2026-07-17
 
 ### Added
