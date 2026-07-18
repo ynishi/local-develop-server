@@ -3,7 +3,7 @@ use std::process::Command;
 use std::sync::Arc;
 
 use lds_core::{Session, SessionConfig};
-use lds_git::{GitModule, ResetMode};
+use lds_git::{GitModule, OtherStagedMode, ResetMode};
 
 fn init_temp_repo(dir: &Path) {
     let run = |args: &[&str]| {
@@ -62,7 +62,9 @@ fn worktree_lifecycle() {
     // commit in worktree
     let wt_path = tmp.path().join(".worktrees/test-wt");
     std::fs::write(wt_path.join("new_file.txt"), "content\n").unwrap();
-    let commit_result = git.commit(&wt_path, "test commit", None).unwrap();
+    let commit_result = git
+        .commit(&wt_path, "test commit", None, OtherStagedMode::Stop)
+        .unwrap();
     assert_eq!(commit_result.sha.len(), 40, "expected full SHA-1");
     assert_eq!(commit_result.message, "test commit");
     assert_eq!(commit_result.files_changed, 1);
@@ -119,7 +121,7 @@ fn ownership_guard_rejects_unowned_worktree() {
 
     // commit to unowned worktree should fail
     std::fs::write(foreign_path.join("file.txt"), "x").unwrap();
-    let err = git.commit(&foreign_path, "bad commit", None);
+    let err = git.commit(&foreign_path, "bad commit", None, OtherStagedMode::Stop);
     assert!(err.is_err());
     assert!(
         err.unwrap_err()
@@ -149,6 +151,7 @@ fn commit_allowed_at_session_root() {
         tmp.path(),
         "root commit",
         Some(&["root_file.txt".to_string()]),
+        OtherStagedMode::Stop,
     );
     let commit = result.expect("commit at session root");
     assert_eq!(commit.sha.len(), 40);
@@ -334,4 +337,203 @@ fn session_release_adopts_orphan_worktree() {
         .expect("worktree_remove after adoption");
     git.branch_delete("left/over")
         .expect("branch_delete after adoption");
+}
+
+// ---------------------------------------------------------------------------
+// commit(only, other_staged)
+// ---------------------------------------------------------------------------
+
+/// `git status --porcelain=v1` line list from `dir`. Test-only helper.
+fn porcelain_status(dir: &Path) -> Vec<String> {
+    let out = Command::new("git")
+        .args(["status", "--porcelain=v1"])
+        .current_dir(dir)
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(|l| l.to_string())
+        .collect()
+}
+
+/// Stage a worktree file so tests can seed "other staged" state.
+fn git_add(dir: &Path, path: &str) {
+    Command::new("git")
+        .args(["add", path])
+        .current_dir(dir)
+        .output()
+        .unwrap();
+}
+
+#[test]
+fn commit_only_commits_just_those_paths() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_temp_repo(tmp.path());
+    let session = make_session(tmp.path());
+    let git = GitModule::new(session);
+
+    // Two new files in the worktree, only one is asked for.
+    std::fs::write(tmp.path().join("keep.txt"), "keep\n").unwrap();
+    std::fs::write(tmp.path().join("skip.txt"), "skip\n").unwrap();
+
+    let commit = git
+        .commit(
+            tmp.path(),
+            "only keep",
+            Some(&["keep.txt".to_string()]),
+            OtherStagedMode::Stop,
+        )
+        .expect("commit only=keep.txt");
+
+    assert_eq!(commit.files_changed, 1);
+    // The committed tree contains keep.txt but not skip.txt.
+    let listed = Command::new("git")
+        .args(["show", "--name-only", "--pretty=format:", "HEAD"])
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+    let listed = String::from_utf8_lossy(&listed.stdout);
+    assert!(
+        listed.contains("keep.txt"),
+        "commit should touch keep.txt: {listed}"
+    );
+    assert!(
+        !listed.contains("skip.txt"),
+        "commit must not touch skip.txt: {listed}"
+    );
+    // skip.txt is still on disk, untracked (never staged by us).
+    assert!(tmp.path().join("skip.txt").exists());
+    let status = porcelain_status(tmp.path());
+    assert!(
+        status.iter().any(|l| l.ends_with("skip.txt")),
+        "skip.txt should still be reported by status, got: {status:?}"
+    );
+}
+
+#[test]
+fn commit_only_stop_refuses_when_index_has_intruders() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_temp_repo(tmp.path());
+    let session = make_session(tmp.path());
+    let git = GitModule::new(session);
+
+    // Pre-stage `other.txt` outside of `only`. `stop` mode must abort.
+    std::fs::write(tmp.path().join("other.txt"), "other\n").unwrap();
+    git_add(tmp.path(), "other.txt");
+
+    std::fs::write(tmp.path().join("only.txt"), "only\n").unwrap();
+
+    let err = git
+        .commit(
+            tmp.path(),
+            "should abort",
+            Some(&["only.txt".to_string()]),
+            OtherStagedMode::Stop,
+        )
+        .expect_err("stop mode must refuse when other paths are staged");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("other_staged=stop"),
+        "expected other_staged=stop hint in error: {msg}"
+    );
+    assert!(
+        msg.contains("other.txt"),
+        "error should name the intruder: {msg}"
+    );
+
+    // State must be untouched: HEAD is still `initial`, other.txt still staged.
+    let head_msg = Command::new("git")
+        .args(["log", "-1", "--pretty=%s"])
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&head_msg.stdout).trim(),
+        "initial",
+        "stop mode must not create a commit"
+    );
+    let status = porcelain_status(tmp.path());
+    assert!(
+        status.iter().any(|l| l.starts_with("A  other.txt")),
+        "other.txt must remain staged, got: {status:?}"
+    );
+}
+
+#[test]
+fn commit_only_restage_survives_round_trip() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_temp_repo(tmp.path());
+    let session = make_session(tmp.path());
+    let git = GitModule::new(session);
+
+    // Pre-stage `other.txt`; call commit with only=["target.txt"] + restage.
+    std::fs::write(tmp.path().join("other.txt"), "other\n").unwrap();
+    git_add(tmp.path(), "other.txt");
+    std::fs::write(tmp.path().join("target.txt"), "target\n").unwrap();
+
+    let commit = git
+        .commit(
+            tmp.path(),
+            "only target",
+            Some(&["target.txt".to_string()]),
+            OtherStagedMode::Restage,
+        )
+        .expect("restage mode commits target and re-stages other");
+
+    assert_eq!(commit.files_changed, 1, "commit must only touch target.txt");
+
+    // The new commit contains target.txt, not other.txt.
+    let listed = Command::new("git")
+        .args(["show", "--name-only", "--pretty=format:", "HEAD"])
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+    let listed = String::from_utf8_lossy(&listed.stdout);
+    assert!(
+        listed.contains("target.txt"),
+        "commit should touch target.txt: {listed}"
+    );
+    assert!(
+        !listed.contains("other.txt"),
+        "commit must not touch other.txt: {listed}"
+    );
+
+    // other.txt has been re-staged (still listed as staged-add by porcelain).
+    let status = porcelain_status(tmp.path());
+    assert!(
+        status.iter().any(|l| l.starts_with("A  other.txt")),
+        "other.txt must be re-staged after restage round-trip, got: {status:?}"
+    );
+}
+
+#[test]
+fn commit_only_stop_ignores_other_unstaged_changes() {
+    // Modified-but-not-staged files are NOT intruders — the mode only cares
+    // about the index. This documents that boundary.
+    let tmp = tempfile::tempdir().unwrap();
+    init_temp_repo(tmp.path());
+    let session = make_session(tmp.path());
+    let git = GitModule::new(session);
+
+    // Modify README.md but do not stage it.
+    std::fs::write(tmp.path().join("README.md"), "init\nunstaged edit\n").unwrap();
+    // Add a fresh file that `only` will target.
+    std::fs::write(tmp.path().join("target.txt"), "t\n").unwrap();
+
+    let commit = git
+        .commit(
+            tmp.path(),
+            "only target with unstaged noise",
+            Some(&["target.txt".to_string()]),
+            OtherStagedMode::Stop,
+        )
+        .expect("stop mode should still succeed when noise is only unstaged");
+    assert_eq!(commit.files_changed, 1);
+
+    // README's unstaged edit is still on disk, unstaged.
+    let status = porcelain_status(tmp.path());
+    assert!(
+        status.iter().any(|l| l.starts_with(" M README.md")),
+        "README.md's unstaged edit must survive, got: {status:?}"
+    );
 }

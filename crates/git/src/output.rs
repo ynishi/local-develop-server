@@ -201,6 +201,24 @@ pub struct CommitOutput {
     pub files_changed: usize,
 }
 
+/// How [`GitModule::commit`] handles staged paths outside the `only` list.
+///
+/// Only consulted when `only` is `Some(non_empty)`. When `only` is `None` /
+/// empty, `commit` still stages every change via `git add -A` and this enum
+/// is ignored.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum OtherStagedMode {
+    /// Fail (state unchanged) when the index carries paths outside `only`.
+    /// The safe default — protects against silently sweeping unrelated work.
+    #[default]
+    Stop,
+    /// Unstage the other paths, commit `only`, then re-stage them. The
+    /// commit ends up containing exactly the `only` paths; the pre-existing
+    /// staged work stays in the index afterwards.
+    Restage,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct MergeOutput {
     pub branch: String,

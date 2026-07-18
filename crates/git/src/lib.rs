@@ -28,9 +28,9 @@ mod write;
 
 pub use output::{
     BranchDeleteOutput, BranchStatusOutput, CommitEntry, CommitOutput, DiffOutput, EntryStatus,
-    FetchOutput, IsPushedOutput, LogOutput, MergeOutput, RemoteEntry, RemoteListOutput, ResetMode,
-    ResetOutput, SessionReleaseOutput, StatusKind, StatusOutput, TagPushedOutput,
-    UnpushedCommitsOutput, WorktreeAddOutput, WorktreeEntry, WorktreeListOutput,
+    FetchOutput, IsPushedOutput, LogOutput, MergeOutput, OtherStagedMode, RemoteEntry,
+    RemoteListOutput, ResetMode, ResetOutput, SessionReleaseOutput, StatusKind, StatusOutput,
+    TagPushedOutput, UnpushedCommitsOutput, WorktreeAddOutput, WorktreeEntry, WorktreeListOutput,
     WorktreeRemoveOutput, WorktreeStateOutput,
 };
 

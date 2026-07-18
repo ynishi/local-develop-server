@@ -9,7 +9,7 @@ use anyhow::Result;
 use lds_core::config::Config;
 use lds_core::{LdsState, Session, SessionConfig, check_binaries};
 use lds_gh::GhModule;
-use lds_git::{GitModule, ResetMode};
+use lds_git::{GitModule, OtherStagedMode, ResetMode};
 use lds_journal::JournalModule;
 use lds_outline::OutlineModule;
 use lds_publicity::{Platform, PublicityModule};
@@ -353,10 +353,23 @@ fn default_max_count() -> usize {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 struct GitCommitReq {
+    /// Working directory inside a session-owned worktree.
     working_dir: String,
+    /// Commit message (single `-m`, so newlines land verbatim).
     message: String,
+    /// Paths to commit. When omitted (or empty) every change is swept via
+    /// `git add -A` (backward-compatible default). When set to a non-empty
+    /// list, the commit contains exactly those paths and `other_staged`
+    /// governs how the index's spillover is handled.
     #[serde(default)]
     paths: Option<Vec<String>>,
+    /// `"stop"` (default) or `"restage"`. Consulted only when `only` is a
+    /// non-empty list *and* the index already carries paths outside it.
+    /// `stop` fails without touching state; `restage` unstages the
+    /// intruders, commits `only`, then re-stages the intruders so the
+    /// caller's pre-existing staged work survives the round-trip.
+    #[serde(default)]
+    other_staged: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -678,6 +691,21 @@ struct McpRouteRemoveReq {
 /// Infallible — never fails.
 fn no_session_error() -> McpError {
     McpError::internal_error("no session", None)
+}
+
+/// Parse the `other_staged` wire string into [`OtherStagedMode`]. `None` /
+/// missing → default (`Stop`); unknown value → hard error so a typo doesn't
+/// silently fall back to a mode the caller didn't intend.
+fn parse_other_staged(mode: Option<&str>) -> Result<OtherStagedMode, McpError> {
+    match mode {
+        None | Some("") => Ok(OtherStagedMode::default()),
+        Some("stop") => Ok(OtherStagedMode::Stop),
+        Some("restage") => Ok(OtherStagedMode::Restage),
+        Some(other) => Err(McpError::internal_error(
+            format!("unknown other_staged mode {other:?} (expected stop|restage)"),
+            None,
+        )),
+    }
 }
 
 /// Serialise a tool result into a [`CallToolResult`] whose single text block
@@ -1027,7 +1055,12 @@ impl LdsServer {
         json_result(&out)
     }
 
-    #[tool(description = "Stage and commit changes in a session-owned working directory")]
+    #[tool(description = "Commit changes in a session-owned working directory. \
+`paths` omitted or empty: sweeps every change via `git add -A`. \
+`paths` set: commits exactly those paths; when the index carries other \
+staged paths, `other_staged` decides — `stop` (default) fails leaving \
+state unchanged, `restage` unstages the intruders, commits `paths`, then \
+re-stages them so pre-existing staged work survives.")]
     async fn git_commit(
         &self,
         Parameters(req): Parameters<GitCommitReq>,
@@ -1035,8 +1068,14 @@ impl LdsServer {
         let inner = self.state.read().await;
         let git = inner.git.as_ref().ok_or_else(no_session_error)?;
         let working_dir = PathBuf::from(&req.working_dir);
+        let other_staged = parse_other_staged(req.other_staged.as_deref())?;
         let out = git
-            .commit(&working_dir, &req.message, req.paths.as_deref())
+            .commit(
+                &working_dir,
+                &req.message,
+                req.paths.as_deref(),
+                other_staged,
+            )
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         json_result(&out)
     }
