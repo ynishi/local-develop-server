@@ -330,12 +330,12 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let fs = SandboxFs::new(tmp.path()).unwrap();
 
-        std::fs::write(tmp.path().join("file.txt"), "aa bb aa").unwrap();
-        let result = fs.edit("file.txt", "aa", "cc", true).unwrap();
+        std::fs::write(tmp.path().join("file.txt"), "foo mid foo").unwrap();
+        let result = fs.edit("file.txt", "foo", "bar", true).unwrap();
         assert_eq!(result.replacements, 2);
 
         let content = std::fs::read_to_string(tmp.path().join("file.txt")).unwrap();
-        assert_eq!(content, "cc bb cc");
+        assert_eq!(content, "bar mid bar");
     }
 
     #[test]
