@@ -16,6 +16,60 @@ All notable changes to this project will be documented in this file.
 
 ### Security
 
+## [0.13.0] - 2026-07-22
+
+### Added
+
+- **`git_commit` — dotfile / dot-dir safeguard** — the `git_commit`
+  MCP tool now classifies every candidate path against a `.`-prefixed
+  component check before staging. Untracked entries that are **not** in
+  `.gitignore` (`.env` at root, `.claude/CLAUDE.md`,
+  `workspace/.journal.db`, `foo/.hidden`, …) are dropped from staging
+  and surfaced in the new `dotfile_skipped` response field; a warning
+  entry is added to `dotfile_warnings` so pre-publish review can see
+  what was filtered. Untracked entries that **are** in `.gitignore`
+  stay silent (matches `git add -A` behaviour). Tracked dotfile
+  changes are still committed — but reported the same way so
+  unintended edits to `.gitignore` / `.github/workflows/*.yml` /
+  `Dockerfile` / etc. are visible at the commit boundary, not after
+  the release ships. The classifier walks nested paths, so a dotfile
+  inside an untracked non-dot directory (`data/.hidden`,
+  `workspace/.journal.db*`) is caught rather than collapsed into a
+  single `?? dir/` porcelain record.
+- **`git_commit force_dot` — explicit override flag** — new optional
+  boolean on the `git_commit` MCP request. Default `false` keeps the
+  safeguard on; `true` suppresses the entire mechanism (every
+  candidate is staged verbatim, no warnings emitted). Reserved for
+  the case where the caller genuinely intends to commit a dotfile
+  (bootstrapping `.gitignore` in a fresh repo, promoting a
+  hand-vetted `.github/workflows/ci.yml`, etc.).
+- **`CommitOutput` gains `dotfile_warnings` + `dotfile_skipped`** — two
+  new fields on the JSON response (both `#[serde(default)]`, so the
+  schema stays forward-compatible for callers on the old shape).
+  `DotfileWarning` carries `{path, tracked, in_gitignore}` per entry.
+
+### Changed
+
+- **`git_commit` default behaviour with `paths=None`** — the sweep now
+  filters dotfiles under the safeguard before the actual `git add`.
+  Callers that previously relied on `git add -A` grabbing untracked
+  `.env` / `.claude/` / nested `workspace/.journal.db` etc. will
+  observe those files skipped (with a warning) instead of committed.
+  Pass `force_dot: true` to restore the pre-0.13 sweep semantics.
+- **`GitModule::commit` signature — new `force_dot: bool` parameter** —
+  breaking change for direct `lds-git` library consumers; the MCP wire
+  contract (`git_commit` tool) stays backward compatible via an
+  optional `force_dot` field on `GitCommitReq` (defaults to `false`,
+  matches the safeguard-on branch).
+
+### Deprecated
+
+### Removed
+
+### Fixed
+
+### Security
+
 ## [0.12.0] - 2026-07-21
 
 ### Added
