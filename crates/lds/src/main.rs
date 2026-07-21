@@ -411,6 +411,15 @@ struct GitCommitReq {
     /// caller's pre-existing staged work survives the round-trip.
     #[serde(default)]
     other_staged: Option<String>,
+    /// `false` (default) enables the dotfile / dot-dir safeguard: untracked
+    /// entries whose path contains a `.`-prefixed component and are not in
+    /// `.gitignore` are skipped from staging with a warning; tracked
+    /// dotfile changes are committed but reported so pre-publish review can
+    /// catch unintended edits to `.gitignore` / workflow files / etc.
+    /// `true` suppresses the mechanism — every candidate is staged
+    /// verbatim and no warnings are emitted.
+    #[serde(default)]
+    force_dot: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -1123,7 +1132,14 @@ Filters (all optional, AND-combined): `author` (case-sensitive substring against
 `paths` set: commits exactly those paths; when the index carries other \
 staged paths, `other_staged` decides — `stop` (default) fails leaving \
 state unchanged, `restage` unstages the intruders, commits `paths`, then \
-re-stages them so pre-existing staged work survives.")]
+re-stages them so pre-existing staged work survives. Dotfile / dot-dir \
+safeguard is on by default: untracked-and-not-in-`.gitignore` entries \
+(`.env`, freshly-dropped `.claude/*`, `foo/.hidden`, etc.) are skipped \
+from staging and reported in the response `dotfile_warnings` / \
+`dotfile_skipped`; tracked dotfile changes are still committed but \
+reported the same way so pre-publish review can catch unintended edits \
+to `.gitignore` / `.github/workflows/*.yml` / etc. Pass `force_dot: true` \
+to suppress the safeguard entirely.")]
     async fn git_commit(
         &self,
         Parameters(req): Parameters<GitCommitReq>,
@@ -1138,6 +1154,7 @@ re-stages them so pre-existing staged work survives.")]
                 &req.message,
                 req.paths.as_deref(),
                 other_staged,
+                req.force_dot.unwrap_or(false),
             )
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         json_result(&out)

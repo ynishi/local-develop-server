@@ -203,6 +203,29 @@ pub struct CommitOutput {
     pub short_sha: String,
     pub message: String,
     pub files_changed: usize,
+    /// Dotfile / dot-dir paths that surfaced during this commit call. Every
+    /// change with a `.`-prefixed path component (`.env`, `.claude/CLAUDE.md`,
+    /// `.github/workflows/ci.yml`, `foo/.hidden`) lands here so pre-publish
+    /// eyeballing can catch unintended edits. Tracked entries were still
+    /// committed; untracked-not-in-gitignore entries were skipped (see
+    /// `dotfile_skipped`). `force_dot=true` suppresses this entirely.
+    #[serde(default)]
+    pub dotfile_warnings: Vec<DotfileWarning>,
+    /// Paths dropped from staging by the dotfile safeguard. Populated only
+    /// for the untracked + not-in-gitignore branch (silent-ignored dotfiles
+    /// aren't tracked here — git's default already handles them).
+    #[serde(default)]
+    pub dotfile_skipped: Vec<String>,
+}
+
+/// One dotfile / dot-dir path observed during commit. `tracked=true` means
+/// the change was still committed (with a warn); `tracked=false` means it
+/// was skipped from staging.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DotfileWarning {
+    pub path: String,
+    pub tracked: bool,
+    pub in_gitignore: bool,
 }
 
 /// How [`GitModule::commit`] handles staged paths outside the `only` list.

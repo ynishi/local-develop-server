@@ -6,12 +6,13 @@
 //! setup safe.
 
 use std::path::Path;
+use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
 use crate::output::{
-    BranchDeleteOutput, CommitOutput, MergeOutput, OtherStagedMode, WorktreeAddOutput,
-    WorktreeRemoveOutput,
+    BranchDeleteOutput, CommitOutput, DotfileWarning, MergeOutput, OtherStagedMode,
+    WorktreeAddOutput, WorktreeRemoveOutput,
 };
 use crate::{GitModule, git_cmd};
 
@@ -96,18 +97,45 @@ impl GitModule {
     ///
     /// Untracked files listed in `only` are staged and committed like any
     /// other path; anything not in `only` is never touched.
+    ///
+    /// **Dotfile / dot-dir safeguard.** Any candidate whose path contains a
+    /// `.`-prefixed component (`.env`, `.claude/CLAUDE.md`,
+    /// `.github/workflows/ci.yml`, `foo/.hidden`) is classified before
+    /// staging:
+    ///
+    /// * *tracked* → committed as usual, but recorded in
+    ///   [`CommitOutput::dotfile_warnings`] so pre-publish review can catch
+    ///   unintended edits to `.gitignore` / workflow files / etc.
+    /// * *untracked, not in `.gitignore`* → dropped from staging + recorded
+    ///   in both `dotfile_warnings` and [`CommitOutput::dotfile_skipped`].
+    /// * *untracked, in `.gitignore`* → silently skipped (matches git's
+    ///   default; `git status --porcelain` doesn't surface them either).
+    /// * `force_dot=true` → suppresses the entire mechanism: every candidate
+    ///   is staged verbatim and no warnings are emitted.
     pub fn commit(
         &self,
         working_dir: &Path,
         message: &str,
         only: Option<&[String]>,
         other_staged: OtherStagedMode,
+        force_dot: bool,
     ) -> Result<CommitOutput> {
         self.ensure_session_scope(working_dir)?;
 
-        match only {
+        let (warnings, skipped) = match only {
             None | Some([]) => {
-                git_cmd(working_dir, &["add", "-A"])?;
+                let candidates = enumerate_changes(working_dir)?;
+                if force_dot || !candidates.iter().any(|p| is_dotfile_path(p)) {
+                    // Fast path: preserves the original `git add -A` sweep
+                    // whenever no dotfile is involved (or the caller opted
+                    // out via force_dot).
+                    git_cmd(working_dir, &["add", "-A"])?;
+                    (Vec::new(), Vec::new())
+                } else {
+                    let cls = classify_paths(working_dir, &candidates, false)?;
+                    stage_add_all(working_dir, &cls.stage)?;
+                    (cls.warnings, cls.skipped)
+                }
             }
             Some(ps) => {
                 let intruders = detect_other_staged(working_dir, ps)?;
@@ -122,9 +150,11 @@ impl GitModule {
                         }
                         OtherStagedMode::Restage => {
                             unstage(working_dir, &intruders)?;
-                            stage(working_dir, ps)?;
+                            let cls = classify_paths(working_dir, ps, force_dot)?;
+                            stage(working_dir, &cls.stage)?;
                             git_cmd(working_dir, &["commit", "-m", message])?;
-                            let output = commit_output(working_dir, message);
+                            let output =
+                                commit_output(working_dir, message, cls.warnings, cls.skipped);
                             // Best-effort re-stage; propagate a stage failure
                             // so the caller sees the intruders are now sitting
                             // in the worktree instead of the index.
@@ -133,12 +163,14 @@ impl GitModule {
                         }
                     }
                 }
-                stage(working_dir, ps)?;
+                let cls = classify_paths(working_dir, ps, force_dot)?;
+                stage(working_dir, &cls.stage)?;
+                (cls.warnings, cls.skipped)
             }
-        }
+        };
 
         git_cmd(working_dir, &["commit", "-m", message])?;
-        commit_output(working_dir, message)
+        commit_output(working_dir, message, warnings, skipped)
     }
 
     /// Merge `branch` into `into_branch` via `--no-ff`. On failure, the
@@ -228,7 +260,12 @@ fn unstage(working_dir: &Path, paths: &[String]) -> Result<()> {
 }
 
 /// Build the [`CommitOutput`] for the commit that HEAD currently points at.
-fn commit_output(working_dir: &Path, message: &str) -> Result<CommitOutput> {
+fn commit_output(
+    working_dir: &Path,
+    message: &str,
+    dotfile_warnings: Vec<DotfileWarning>,
+    dotfile_skipped: Vec<String>,
+) -> Result<CommitOutput> {
     let sha = git_cmd(working_dir, &["rev-parse", "HEAD"])?;
     let short_sha = sha[..7.min(sha.len())].to_string();
     let files_changed = git_cmd(working_dir, &["diff", "--name-only", "HEAD~1..HEAD"])
@@ -242,5 +279,153 @@ fn commit_output(working_dir: &Path, message: &str) -> Result<CommitOutput> {
         short_sha,
         message: message.to_string(),
         files_changed,
+        dotfile_warnings,
+        dotfile_skipped,
     })
+}
+
+/// Result of classifying a candidate path set against the dotfile safeguard.
+struct Classification {
+    /// Paths that should be staged and included in the commit. Contains every
+    /// non-dotfile candidate plus tracked dotfiles (surface change) plus
+    /// everything when `force_dot=true`.
+    stage: Vec<String>,
+    /// Dotfile paths observed during the walk (tracked + untracked-not-ignored).
+    /// Empty when `force_dot=true`.
+    warnings: Vec<DotfileWarning>,
+    /// Dotfile paths dropped from staging (untracked + not in `.gitignore`).
+    /// Silent-ignored dotfiles are not tracked here (they're already invisible
+    /// to `git add -A` and to `git status --porcelain`).
+    skipped: Vec<String>,
+}
+
+/// Split `candidates` into stage / warn / skip buckets per the dotfile safeguard.
+fn classify_paths(
+    working_dir: &Path,
+    candidates: &[String],
+    force_dot: bool,
+) -> Result<Classification> {
+    let mut stage = Vec::new();
+    let mut warnings = Vec::new();
+    let mut skipped = Vec::new();
+
+    for p in candidates {
+        if force_dot || !is_dotfile_path(p) {
+            stage.push(p.clone());
+            continue;
+        }
+        // Dotfile: classify tracked vs untracked.
+        let tracked = is_tracked(working_dir, p)?;
+        if tracked {
+            stage.push(p.clone());
+            warnings.push(DotfileWarning {
+                path: p.clone(),
+                tracked: true,
+                in_gitignore: false,
+            });
+        } else if is_ignored(working_dir, p) {
+            // Silent skip — matches git's default behaviour.
+            skipped.push(p.clone());
+        } else {
+            skipped.push(p.clone());
+            warnings.push(DotfileWarning {
+                path: p.clone(),
+                tracked: false,
+                in_gitignore: false,
+            });
+        }
+    }
+
+    Ok(Classification {
+        stage,
+        warnings,
+        skipped,
+    })
+}
+
+/// `true` when any `/`-separated component of `p` starts with `.` (excluding
+/// `.` / `..` which aren't dotfiles). Matches `.env` at root, nested
+/// `foo/.env`, `.claude/CLAUDE.md`, `.github/workflows/ci.yml`.
+fn is_dotfile_path(p: &str) -> bool {
+    p.split('/')
+        .any(|c| c.starts_with('.') && c != "." && c != "..")
+}
+
+/// Enumerate the paths that `git add -A` would sweep — worktree modifications
+/// plus untracked-and-not-ignored files. Ignored files never surface here (nor
+/// in `git add -A`).
+///
+/// Uses `--porcelain=v1 -z --untracked-files=all` so the output is
+/// nul-delimited, column-stable, AND expands untracked directories into their
+/// contained paths. Without `-uall`, git collapses an untracked directory to a
+/// single `?? dir/` entry — a nested dotfile like `workspace/.journal.db`
+/// then never reaches [`classify_paths`], and the safeguard silently misses
+/// it. `git_cmd`'s trimmed stdout would also strip the leading space from a
+/// single-line ` M path` status code and break the XY-column offset.
+fn enumerate_changes(working_dir: &Path) -> Result<Vec<String>> {
+    let output = Command::new("git")
+        .args(["status", "--porcelain=v1", "-z", "--untracked-files=all"])
+        .current_dir(working_dir)
+        .output()
+        .context("failed to run git status --porcelain")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("git status --porcelain: {}", stderr.trim());
+    }
+
+    let raw = String::from_utf8_lossy(&output.stdout);
+    let mut paths = Vec::new();
+    // Records are nul-terminated. Rename records emit two records back-to-back:
+    // "R  newpath\0oldpath\0" — we only care about the new path, so the oldpath
+    // record is consumed via the peek-and-skip below.
+    let mut it = raw.split('\0').peekable();
+    while let Some(rec) = it.next() {
+        if rec.len() < 4 {
+            continue;
+        }
+        let status = &rec[..2];
+        let path = &rec[3..];
+        if status.starts_with('R') || status.starts_with('C') {
+            // Rename / copy: current record is the NEW path, next record is
+            // the OLD path — skip it.
+            it.next();
+        }
+        if !path.is_empty() {
+            paths.push(path.to_string());
+        }
+    }
+    Ok(paths)
+}
+
+/// `true` when `path` is present in the index (i.e. `git ls-files` returns it).
+/// Covers both files with an existing HEAD entry and freshly-`git add`ed files.
+fn is_tracked(working_dir: &Path, path: &str) -> Result<bool> {
+    let out = git_cmd(working_dir, &["ls-files", "--", path])?;
+    Ok(!out.trim().is_empty())
+}
+
+/// `true` when `git check-ignore` marks `path` as ignored. `check-ignore`
+/// uses exit 1 as "not ignored" (a normal signal, not an error), so this
+/// bypasses [`git_cmd`] and inspects the exit status directly.
+fn is_ignored(working_dir: &Path, path: &str) -> bool {
+    let output = Command::new("git")
+        .args(["check-ignore", "--quiet", "--", path])
+        .current_dir(working_dir)
+        .output();
+    match output {
+        Ok(o) => o.status.code() == Some(0),
+        Err(_) => false,
+    }
+}
+
+/// `git add -A -- <paths>`. Handles deletions in addition to
+/// modifications / additions, unlike plain [`stage`].
+fn stage_add_all(working_dir: &Path, paths: &[String]) -> Result<()> {
+    if paths.is_empty() {
+        return Ok(());
+    }
+    let mut args = vec!["add", "-A", "--"];
+    args.extend(paths.iter().map(|s| s.as_str()));
+    git_cmd(working_dir, &args)?;
+    Ok(())
 }

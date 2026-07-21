@@ -63,7 +63,7 @@ fn worktree_lifecycle() {
     let wt_path = tmp.path().join(".worktrees/test-wt");
     std::fs::write(wt_path.join("new_file.txt"), "content\n").unwrap();
     let commit_result = git
-        .commit(&wt_path, "test commit", None, OtherStagedMode::Stop)
+        .commit(&wt_path, "test commit", None, OtherStagedMode::Stop, false)
         .unwrap();
     assert_eq!(commit_result.sha.len(), 40, "expected full SHA-1");
     assert_eq!(commit_result.message, "test commit");
@@ -245,7 +245,7 @@ fn ownership_guard_rejects_unowned_worktree() {
 
     // commit to unowned worktree should fail
     std::fs::write(foreign_path.join("file.txt"), "x").unwrap();
-    let err = git.commit(&foreign_path, "bad commit", None, OtherStagedMode::Stop);
+    let err = git.commit(&foreign_path, "bad commit", None, OtherStagedMode::Stop, false);
     assert!(err.is_err());
     assert!(
         err.unwrap_err()
@@ -276,6 +276,7 @@ fn commit_allowed_at_session_root() {
         "root commit",
         Some(&["root_file.txt".to_string()]),
         OtherStagedMode::Stop,
+        false,
     );
     let commit = result.expect("commit at session root");
     assert_eq!(commit.sha.len(), 40);
@@ -506,6 +507,7 @@ fn commit_only_commits_just_those_paths() {
             "only keep",
             Some(&["keep.txt".to_string()]),
             OtherStagedMode::Stop,
+            false,
         )
         .expect("commit only=keep.txt");
 
@@ -553,6 +555,7 @@ fn commit_only_stop_refuses_when_index_has_intruders() {
             "should abort",
             Some(&["only.txt".to_string()]),
             OtherStagedMode::Stop,
+            false,
         )
         .expect_err("stop mode must refuse when other paths are staged");
     let msg = err.to_string();
@@ -601,6 +604,7 @@ fn commit_only_restage_survives_round_trip() {
             "only target",
             Some(&["target.txt".to_string()]),
             OtherStagedMode::Restage,
+            false,
         )
         .expect("restage mode commits target and re-stages other");
 
@@ -650,6 +654,7 @@ fn commit_only_stop_ignores_other_unstaged_changes() {
             "only target with unstaged noise",
             Some(&["target.txt".to_string()]),
             OtherStagedMode::Stop,
+            false,
         )
         .expect("stop mode should still succeed when noise is only unstaged");
     assert_eq!(commit.files_changed, 1);
@@ -659,5 +664,347 @@ fn commit_only_stop_ignores_other_unstaged_changes() {
     assert!(
         status.iter().any(|l| l.starts_with(" M README.md")),
         "README.md's unstaged edit must survive, got: {status:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Dotfile / dot-dir safeguard
+// ---------------------------------------------------------------------------
+
+#[test]
+fn commit_skips_untracked_dotfile_not_in_gitignore() {
+    // `.env` newly-dropped without `.gitignore` coverage: the safeguard
+    // must drop it from staging AND warn so the caller sees it.
+    let tmp = tempfile::tempdir().unwrap();
+    init_temp_repo(tmp.path());
+    let session = make_session(tmp.path());
+    let git = GitModule::new(session);
+
+    std::fs::write(tmp.path().join(".env"), "SECRET=1\n").unwrap();
+    std::fs::write(tmp.path().join("safe.txt"), "safe\n").unwrap();
+
+    let commit = git
+        .commit(
+            tmp.path(),
+            "commit with dotfile in tree",
+            None,
+            OtherStagedMode::Stop,
+            false,
+        )
+        .expect("commit should succeed with safe.txt only");
+
+    assert_eq!(
+        commit.files_changed, 1,
+        "only safe.txt should be committed"
+    );
+    assert!(
+        commit.dotfile_skipped.iter().any(|p| p == ".env"),
+        "expected .env in dotfile_skipped, got {:?}",
+        commit.dotfile_skipped
+    );
+    assert!(
+        commit
+            .dotfile_warnings
+            .iter()
+            .any(|w| w.path == ".env" && !w.tracked && !w.in_gitignore),
+        "expected untracked+not-ignored .env warning, got {:?}",
+        commit.dotfile_warnings
+    );
+
+    // `.env` is still untracked on disk — never made it into the index.
+    let status = porcelain_status(tmp.path());
+    assert!(
+        status.iter().any(|l| l.starts_with("?? ") && l.ends_with(".env")),
+        ".env must remain untracked, got: {status:?}"
+    );
+}
+
+#[test]
+fn commit_silently_skips_gitignored_dotfile() {
+    // `.env` covered by `.gitignore`: git already hides it from
+    // porcelain, so it never even shows up as a candidate. No warning
+    // should be emitted for the silent case.
+    let tmp = tempfile::tempdir().unwrap();
+    init_temp_repo(tmp.path());
+    let session = make_session(tmp.path());
+    let git = GitModule::new(session);
+
+    std::fs::write(tmp.path().join(".gitignore"), ".env\n").unwrap();
+    // Commit .gitignore first so it's tracked and quiet on subsequent runs.
+    let _ = git
+        .commit(
+            tmp.path(),
+            "add .gitignore",
+            Some(&[".gitignore".to_string()]),
+            OtherStagedMode::Stop,
+            true, // force_dot: bootstrap the safeguard itself
+        )
+        .expect("bootstrap .gitignore");
+
+    std::fs::write(tmp.path().join(".env"), "SECRET=1\n").unwrap();
+    std::fs::write(tmp.path().join("safe.txt"), "safe\n").unwrap();
+
+    let commit = git
+        .commit(
+            tmp.path(),
+            "commit with ignored .env in tree",
+            None,
+            OtherStagedMode::Stop,
+            false,
+        )
+        .expect("commit safe.txt only");
+
+    assert_eq!(commit.files_changed, 1);
+    assert!(
+        commit.dotfile_warnings.is_empty(),
+        "ignored .env must not warn, got {:?}",
+        commit.dotfile_warnings
+    );
+    assert!(
+        commit.dotfile_skipped.is_empty(),
+        "ignored .env is already invisible to porcelain, got {:?}",
+        commit.dotfile_skipped
+    );
+}
+
+#[test]
+fn commit_warns_but_includes_tracked_dotfile_change() {
+    // Modify a tracked `.gitignore`: safeguard lets the change through
+    // (tracked = intentional) but records a warning so pre-publish
+    // review can catch unintended edits.
+    let tmp = tempfile::tempdir().unwrap();
+    init_temp_repo(tmp.path());
+    let session = make_session(tmp.path());
+    let git = GitModule::new(session);
+
+    std::fs::write(tmp.path().join(".gitignore"), "old\n").unwrap();
+    let _ = git
+        .commit(
+            tmp.path(),
+            "add .gitignore",
+            Some(&[".gitignore".to_string()]),
+            OtherStagedMode::Stop,
+            true,
+        )
+        .expect("bootstrap tracked .gitignore");
+
+    // Now edit it.
+    std::fs::write(tmp.path().join(".gitignore"), "old\nnew line\n").unwrap();
+
+    let commit = git
+        .commit(
+            tmp.path(),
+            "update .gitignore",
+            None,
+            OtherStagedMode::Stop,
+            false,
+        )
+        .expect("commit tracked dotfile change");
+
+    assert_eq!(commit.files_changed, 1, ".gitignore edit must be committed");
+    assert!(
+        commit
+            .dotfile_warnings
+            .iter()
+            .any(|w| w.path == ".gitignore" && w.tracked),
+        "expected tracked .gitignore warning, got {:?}",
+        commit.dotfile_warnings
+    );
+    assert!(
+        commit.dotfile_skipped.is_empty(),
+        "tracked dotfile must not appear in skipped, got {:?}",
+        commit.dotfile_skipped
+    );
+}
+
+#[test]
+fn commit_force_dot_suppresses_safeguard() {
+    // `force_dot=true`: `.env` gets staged and committed like any other
+    // file, no warning, no skip. This is the manual override path.
+    let tmp = tempfile::tempdir().unwrap();
+    init_temp_repo(tmp.path());
+    let session = make_session(tmp.path());
+    let git = GitModule::new(session);
+
+    std::fs::write(tmp.path().join(".env"), "SECRET=1\n").unwrap();
+
+    let commit = git
+        .commit(
+            tmp.path(),
+            "force-commit .env",
+            None,
+            OtherStagedMode::Stop,
+            true,
+        )
+        .expect("force_dot must let .env through");
+
+    assert_eq!(commit.files_changed, 1);
+    assert!(
+        commit.dotfile_warnings.is_empty(),
+        "force_dot must suppress warnings, got {:?}",
+        commit.dotfile_warnings
+    );
+    assert!(
+        commit.dotfile_skipped.is_empty(),
+        "force_dot must suppress skip list, got {:?}",
+        commit.dotfile_skipped
+    );
+
+    // .env is now tracked at HEAD.
+    let listed = Command::new("git")
+        .args(["show", "--name-only", "--pretty=format:", "HEAD"])
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+    let listed = String::from_utf8_lossy(&listed.stdout);
+    assert!(
+        listed.contains(".env"),
+        "force_dot commit should include .env: {listed}"
+    );
+}
+
+#[test]
+fn commit_only_drops_dotfile_from_explicit_paths() {
+    // `only=[.env, safe.txt]` with safeguard on: `.env` is filtered
+    // out of the stage list, `safe.txt` proceeds. HEAD contains only
+    // safe.txt afterward.
+    let tmp = tempfile::tempdir().unwrap();
+    init_temp_repo(tmp.path());
+    let session = make_session(tmp.path());
+    let git = GitModule::new(session);
+
+    std::fs::write(tmp.path().join(".env"), "SECRET=1\n").unwrap();
+    std::fs::write(tmp.path().join("safe.txt"), "safe\n").unwrap();
+
+    let commit = git
+        .commit(
+            tmp.path(),
+            "explicit paths with dotfile filtered",
+            Some(&[".env".to_string(), "safe.txt".to_string()]),
+            OtherStagedMode::Stop,
+            false,
+        )
+        .expect("commit should proceed with safe.txt only");
+
+    assert_eq!(commit.files_changed, 1);
+    assert!(
+        commit.dotfile_skipped.iter().any(|p| p == ".env"),
+        "expected .env skipped, got {:?}",
+        commit.dotfile_skipped
+    );
+
+    let listed = Command::new("git")
+        .args(["show", "--name-only", "--pretty=format:", "HEAD"])
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+    let listed = String::from_utf8_lossy(&listed.stdout);
+    assert!(listed.contains("safe.txt"));
+    assert!(
+        !listed.contains(".env"),
+        "safeguard-filtered .env must not land in commit: {listed}"
+    );
+}
+
+#[test]
+fn commit_detects_dotfile_under_untracked_nondot_dir() {
+    // Regression: previously the safeguard missed `foo/.hidden` because
+    // `git status --porcelain` collapsed the untracked `foo/` into a
+    // single `?? foo/` record, so the dotfile-classifier only ever saw
+    // `foo/` (non-dot) and let git recursively stage everything under it.
+    // Fixed by `--untracked-files=all`. Origin: 2026-07-22 jikki smoke
+    // that saw `session_start`'s `workspace/.journal.db*` slip through.
+    let tmp = tempfile::tempdir().unwrap();
+    init_temp_repo(tmp.path());
+    let session = make_session(tmp.path());
+    let git = GitModule::new(session);
+
+    // Untracked non-dot dir with an untracked nested dotfile.
+    std::fs::create_dir_all(tmp.path().join("data")).unwrap();
+    std::fs::write(tmp.path().join("data/.hidden"), "secret\n").unwrap();
+    std::fs::write(tmp.path().join("data/public.txt"), "ok\n").unwrap();
+
+    let commit = git
+        .commit(
+            tmp.path(),
+            "nested dotfile under untracked non-dot dir",
+            None,
+            OtherStagedMode::Stop,
+            false,
+        )
+        .expect("commit should proceed with data/public.txt only");
+
+    assert!(
+        commit
+            .dotfile_skipped
+            .iter()
+            .any(|p| p == "data/.hidden"),
+        "expected data/.hidden in dotfile_skipped, got {:?}",
+        commit.dotfile_skipped
+    );
+    assert!(
+        commit
+            .dotfile_warnings
+            .iter()
+            .any(|w| w.path == "data/.hidden" && !w.tracked),
+        "expected untracked warning for data/.hidden, got {:?}",
+        commit.dotfile_warnings
+    );
+
+    // HEAD must contain data/public.txt but NOT data/.hidden.
+    let listed = Command::new("git")
+        .args(["show", "--name-only", "--pretty=format:", "HEAD"])
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+    let listed = String::from_utf8_lossy(&listed.stdout);
+    assert!(
+        listed.contains("data/public.txt"),
+        "commit should include data/public.txt: {listed}"
+    );
+    assert!(
+        !listed.contains(".hidden"),
+        "safeguard-filtered data/.hidden must not land in commit: {listed}"
+    );
+
+    // data/.hidden is still on disk, untracked.
+    let status = porcelain_status(tmp.path());
+    assert!(
+        status.iter().any(|l| l.ends_with("data/.hidden")),
+        "data/.hidden must remain untracked, got: {status:?}"
+    );
+}
+
+#[test]
+fn commit_detects_nested_dotdir_component() {
+    // `.claude/CLAUDE.md`: dot component is not the basename but a
+    // path segment. is_dotfile_path must still catch it.
+    let tmp = tempfile::tempdir().unwrap();
+    init_temp_repo(tmp.path());
+    let session = make_session(tmp.path());
+    let git = GitModule::new(session);
+
+    std::fs::create_dir_all(tmp.path().join(".claude")).unwrap();
+    std::fs::write(tmp.path().join(".claude/CLAUDE.md"), "hi\n").unwrap();
+    std::fs::write(tmp.path().join("safe.txt"), "safe\n").unwrap();
+
+    let commit = git
+        .commit(
+            tmp.path(),
+            "nested dot-dir",
+            None,
+            OtherStagedMode::Stop,
+            false,
+        )
+        .expect("commit safe.txt only");
+
+    assert_eq!(commit.files_changed, 1);
+    assert!(
+        commit
+            .dotfile_skipped
+            .iter()
+            .any(|p| p.starts_with(".claude/")),
+        "expected .claude/... in skipped, got {:?}",
+        commit.dotfile_skipped
     );
 }
