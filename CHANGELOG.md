@@ -6,6 +6,20 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+### Changed
+
+### Deprecated
+
+### Removed
+
+### Fixed
+
+### Security
+
+## [0.12.0] - 2026-07-21
+
+### Added
+
 - **`git_log` — author / paths / since / grep filters** — the `git_log`
   MCP tool now takes four optional narrowing fields (all AND-combined):
   `author` (case-sensitive substring against `"Name <email>"`),

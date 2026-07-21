@@ -11,9 +11,9 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
-lds-core = { path = "../core", version = "0.11.0" }
-lds-git = { path = "../git", version = "0.11.0" }
-lds-gh = { path = "../gh", version = "0.11.0" }
+lds-core = { path = "../core", version = "0.12.0" }
+lds-git = { path = "../git", version = "0.12.0" }
+lds-gh = { path = "../gh", version = "0.12.0" }
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
