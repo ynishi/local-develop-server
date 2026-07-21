@@ -59,6 +59,10 @@ pub struct CommitEntry {
     pub short_sha: String,
     /// First line of the commit message.
     pub summary: String,
+    /// Commit author in `"Name <email>"` form.
+    pub author: String,
+    /// Commit author time, unix epoch seconds.
+    pub timestamp: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

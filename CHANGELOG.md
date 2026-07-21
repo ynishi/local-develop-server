@@ -6,7 +6,33 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **`git_log` — author / paths / since / grep filters** — the `git_log`
+  MCP tool now takes four optional narrowing fields (all AND-combined):
+  `author` (case-sensitive substring against `"Name <email>"`),
+  `paths` (git pathspec list; a commit is kept when its diff against its
+  first parent touches at least one entry), `since` (cutoff for
+  `commit.author_time`, accepts either a unix epoch integer or an RFC 3339
+  string like `"2026-07-14T00:00:00Z"` / `"2026-07-14T09:00:00+09:00"`),
+  and `grep` (case-sensitive substring against the full commit message).
+  `max_count` still caps the post-filter result count and defaults to 20.
+- **`CommitEntry` gains `author` + `timestamp` fields** — every commit
+  entry returned by `git_log` and `git_unpushed_commits` now includes the
+  author string (`"Name <email>"` form) and the commit author time as a
+  unix epoch integer, so callers can filter / sort without a second call.
+- **`LogFilters` re-export from `lds-git`** — new public struct on the
+  library surface for programmatic callers building narrowed log queries.
+- **`chrono` dependency on the `lds` crate** — pulled in with
+  `default-features = false, features = ["std"]` to parse RFC 3339
+  timestamps in the `git_log.since` wire field. Already present in the
+  workspace lockfile transitively; no new fetch on `cargo build`.
+
 ### Changed
+
+- **`GitModule::log` signature — `log(max_count)` → `log(LogFilters)`** —
+  breaking change for direct `lds-git` library consumers; the MCP wire
+  contract (`git_log` tool) stays backward compatible via optional fields
+  on `GitLogReq` (all new fields default to `None`, existing `{max_count}`
+  calls behave identically).
 
 ### Deprecated
 

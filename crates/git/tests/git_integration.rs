@@ -3,7 +3,7 @@ use std::process::Command;
 use std::sync::Arc;
 
 use lds_core::{Session, SessionConfig};
-use lds_git::{GitModule, OtherStagedMode, ResetMode};
+use lds_git::{GitModule, LogFilters, OtherStagedMode, ResetMode};
 
 fn init_temp_repo(dir: &Path) {
     let run = |args: &[&str]| {
@@ -87,13 +87,137 @@ fn worktree_lifecycle() {
     assert!(tmp.path().join("new_file.txt").exists());
 
     // git log should show the merge commit
-    let log = git.log(5).unwrap();
+    let log = git
+        .log(LogFilters {
+            max_count: 5,
+            ..Default::default()
+        })
+        .unwrap();
     assert!(
         log.commits
             .iter()
             .any(|c| c.summary.contains("Merge branch")),
         "expected a 'Merge branch' commit in log, got: {log:?}"
     );
+}
+
+#[test]
+fn log_filters_by_author_paths_and_since() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    let run = |args: &[&str]| {
+        Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .expect("git");
+    };
+    run(&["init", "-b", "main"]);
+    run(&["config", "user.email", "alice@example.com"]);
+    run(&["config", "user.name", "Alice"]);
+
+    std::fs::write(dir.join("a.txt"), "1\n").unwrap();
+    run(&["add", "."]);
+    run(&["commit", "-m", "add a.txt"]);
+
+    // Rewrite the second commit under Bob.
+    run(&["config", "user.email", "bob@example.com"]);
+    run(&["config", "user.name", "Bob"]);
+    std::fs::write(dir.join("b.txt"), "2\n").unwrap();
+    run(&["add", "."]);
+    run(&["commit", "-m", "add b.txt"]);
+
+    // Third commit — Alice again — touches only a.txt.
+    run(&["config", "user.email", "alice@example.com"]);
+    run(&["config", "user.name", "Alice"]);
+    std::fs::write(dir.join("a.txt"), "1\n2\n").unwrap();
+    run(&["add", "."]);
+    run(&["commit", "-m", "update a.txt"]);
+
+    std::fs::create_dir_all(dir.join(".worktrees")).unwrap();
+    let session = make_session(dir);
+    let git = GitModule::new(session);
+
+    // author filter — only Bob's commit survives.
+    let bob_only = git
+        .log(LogFilters {
+            max_count: 10,
+            author: Some("Bob".to_string()),
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(bob_only.commits.len(), 1);
+    assert_eq!(bob_only.commits[0].summary, "add b.txt");
+    assert!(bob_only.commits[0].author.contains("bob@example.com"));
+
+    // path filter — commits touching b.txt (only the second).
+    let touches_b = git
+        .log(LogFilters {
+            max_count: 10,
+            paths: Some(vec!["b.txt".to_string()]),
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(touches_b.commits.len(), 1);
+    assert_eq!(touches_b.commits[0].summary, "add b.txt");
+
+    // path filter — commits touching a.txt (first + third).
+    let touches_a = git
+        .log(LogFilters {
+            max_count: 10,
+            paths: Some(vec!["a.txt".to_string()]),
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(touches_a.commits.len(), 2);
+
+    // since filter — cutoff after the third commit's author time drops all.
+    let head_ts = touches_a.commits[0].timestamp;
+    let none = git
+        .log(LogFilters {
+            max_count: 10,
+            since: Some(head_ts + 1),
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(none.commits.len(), 0);
+
+    // max_count is applied post-filter.
+    let capped = git
+        .log(LogFilters {
+            max_count: 1,
+            author: Some("Alice".to_string()),
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(capped.commits.len(), 1);
+
+    // grep filter — matches subject substring only.
+    let updates = git
+        .log(LogFilters {
+            max_count: 10,
+            grep: Some("update".to_string()),
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(updates.commits.len(), 1);
+    assert_eq!(updates.commits[0].summary, "update a.txt");
+
+    let no_match = git
+        .log(LogFilters {
+            max_count: 10,
+            grep: Some("does-not-appear".to_string()),
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(no_match.commits.len(), 0);
+
+    // metadata fields are populated.
+    let head = &touches_a.commits[0];
+    assert_eq!(head.sha.len(), 40);
+    assert_eq!(head.short_sha.len(), 7);
+    assert!(head.author.starts_with("Alice <"));
+    assert!(head.timestamp > 0);
 }
 
 #[test]

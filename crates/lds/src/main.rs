@@ -9,7 +9,7 @@ use anyhow::Result;
 use lds_core::config::Config;
 use lds_core::{LdsState, Session, SessionConfig, check_binaries};
 use lds_gh::GhModule;
-use lds_git::{GitModule, OtherStagedMode, ResetMode};
+use lds_git::{GitModule, LogFilters, OtherStagedMode, ResetMode};
 use lds_journal::JournalModule;
 use lds_outline::OutlineModule;
 use lds_publicity::{Platform, PublicityModule};
@@ -345,6 +345,47 @@ struct PublicityReq {
 struct GitLogReq {
     #[serde(default = "default_max_count")]
     max_count: usize,
+    /// Case-sensitive substring against `"Name <email>"`.
+    #[serde(default)]
+    author: Option<String>,
+    /// Git pathspec entries; a commit is kept when it touches at least one.
+    #[serde(default)]
+    paths: Option<Vec<String>>,
+    /// Cutoff for commit author time. Accepts either a unix epoch integer
+    /// (seconds) or an RFC 3339 timestamp string (e.g. `"2026-07-14T00:00:00Z"`
+    /// or `"2026-07-14T09:00:00+09:00"`).
+    #[serde(default)]
+    since: Option<SinceInput>,
+    /// Case-sensitive substring against the full commit message.
+    #[serde(default)]
+    grep: Option<String>,
+}
+
+/// Wire-level shape for `since`: an epoch integer or an RFC 3339 string.
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(untagged)]
+enum SinceInput {
+    Epoch(i64),
+    Rfc3339(String),
+}
+
+impl SinceInput {
+    fn to_epoch(&self) -> Result<i64, String> {
+        match self {
+            SinceInput::Epoch(n) => Ok(*n),
+            SinceInput::Rfc3339(s) => parse_since_string(s),
+        }
+    }
+}
+
+fn parse_since_string(s: &str) -> Result<i64, String> {
+    let trimmed = s.trim();
+    if let Ok(n) = trimmed.parse::<i64>() {
+        return Ok(n);
+    }
+    chrono::DateTime::parse_from_rfc3339(trimmed)
+        .map(|dt| dt.timestamp())
+        .map_err(|e| format!("since: not a valid unix epoch or RFC 3339 timestamp: {e}"))
 }
 
 fn default_max_count() -> usize {
@@ -991,15 +1032,37 @@ impl LdsServer {
         json_result(&out)
     }
 
-    #[tool(description = "Show git commit log as JSON ({commits: [{sha, short_sha, summary}]})")]
+    #[tool(
+        description = "Show git commit log as JSON ({commits: [{sha, short_sha, summary, author, timestamp}]}). \
+Filters (all optional, AND-combined): `author` (case-sensitive substring against \"Name <email>\"), \
+`paths` (git pathspec list; commit kept when it touches at least one entry), \
+`since` (cutoff for commit.author_time; accepts unix epoch integer or RFC 3339 string like \"2026-07-14T00:00:00Z\"), \
+`grep` (case-sensitive substring against the full commit message). \
+`max_count` caps the post-filter result count."
+    )]
     async fn git_log(
         &self,
         Parameters(req): Parameters<GitLogReq>,
     ) -> Result<CallToolResult, McpError> {
+        let since = match req.since {
+            Some(input) => Some(
+                input
+                    .to_epoch()
+                    .map_err(|e| McpError::invalid_params(e, None))?,
+            ),
+            None => None,
+        };
         let inner = self.state.read().await;
         let git = inner.git.as_ref().ok_or_else(no_session_error)?;
+        let filters = LogFilters {
+            max_count: req.max_count,
+            author: req.author,
+            paths: req.paths,
+            since,
+            grep: req.grep,
+        };
         let out = git
-            .log(req.max_count)
+            .log(filters)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         json_result(&out)
     }
@@ -2886,5 +2949,33 @@ mod tests {
         };
         let dirs = resolve_startup_global_dirs(cfg, None);
         assert_eq!(dirs, vec![PathBuf::from("/config/only")]);
+    }
+
+    #[test]
+    fn parse_since_string_accepts_epoch_integer() {
+        assert_eq!(parse_since_string("1751932800").unwrap(), 1751932800);
+        assert_eq!(parse_since_string("0").unwrap(), 0);
+        assert_eq!(parse_since_string("  42  ").unwrap(), 42);
+    }
+
+    #[test]
+    fn parse_since_string_accepts_rfc3339_utc() {
+        // 2026-07-14T00:00:00Z.
+        let epoch = parse_since_string("2026-07-14T00:00:00Z").unwrap();
+        assert_eq!(epoch, 1_783_987_200);
+    }
+
+    #[test]
+    fn parse_since_string_accepts_rfc3339_with_offset() {
+        // 2026-07-14T09:00:00+09:00 == 2026-07-14T00:00:00Z.
+        let with_offset = parse_since_string("2026-07-14T09:00:00+09:00").unwrap();
+        let utc = parse_since_string("2026-07-14T00:00:00Z").unwrap();
+        assert_eq!(with_offset, utc);
+    }
+
+    #[test]
+    fn parse_since_string_rejects_garbage() {
+        assert!(parse_since_string("yesterday").is_err());
+        assert!(parse_since_string("2026-99-99T00:00:00Z").is_err());
     }
 }

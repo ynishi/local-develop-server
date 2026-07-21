@@ -258,9 +258,10 @@ mod tests {
         let dir = TempDir::new().unwrap(); // justification: TempDir::new is infallible in practice; any failure surfaces as a test setup panic which is acceptable in test code
         let path = dir.path().join("config.toml");
 
+        let other_root = TempDir::new().unwrap();
         let dirs_in = vec![
-            PathBuf::from("/opt/shared-recipes"),
-            PathBuf::from("/home/user/team-recipes"),
+            dir.path().join("shared-recipes"),
+            other_root.path().join("team-recipes"),
         ];
 
         Config::save(&path, &dirs_in).expect("save should succeed");

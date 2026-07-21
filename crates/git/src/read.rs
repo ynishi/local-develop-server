@@ -6,13 +6,33 @@
 use std::path::PathBuf;
 
 use anyhow::Result;
-use git2::{Repository, Status, StatusOptions};
+use git2::{DiffOptions, Repository, Status, StatusOptions};
 
 use crate::output::{
     CommitEntry, DiffOutput, EntryStatus, LogOutput, StatusKind, StatusOutput, WorktreeEntry,
     WorktreeListOutput,
 };
 use crate::{GitModule, git_cmd};
+
+/// Optional narrowing for [`GitModule::log`]. All fields are AND-combined; an
+/// absent field imposes no constraint.
+#[derive(Debug, Clone, Default)]
+pub struct LogFilters {
+    /// Cap on how many matching commits to return (post-filter).
+    pub max_count: usize,
+    /// Case-sensitive substring match against `"Name <email>"`.
+    pub author: Option<String>,
+    /// Git pathspec entries; a commit is kept when its diff against its first
+    /// parent (or against the empty tree for the root commit) touches at least
+    /// one entry. Empty vec is treated as "no path filter".
+    pub paths: Option<Vec<String>>,
+    /// Keep only commits whose author time is `>=` this value (unix epoch
+    /// seconds).
+    pub since: Option<i64>,
+    /// Case-sensitive substring match against the full commit message
+    /// (subject + body).
+    pub grep: Option<String>,
+}
 
 impl GitModule {
     /// Inspect the working tree and produce a [`StatusOutput`] split into
@@ -85,25 +105,82 @@ impl GitModule {
         })
     }
 
-    /// Walk HEAD back up to `max_count` commits.
-    pub fn log(&self, max_count: usize) -> Result<LogOutput> {
+    /// Walk HEAD backwards, applying [`LogFilters`] and returning at most
+    /// `filters.max_count` matching commits.
+    pub fn log(&self, filters: LogFilters) -> Result<LogOutput> {
         let repo = Repository::open(self.session().root())?;
         let mut revwalk = repo.revwalk()?;
         revwalk.push_head()?;
+
+        let path_specs = filters
+            .paths
+            .as_ref()
+            .and_then(|p| if p.is_empty() { None } else { Some(p.clone()) });
+
         let mut commits = Vec::new();
-        for (i, oid) in revwalk.enumerate() {
-            if i >= max_count {
+        for oid in revwalk {
+            if commits.len() >= filters.max_count {
                 break;
             }
             let oid = oid?;
             let commit = repo.find_commit(oid)?;
+
+            if let Some(min_ts) = filters.since
+                && commit.time().seconds() < min_ts
+            {
+                continue;
+            }
+
+            if let Some(needle) = &filters.author {
+                let name = commit.author().name().unwrap_or("").to_string();
+                let email = commit.author().email().unwrap_or("").to_string();
+                let full = format!("{name} <{email}>");
+                if !full.contains(needle.as_str()) {
+                    continue;
+                }
+            }
+
+            if let Some(needle) = &filters.grep {
+                let message = commit.message().unwrap_or("");
+                if !message.contains(needle.as_str()) {
+                    continue;
+                }
+            }
+
+            if let Some(specs) = &path_specs {
+                let commit_tree = commit.tree()?;
+                let parent_tree = if commit.parent_count() > 0 {
+                    Some(commit.parent(0)?.tree()?)
+                } else {
+                    None
+                };
+                let mut diff_opts = DiffOptions::new();
+                for spec in specs {
+                    diff_opts.pathspec(spec);
+                }
+                let diff = repo.diff_tree_to_tree(
+                    parent_tree.as_ref(),
+                    Some(&commit_tree),
+                    Some(&mut diff_opts),
+                )?;
+                if diff.deltas().len() == 0 {
+                    continue;
+                }
+            }
+
             let sha = oid.to_string();
             let short_sha = sha[..7.min(sha.len())].to_string();
             let summary = commit.summary().unwrap_or("").to_string();
+            let author_name = commit.author().name().unwrap_or("").to_string();
+            let author_email = commit.author().email().unwrap_or("").to_string();
+            let author = format!("{author_name} <{author_email}>");
+            let timestamp = commit.time().seconds();
             commits.push(CommitEntry {
                 sha,
                 short_sha,
                 summary,
+                author,
+                timestamp,
             });
         }
         Ok(LogOutput { commits })

@@ -26,6 +26,8 @@ mod reset;
 mod session;
 mod write;
 
+pub use read::LogFilters;
+
 pub use output::{
     BranchDeleteOutput, BranchStatusOutput, CommitEntry, CommitOutput, DiffOutput, EntryStatus,
     FetchOutput, IsPushedOutput, LogOutput, MergeOutput, OtherStagedMode, RemoteEntry,

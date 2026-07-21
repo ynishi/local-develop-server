@@ -130,7 +130,7 @@ impl GitModule {
             self.session().root(),
             &[
                 "log",
-                "--format=%H%x09%s",
+                "--format=%H%x09%an <%ae>%x09%at%x09%s",
                 &format!("{remote_ref}..{branch}"),
             ],
         )?;
@@ -139,12 +139,18 @@ impl GitModule {
             if line.is_empty() {
                 continue;
             }
-            let (sha, summary) = line.split_once('\t').unwrap_or((line, ""));
+            let mut parts = line.splitn(4, '\t');
+            let sha = parts.next().unwrap_or("");
+            let author = parts.next().unwrap_or("").to_string();
+            let timestamp = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+            let summary = parts.next().unwrap_or("").to_string();
             let short_sha = sha[..7.min(sha.len())].to_string();
             commits.push(CommitEntry {
                 sha: sha.to_string(),
                 short_sha,
-                summary: summary.to_string(),
+                summary,
+                author,
+                timestamp,
             });
         }
         Ok(UnpushedCommitsOutput {
