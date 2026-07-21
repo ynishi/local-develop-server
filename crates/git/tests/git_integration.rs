@@ -245,7 +245,13 @@ fn ownership_guard_rejects_unowned_worktree() {
 
     // commit to unowned worktree should fail
     std::fs::write(foreign_path.join("file.txt"), "x").unwrap();
-    let err = git.commit(&foreign_path, "bad commit", None, OtherStagedMode::Stop, false);
+    let err = git.commit(
+        &foreign_path,
+        "bad commit",
+        None,
+        OtherStagedMode::Stop,
+        false,
+    );
     assert!(err.is_err());
     assert!(
         err.unwrap_err()
@@ -693,10 +699,7 @@ fn commit_skips_untracked_dotfile_not_in_gitignore() {
         )
         .expect("commit should succeed with safe.txt only");
 
-    assert_eq!(
-        commit.files_changed, 1,
-        "only safe.txt should be committed"
-    );
+    assert_eq!(commit.files_changed, 1, "only safe.txt should be committed");
     assert!(
         commit.dotfile_skipped.iter().any(|p| p == ".env"),
         "expected .env in dotfile_skipped, got {:?}",
@@ -714,7 +717,9 @@ fn commit_skips_untracked_dotfile_not_in_gitignore() {
     // `.env` is still untracked on disk — never made it into the index.
     let status = porcelain_status(tmp.path());
     assert!(
-        status.iter().any(|l| l.starts_with("?? ") && l.ends_with(".env")),
+        status
+            .iter()
+            .any(|l| l.starts_with("?? ") && l.ends_with(".env")),
         ".env must remain untracked, got: {status:?}"
     );
 }
@@ -935,10 +940,7 @@ fn commit_detects_dotfile_under_untracked_nondot_dir() {
         .expect("commit should proceed with data/public.txt only");
 
     assert!(
-        commit
-            .dotfile_skipped
-            .iter()
-            .any(|p| p == "data/.hidden"),
+        commit.dotfile_skipped.iter().any(|p| p == "data/.hidden"),
         "expected data/.hidden in dotfile_skipped, got {:?}",
         commit.dotfile_skipped
     );
