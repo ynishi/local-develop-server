@@ -6,7 +6,6 @@
 //! setup safe.
 
 use std::path::Path;
-use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
@@ -14,11 +13,11 @@ use crate::output::{
     BranchDeleteOutput, CommitOutput, DotfileWarning, MergeOutput, OtherStagedMode,
     WorktreeAddOutput, WorktreeRemoveOutput,
 };
-use crate::{GitModule, git_cmd};
+use crate::{GitModule, TIMEOUT_LOCAL, git_cmd};
 
 impl GitModule {
     /// Create a new worktree under `.worktrees/<name>` on a new branch.
-    pub fn worktree_add(
+    pub async fn worktree_add(
         &mut self,
         name: &str,
         branch: &str,
@@ -37,12 +36,16 @@ impl GitModule {
             git_cmd(
                 self.session().root(),
                 &["worktree", "add", "-b", branch, path_str, base],
-            )?;
+                TIMEOUT_LOCAL,
+            )
+            .await?;
         } else {
             git_cmd(
                 self.session().root(),
                 &["worktree", "add", "-b", branch, path_str],
-            )?;
+                TIMEOUT_LOCAL,
+            )
+            .await?;
         }
 
         let canon = wt_path.canonicalize().unwrap_or_else(|_| wt_path.clone());
@@ -57,7 +60,7 @@ impl GitModule {
     }
 
     /// Remove a session-owned worktree (force-removed, then forgotten).
-    pub fn worktree_remove(&mut self, name: &str) -> Result<WorktreeRemoveOutput> {
+    pub async fn worktree_remove(&mut self, name: &str) -> Result<WorktreeRemoveOutput> {
         let wt_path = self.worktrees_dir().join(name);
         let canon = wt_path.canonicalize().unwrap_or_else(|_| wt_path.clone());
 
@@ -72,7 +75,9 @@ impl GitModule {
                 "--force",
                 wt_path.to_str().unwrap_or(name),
             ],
-        )?;
+            TIMEOUT_LOCAL,
+        )
+        .await?;
 
         self.forget_worktree(&canon);
         self.forget_worktree(&wt_path);
@@ -112,7 +117,7 @@ impl GitModule {
     ///   default; `git status --porcelain` doesn't surface them either).
     /// * `force_dot=true` → suppresses the entire mechanism: every candidate
     ///   is staged verbatim and no warnings are emitted.
-    pub fn commit(
+    pub async fn commit(
         &self,
         working_dir: &Path,
         message: &str,
@@ -124,21 +129,21 @@ impl GitModule {
 
         let (warnings, skipped) = match only {
             None | Some([]) => {
-                let candidates = enumerate_changes(working_dir)?;
+                let candidates = enumerate_changes(working_dir).await?;
                 if force_dot || !candidates.iter().any(|p| is_dotfile_path(p)) {
                     // Fast path: preserves the original `git add -A` sweep
                     // whenever no dotfile is involved (or the caller opted
                     // out via force_dot).
-                    git_cmd(working_dir, &["add", "-A"])?;
+                    git_cmd(working_dir, &["add", "-A"], TIMEOUT_LOCAL).await?;
                     (Vec::new(), Vec::new())
                 } else {
-                    let cls = classify_paths(working_dir, &candidates, false)?;
-                    stage_add_all(working_dir, &cls.stage)?;
+                    let cls = classify_paths(working_dir, &candidates, false).await?;
+                    stage_add_all(working_dir, &cls.stage).await?;
                     (cls.warnings, cls.skipped)
                 }
             }
             Some(ps) => {
-                let intruders = detect_other_staged(working_dir, ps)?;
+                let intruders = detect_other_staged(working_dir, ps).await?;
                 if !intruders.is_empty() {
                     match other_staged {
                         OtherStagedMode::Stop => {
@@ -149,33 +154,34 @@ impl GitModule {
                             );
                         }
                         OtherStagedMode::Restage => {
-                            unstage(working_dir, &intruders)?;
-                            let cls = classify_paths(working_dir, ps, force_dot)?;
-                            stage(working_dir, &cls.stage)?;
-                            git_cmd(working_dir, &["commit", "-m", message])?;
+                            unstage(working_dir, &intruders).await?;
+                            let cls = classify_paths(working_dir, ps, force_dot).await?;
+                            stage(working_dir, &cls.stage).await?;
+                            git_cmd(working_dir, &["commit", "-m", message], TIMEOUT_LOCAL).await?;
                             let output =
-                                commit_output(working_dir, message, cls.warnings, cls.skipped);
+                                commit_output(working_dir, message, cls.warnings, cls.skipped)
+                                    .await;
                             // Best-effort re-stage; propagate a stage failure
                             // so the caller sees the intruders are now sitting
                             // in the worktree instead of the index.
-                            stage(working_dir, &intruders)?;
+                            stage(working_dir, &intruders).await?;
                             return output;
                         }
                     }
                 }
-                let cls = classify_paths(working_dir, ps, force_dot)?;
-                stage(working_dir, &cls.stage)?;
+                let cls = classify_paths(working_dir, ps, force_dot).await?;
+                stage(working_dir, &cls.stage).await?;
                 (cls.warnings, cls.skipped)
             }
         };
 
-        git_cmd(working_dir, &["commit", "-m", message])?;
-        commit_output(working_dir, message, warnings, skipped)
+        git_cmd(working_dir, &["commit", "-m", message], TIMEOUT_LOCAL).await?;
+        commit_output(working_dir, message, warnings, skipped).await
     }
 
     /// Merge `branch` into `into_branch` via `--no-ff`. On failure, the
     /// merge is auto-aborted and the original error surfaces.
-    pub fn merge(
+    pub async fn merge(
         &self,
         branch: &str,
         into_branch: &str,
@@ -183,18 +189,21 @@ impl GitModule {
     ) -> Result<MergeOutput> {
         self.ensure_session_scope(working_dir)?;
 
-        let current = git_cmd(working_dir, &["branch", "--show-current"])?;
+        let current = git_cmd(working_dir, &["branch", "--show-current"], TIMEOUT_LOCAL).await?;
         if current != into_branch {
-            git_cmd(working_dir, &["checkout", into_branch])?;
+            git_cmd(working_dir, &["checkout", into_branch], TIMEOUT_LOCAL).await?;
         }
 
         let merge_message = format!("Merge branch '{}' into {}", branch, into_branch);
         match git_cmd(
             working_dir,
             &["merge", "--no-ff", branch, "-m", &merge_message],
-        ) {
+            TIMEOUT_LOCAL,
+        )
+        .await
+        {
             Ok(raw) => {
-                let sha = git_cmd(working_dir, &["rev-parse", "HEAD"])?;
+                let sha = git_cmd(working_dir, &["rev-parse", "HEAD"], TIMEOUT_LOCAL).await?;
                 let short_sha = sha[..7.min(sha.len())].to_string();
                 Ok(MergeOutput {
                     branch: branch.to_string(),
@@ -205,7 +214,7 @@ impl GitModule {
                 })
             }
             Err(e) => {
-                let _ = git_cmd(working_dir, &["merge", "--abort"]);
+                let _ = git_cmd(working_dir, &["merge", "--abort"], TIMEOUT_LOCAL).await;
                 bail!("merge failed (aborted): {e}");
             }
         }
@@ -213,9 +222,14 @@ impl GitModule {
 
     /// Delete a session-owned branch (refuses to delete unmerged work; use
     /// `git branch -D` directly if you really need that).
-    pub fn branch_delete(&self, branch: &str) -> Result<BranchDeleteOutput> {
+    pub async fn branch_delete(&self, branch: &str) -> Result<BranchDeleteOutput> {
         self.ensure_branch_owned(branch)?;
-        git_cmd(self.session().root(), &["branch", "-d", branch])?;
+        git_cmd(
+            self.session().root(),
+            &["branch", "-d", branch],
+            TIMEOUT_LOCAL,
+        )
+        .await?;
         Ok(BranchDeleteOutput {
             branch: branch.to_string(),
         })
@@ -224,8 +238,13 @@ impl GitModule {
 
 /// Return staged paths (via `git diff --cached --name-only`) that are not
 /// in `only`. Empty result means the index matches the commit intent.
-fn detect_other_staged(working_dir: &Path, only: &[String]) -> Result<Vec<String>> {
-    let staged_raw = git_cmd(working_dir, &["diff", "--cached", "--name-only"])?;
+async fn detect_other_staged(working_dir: &Path, only: &[String]) -> Result<Vec<String>> {
+    let staged_raw = git_cmd(
+        working_dir,
+        &["diff", "--cached", "--name-only"],
+        TIMEOUT_LOCAL,
+    )
+    .await?;
     let only_set: std::collections::HashSet<&str> = only.iter().map(|s| s.as_str()).collect();
     Ok(staged_raw
         .lines()
@@ -236,44 +255,51 @@ fn detect_other_staged(working_dir: &Path, only: &[String]) -> Result<Vec<String
 }
 
 /// `git add -- <paths>`. Ignored when `paths` is empty (no-op is not an error).
-fn stage(working_dir: &Path, paths: &[String]) -> Result<()> {
+async fn stage(working_dir: &Path, paths: &[String]) -> Result<()> {
     if paths.is_empty() {
         return Ok(());
     }
     let mut args = vec!["add", "--"];
     args.extend(paths.iter().map(|s| s.as_str()));
-    git_cmd(working_dir, &args)?;
+    git_cmd(working_dir, &args, TIMEOUT_LOCAL).await?;
     Ok(())
 }
 
 /// Unstage `paths` while keeping worktree changes intact. Uses `git reset --`
 /// (index-only) so both modified-tracked and newly-staged files fall out of
 /// the index without touching what's on disk.
-fn unstage(working_dir: &Path, paths: &[String]) -> Result<()> {
+async fn unstage(working_dir: &Path, paths: &[String]) -> Result<()> {
     if paths.is_empty() {
         return Ok(());
     }
     let mut args = vec!["reset", "--"];
     args.extend(paths.iter().map(|s| s.as_str()));
-    git_cmd(working_dir, &args)?;
+    git_cmd(working_dir, &args, TIMEOUT_LOCAL).await?;
     Ok(())
 }
 
 /// Build the [`CommitOutput`] for the commit that HEAD currently points at.
-fn commit_output(
+async fn commit_output(
     working_dir: &Path,
     message: &str,
     dotfile_warnings: Vec<DotfileWarning>,
     dotfile_skipped: Vec<String>,
 ) -> Result<CommitOutput> {
-    let sha = git_cmd(working_dir, &["rev-parse", "HEAD"])?;
+    let sha = git_cmd(working_dir, &["rev-parse", "HEAD"], TIMEOUT_LOCAL).await?;
     let short_sha = sha[..7.min(sha.len())].to_string();
-    let files_changed = git_cmd(working_dir, &["diff", "--name-only", "HEAD~1..HEAD"])
-        .map(|out| out.lines().filter(|l| !l.is_empty()).count())
-        .unwrap_or_else(|e| {
+    let files_changed = match git_cmd(
+        working_dir,
+        &["diff", "--name-only", "HEAD~1..HEAD"],
+        TIMEOUT_LOCAL,
+    )
+    .await
+    {
+        Ok(out) => out.lines().filter(|l| !l.is_empty()).count(),
+        Err(e) => {
             tracing::warn!(error = %e, "git diff HEAD~1..HEAD failed (initial commit?)");
             0
-        });
+        }
+    };
     Ok(CommitOutput {
         sha,
         short_sha,
@@ -300,7 +326,7 @@ struct Classification {
 }
 
 /// Split `candidates` into stage / warn / skip buckets per the dotfile safeguard.
-fn classify_paths(
+async fn classify_paths(
     working_dir: &Path,
     candidates: &[String],
     force_dot: bool,
@@ -315,7 +341,7 @@ fn classify_paths(
             continue;
         }
         // Dotfile: classify tracked vs untracked.
-        let tracked = is_tracked(working_dir, p)?;
+        let tracked = is_tracked(working_dir, p).await?;
         if tracked {
             stage.push(p.clone());
             warnings.push(DotfileWarning {
@@ -323,7 +349,7 @@ fn classify_paths(
                 tracked: true,
                 in_gitignore: false,
             });
-        } else if is_ignored(working_dir, p) {
+        } else if is_ignored(working_dir, p).await {
             // Silent skip — matches git's default behaviour.
             skipped.push(p.clone());
         } else {
@@ -362,12 +388,20 @@ fn is_dotfile_path(p: &str) -> bool {
 /// then never reaches [`classify_paths`], and the safeguard silently misses
 /// it. `git_cmd`'s trimmed stdout would also strip the leading space from a
 /// single-line ` M path` status code and break the XY-column offset.
-fn enumerate_changes(working_dir: &Path) -> Result<Vec<String>> {
-    let output = Command::new("git")
-        .args(["status", "--porcelain=v1", "-z", "--untracked-files=all"])
+async fn enumerate_changes(working_dir: &Path) -> Result<Vec<String>> {
+    let mut cmd = tokio::process::Command::new("git");
+    cmd.args(["status", "--porcelain=v1", "-z", "--untracked-files=all"])
         .current_dir(working_dir)
-        .output()
-        .context("failed to run git status --porcelain")?;
+        .kill_on_drop(true);
+    let output = match tokio::time::timeout(TIMEOUT_LOCAL, cmd.output()).await {
+        Ok(Ok(o)) => o,
+        Ok(Err(e)) => {
+            return Err(anyhow::Error::from(e)).context("failed to run git status --porcelain");
+        }
+        Err(_elapsed) => {
+            bail!("git status: timed out after {}s", TIMEOUT_LOCAL.as_secs());
+        }
+    };
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         bail!("git status --porcelain: {}", stderr.trim());
@@ -399,33 +433,37 @@ fn enumerate_changes(working_dir: &Path) -> Result<Vec<String>> {
 
 /// `true` when `path` is present in the index (i.e. `git ls-files` returns it).
 /// Covers both files with an existing HEAD entry and freshly-`git add`ed files.
-fn is_tracked(working_dir: &Path, path: &str) -> Result<bool> {
-    let out = git_cmd(working_dir, &["ls-files", "--", path])?;
+async fn is_tracked(working_dir: &Path, path: &str) -> Result<bool> {
+    let out = git_cmd(working_dir, &["ls-files", "--", path], TIMEOUT_LOCAL).await?;
     Ok(!out.trim().is_empty())
 }
 
 /// `true` when `git check-ignore` marks `path` as ignored. `check-ignore`
 /// uses exit 1 as "not ignored" (a normal signal, not an error), so this
 /// bypasses [`git_cmd`] and inspects the exit status directly.
-fn is_ignored(working_dir: &Path, path: &str) -> bool {
-    let output = Command::new("git")
-        .args(["check-ignore", "--quiet", "--", path])
+async fn is_ignored(working_dir: &Path, path: &str) -> bool {
+    let mut cmd = tokio::process::Command::new("git");
+    cmd.args(["check-ignore", "--quiet", "--", path])
         .current_dir(working_dir)
-        .output();
-    match output {
-        Ok(o) => o.status.code() == Some(0),
-        Err(_) => false,
+        .kill_on_drop(true);
+    match tokio::time::timeout(TIMEOUT_LOCAL, cmd.output()).await {
+        Ok(Ok(o)) => o.status.code() == Some(0),
+        // IO error → not ignored (matches the pre-async contract).
+        Ok(Err(_)) => false,
+        // Timeout Elapsed → not ignored. Preserves the "never propagate"
+        // contract; anyhow::Error must not surface here.
+        Err(_elapsed) => false,
     }
 }
 
 /// `git add -A -- <paths>`. Handles deletions in addition to
 /// modifications / additions, unlike plain [`stage`].
-fn stage_add_all(working_dir: &Path, paths: &[String]) -> Result<()> {
+async fn stage_add_all(working_dir: &Path, paths: &[String]) -> Result<()> {
     if paths.is_empty() {
         return Ok(());
     }
     let mut args = vec!["add", "-A", "--"];
     args.extend(paths.iter().map(|s| s.as_str()));
-    git_cmd(working_dir, &args)?;
+    git_cmd(working_dir, &args, TIMEOUT_LOCAL).await?;
     Ok(())
 }

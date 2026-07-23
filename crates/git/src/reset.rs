@@ -11,7 +11,7 @@ use std::path::Path;
 use anyhow::Result;
 
 use crate::output::{ResetMode, ResetOutput};
-use crate::{GitModule, git_cmd};
+use crate::{GitModule, TIMEOUT_LOCAL, git_cmd};
 
 impl GitModule {
     /// Move HEAD to `target`, with `mode` controlling the working tree
@@ -21,17 +21,22 @@ impl GitModule {
     /// * [`ResetMode::Soft`]   — move HEAD only (`git reset --soft`)
     /// * [`ResetMode::Mixed`]  — also reset index but keep worktree (`--mixed`)
     /// * [`ResetMode::Hard`]   — also overwrite worktree (`--hard`)
-    pub fn reset(&self, working_dir: &Path, mode: ResetMode, target: &str) -> Result<ResetOutput> {
+    pub async fn reset(
+        &self,
+        working_dir: &Path,
+        mode: ResetMode,
+        target: &str,
+    ) -> Result<ResetOutput> {
         self.ensure_session_scope(working_dir)?;
 
-        let previous_head = git_cmd(working_dir, &["rev-parse", "HEAD"])?;
+        let previous_head = git_cmd(working_dir, &["rev-parse", "HEAD"], TIMEOUT_LOCAL).await?;
         let flag = match mode {
             ResetMode::Soft => "--soft",
             ResetMode::Mixed => "--mixed",
             ResetMode::Hard => "--hard",
         };
-        git_cmd(working_dir, &["reset", flag, target])?;
-        let current_head = git_cmd(working_dir, &["rev-parse", "HEAD"])?;
+        git_cmd(working_dir, &["reset", flag, target], TIMEOUT_LOCAL).await?;
+        let current_head = git_cmd(working_dir, &["rev-parse", "HEAD"], TIMEOUT_LOCAL).await?;
 
         Ok(ResetOutput {
             mode,
