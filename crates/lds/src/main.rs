@@ -1005,6 +1005,7 @@ impl LdsServer {
                 max_output: req.max_output,
                 alias: req.alias.clone(),
                 global_recipe_dirs,
+                worktrees_dir: None,
             }
         };
         // Local module construction takes a short-lived write lock; the
@@ -1102,7 +1103,11 @@ Filters (all optional, AND-combined): `author` (case-sensitive substring against
         json_result(&out)
     }
 
-    #[tool(description = "Create a git worktree under .worktrees/ with a new branch")]
+    #[tool(description = "Create a session-owned git worktree on a new branch. \
+                       The worktree is placed under the session-scoped worktrees dir \
+                       (SessionConfig::worktrees_dir → env LDS_WORKTREES_DIR → \
+                       <session_root>/.worktrees; the target must be gitignored in \
+                       the parent repo).")]
     async fn git_worktree_add(
         &self,
         Parameters(req): Parameters<GitWorktreeAddReq>,
@@ -1326,7 +1331,9 @@ to suppress the safeguard entirely.")]
     }
 
     #[tool(
-        description = "Adopt orphan worktrees under .worktrees/ left behind by a previous session"
+        description = "Adopt orphan worktrees under the session-scoped worktrees \
+                       dir (see git_worktree_add) that were left behind by a \
+                       previous session."
     )]
     async fn git_session_release(&self) -> Result<CallToolResult, McpError> {
         let mut inner = self.state.write().await;
@@ -1928,6 +1935,7 @@ to suppress the safeguard entirely.")]
             max_output: req.max_output,
             alias: req.alias.clone(),
             global_recipe_dirs,
+            worktrees_dir: None,
         };
         let session = inner
             .lds

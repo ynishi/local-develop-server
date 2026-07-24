@@ -150,7 +150,7 @@ another's work.
 | Tool | Description |
 |---|---|
 | `git_commit` | Stage and commit changes in a session-owned working directory |
-| `git_worktree_add` | Create a worktree under `.worktrees/` with a new branch (session-owned) |
+| `git_worktree_add` | Create a worktree on a new branch (session-owned). Placed under `SessionConfig::worktrees_dir` → env `LDS_WORKTREES_DIR` → `<root>/.worktrees` (default; parent repo must gitignore this path) |
 | `git_worktree_remove` | Remove a session-owned worktree |
 | `git_worktree_list` | List worktrees with session-ownership annotation |
 | `git_merge` | Merge a branch into another in a session-owned working directory |

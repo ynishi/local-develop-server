@@ -2,9 +2,10 @@
 //! session owned but never released.
 //!
 //! `session_release` is the counterpart to `worktree_add` — when an MCP
-//! client crashes and leaves `.worktrees/foo` on disk, the next session can
-//! adopt it (and the branch checked out inside it) so that the normal
-//! `worktree_remove` / `branch_delete` ownership checks pass.
+//! client crashes and leaves worktree entries inside the session-scoped
+//! worktrees directory (see [`Session::worktrees_dir`]), the next session
+//! can adopt them (and the branches checked out inside them) so that the
+//! normal `worktree_remove` / `branch_delete` ownership checks pass.
 
 use std::path::PathBuf;
 
@@ -14,10 +15,12 @@ use crate::output::SessionReleaseOutput;
 use crate::{GitModule, TIMEOUT_LOCAL, git_cmd};
 
 impl GitModule {
-    /// Adopt orphan worktrees under `.worktrees/` (those known to `git
-    /// worktree list` but not yet owned by this session). Any branches
-    /// currently checked out inside them are adopted at the same time so
-    /// the normal `branch_delete` ownership check will pass.
+    /// Adopt orphan worktrees under the session-scoped worktrees dir
+    /// (those known to `git worktree list` but not yet owned by this
+    /// session). Any branches currently checked out inside them are
+    /// adopted at the same time so the normal `branch_delete` ownership
+    /// check will pass. The worktrees dir is resolved by
+    /// [`Session::worktrees_dir`].
     ///
     /// Returns the set of worktrees / branches that were newly adopted.
     /// Already-owned entries are skipped silently — calling this repeatedly
@@ -75,8 +78,9 @@ impl GitModule {
             if canonical_path == canonical_root {
                 continue;
             }
-            // Only adopt worktrees under `.worktrees/` — anything outside is
-            // probably user-managed and shouldn't be silently claimed.
+            // Only adopt worktrees under the session-scoped worktrees dir —
+            // anything outside is probably user-managed and shouldn't be
+            // silently claimed.
             if !canonical_path.starts_with(&canonical_worktrees_dir) {
                 continue;
             }

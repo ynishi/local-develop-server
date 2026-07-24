@@ -878,10 +878,7 @@ serde = "1"
         let session = std::sync::Arc::new(
             lds_core::Session::new(lds_core::SessionConfig {
                 root: tmp.path().to_path_buf(),
-                timeout_secs: None,
-                max_output: None,
-                alias: None,
-                global_recipe_dirs: Vec::new(),
+                ..Default::default()
             })
             .expect("session"),
         );

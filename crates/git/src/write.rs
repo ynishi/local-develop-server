@@ -16,7 +16,10 @@ use crate::output::{
 use crate::{GitModule, TIMEOUT_LOCAL, git_cmd};
 
 impl GitModule {
-    /// Create a new worktree under `.worktrees/<name>` on a new branch.
+    /// Create a new worktree at `<worktrees_dir>/<name>` on a new branch.
+    /// The worktrees dir is the session-scoped root returned by
+    /// [`Session::worktrees_dir`]; see [`SessionConfig::worktrees_dir`]
+    /// for the resolution precedence and setup expectation.
     pub async fn worktree_add(
         &mut self,
         name: &str,
@@ -24,7 +27,9 @@ impl GitModule {
         base_branch: Option<&str>,
     ) -> Result<WorktreeAddOutput> {
         let wt_dir = self.worktrees_dir();
-        std::fs::create_dir_all(&wt_dir).context("failed to create .worktrees directory")?;
+        std::fs::create_dir_all(&wt_dir).with_context(|| {
+            format!("failed to create worktrees directory: {}", wt_dir.display())
+        })?;
 
         let wt_path = wt_dir.join(name);
         if wt_path.exists() {

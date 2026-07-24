@@ -38,6 +38,26 @@ pub struct SessionConfig {
     /// the project justfile. Populate via `LDS_RECIPE_GLOBAL_DIRS` (colon-separated)
     /// and/or the `global_recipe_dir` MCP wire argument.
     pub global_recipe_dirs: Vec<PathBuf>,
+    /// Directory where session-owned git worktrees are placed.
+    ///
+    /// Resolution precedence (highest first): this field → env
+    /// `LDS_WORKTREES_DIR` → `<root>/.worktrees` (default).
+    ///
+    /// **Setup expectation — this dir MUST be gitignored.**
+    /// `GitModule::worktree_add` creates worktrees at
+    /// `<worktrees_dir>/<name>` on session-owned branches. If the directory
+    /// is not covered by `.gitignore`, `git status` will surface the
+    /// worktree contents as untracked entries in the parent repo and a
+    /// `git add -A` / commit can silently absorb them (large accidental
+    /// commit). Callers overriding this path (env or explicit field) must
+    /// ensure the target is either outside the parent repo's tracking or
+    /// listed in the parent's `.gitignore`. `repo-readiness-check` C1
+    /// treats `.worktrees` as a Universal must-have gitignore entry for
+    /// the default path.
+    ///
+    /// Absolute paths are taken verbatim. Relative paths are resolved
+    /// against `root`.
+    pub worktrees_dir: Option<PathBuf>,
 }
 
 /// Errors that can occur during a [`Session`]'s post-construction lifecycle.
@@ -79,8 +99,26 @@ pub struct Session {
     timeout: Duration,
     max_output: usize,
     global_recipe_dirs: Vec<PathBuf>,
+    worktrees_dir: PathBuf,
     created_at: u64,
     last_used_at: RwLock<u64>,
+}
+
+/// Resolve the effective worktrees directory from
+/// (config → env `LDS_WORKTREES_DIR` → default `<root>/.worktrees`).
+/// Relative paths are anchored to `root`. Only invoked from
+/// [`Session::new`]; exposed as a free function for test coverage of
+/// the precedence rules.
+fn resolve_worktrees_dir(root: &Path, override_dir: Option<PathBuf>) -> PathBuf {
+    const DEFAULT_WORKTREES_SUBDIR: &str = ".worktrees";
+    let candidate = override_dir
+        .or_else(|| std::env::var_os("LDS_WORKTREES_DIR").map(PathBuf::from))
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_WORKTREES_SUBDIR));
+    if candidate.is_absolute() {
+        candidate
+    } else {
+        root.join(candidate)
+    }
 }
 
 impl Session {
@@ -103,6 +141,7 @@ impl Session {
             "session started"
         );
         let global_recipe_dirs = config.global_recipe_dirs;
+        let worktrees_dir = resolve_worktrees_dir(&root, config.worktrees_dir);
         Ok(Self {
             root,
             session_id,
@@ -110,9 +149,20 @@ impl Session {
             timeout,
             max_output,
             global_recipe_dirs,
+            worktrees_dir,
             created_at: now,
             last_used_at: RwLock::new(now),
         })
+    }
+
+    /// Directory where this session's git worktrees live.
+    ///
+    /// Absolute path. Resolved once at [`Session::new`] from
+    /// [`SessionConfig::worktrees_dir`] → env `LDS_WORKTREES_DIR` →
+    /// `<root>/.worktrees`. See [`SessionConfig::worktrees_dir`] for the
+    /// setup expectation (gitignore requirement).
+    pub fn worktrees_dir(&self) -> &Path {
+        &self.worktrees_dir
     }
 
     pub fn root(&self) -> &Path {
@@ -578,6 +628,43 @@ fn session_id_new() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── resolve_worktrees_dir precedence (env parsing intentionally
+    //    excluded — std::env is process-global and races other tests) ────────
+
+    #[test]
+    fn resolve_worktrees_dir_falls_back_to_default_subdir_when_no_override() {
+        let root = PathBuf::from("/tmp/some-session-root");
+        let got = resolve_worktrees_dir(&root, None);
+        assert_eq!(got, root.join(".worktrees"));
+    }
+
+    #[test]
+    fn resolve_worktrees_dir_explicit_absolute_config_wins_over_default() {
+        let root = PathBuf::from("/tmp/some-session-root");
+        let explicit = PathBuf::from("/var/pool/lds-wt");
+        let got = resolve_worktrees_dir(&root, Some(explicit.clone()));
+        assert_eq!(got, explicit);
+    }
+
+    #[test]
+    fn resolve_worktrees_dir_relative_config_is_anchored_to_root() {
+        let root = PathBuf::from("/tmp/some-session-root");
+        let got = resolve_worktrees_dir(&root, Some(PathBuf::from("wt-pool")));
+        assert_eq!(got, root.join("wt-pool"));
+    }
+
+    #[test]
+    fn session_worktrees_dir_matches_resolver_output() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().to_path_buf();
+        let session = Session::new(SessionConfig {
+            root: root.clone(),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(session.worktrees_dir(), resolve_worktrees_dir(&root, None));
+    }
 
     // ── CoreError Display invariants (I1 / I2) ───────────────────────────────
 

@@ -89,8 +89,15 @@ impl GitModule {
         Ok(())
     }
 
+    /// Session-scoped worktree root — the directory where
+    /// [`GitModule::worktree_add`] places worktrees on newly-created
+    /// branches. Sourced from [`Session::worktrees_dir`], which resolves
+    /// [`SessionConfig::worktrees_dir`] (explicit) → env
+    /// `LDS_WORKTREES_DIR` → `<session_root>/.worktrees` (default). See
+    /// [`SessionConfig::worktrees_dir`] for the setup expectation
+    /// (parent-repo gitignore requirement).
     pub(crate) fn worktrees_dir(&self) -> PathBuf {
-        self.session.root().join(".worktrees")
+        self.session.worktrees_dir().to_path_buf()
     }
 
     pub(crate) fn ensure_session_scope(&self, working_dir: &Path) -> Result<()> {
