@@ -33,27 +33,28 @@ fn make_session(root: &Path) -> Arc<Session> {
     )
 }
 
-#[test]
-fn worktree_lifecycle() {
+#[tokio::test]
+async fn worktree_lifecycle() {
     let tmp = tempfile::tempdir().unwrap();
     init_temp_repo(tmp.path());
     let session = make_session(tmp.path());
     let mut git = GitModule::new(session);
 
     // worktree_list: only main worktree, not owned by us yet.
-    let list = git.worktree_list().unwrap();
+    let list = git.worktree_list().await.unwrap();
     assert_eq!(list.worktrees.len(), 1);
     assert!(!list.worktrees[0].owned);
 
     // worktree_add
     let add_result = git
         .worktree_add("test-wt", "feat/test", Some("main"))
+        .await
         .unwrap();
     assert!(add_result.path.ends_with("test-wt"));
     assert_eq!(add_result.branch, "feat/test");
 
     // worktree_list: the new worktree is now owned.
-    let list = git.worktree_list().unwrap();
+    let list = git.worktree_list().await.unwrap();
     assert!(
         list.worktrees.iter().any(|w| w.owned),
         "expected at least one owned worktree, got: {list:?}"
@@ -64,23 +65,24 @@ fn worktree_lifecycle() {
     std::fs::write(wt_path.join("new_file.txt"), "content\n").unwrap();
     let commit_result = git
         .commit(&wt_path, "test commit", None, OtherStagedMode::Stop, false)
+        .await
         .unwrap();
     assert_eq!(commit_result.sha.len(), 40, "expected full SHA-1");
     assert_eq!(commit_result.message, "test commit");
     assert_eq!(commit_result.files_changed, 1);
 
     // merge back to main
-    let merge_result = git.merge("feat/test", "main", tmp.path()).unwrap();
+    let merge_result = git.merge("feat/test", "main", tmp.path()).await.unwrap();
     assert_eq!(merge_result.branch, "feat/test");
     assert_eq!(merge_result.into_branch, "main");
     assert_eq!(merge_result.sha.len(), 40);
 
     // worktree_remove
-    let remove_result = git.worktree_remove("test-wt").unwrap();
+    let remove_result = git.worktree_remove("test-wt").await.unwrap();
     assert!(remove_result.path.ends_with("test-wt"));
 
     // branch_delete
-    let delete_result = git.branch_delete("feat/test").unwrap();
+    let delete_result = git.branch_delete("feat/test").await.unwrap();
     assert_eq!(delete_result.branch, "feat/test");
 
     // verify merge landed: new_file.txt should exist in main
@@ -101,8 +103,8 @@ fn worktree_lifecycle() {
     );
 }
 
-#[test]
-fn log_filters_by_author_paths_and_since() {
+#[tokio::test]
+async fn log_filters_by_author_paths_and_since() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
     let run = |args: &[&str]| {
@@ -220,8 +222,8 @@ fn log_filters_by_author_paths_and_since() {
     assert!(head.timestamp > 0);
 }
 
-#[test]
-fn ownership_guard_rejects_unowned_worktree() {
+#[tokio::test]
+async fn ownership_guard_rejects_unowned_worktree() {
     let tmp = tempfile::tempdir().unwrap();
     init_temp_repo(tmp.path());
     let session = make_session(tmp.path());
@@ -245,13 +247,15 @@ fn ownership_guard_rejects_unowned_worktree() {
 
     // commit to unowned worktree should fail
     std::fs::write(foreign_path.join("file.txt"), "x").unwrap();
-    let err = git.commit(
-        &foreign_path,
-        "bad commit",
-        None,
-        OtherStagedMode::Stop,
-        false,
-    );
+    let err = git
+        .commit(
+            &foreign_path,
+            "bad commit",
+            None,
+            OtherStagedMode::Stop,
+            false,
+        )
+        .await;
     assert!(err.is_err());
     assert!(
         err.unwrap_err()
@@ -260,7 +264,7 @@ fn ownership_guard_rejects_unowned_worktree() {
     );
 
     // branch_delete on unowned branch should fail
-    let err = git.branch_delete("other/branch");
+    let err = git.branch_delete("other/branch").await;
     assert!(err.is_err());
     assert!(
         err.unwrap_err()
@@ -269,28 +273,30 @@ fn ownership_guard_rejects_unowned_worktree() {
     );
 }
 
-#[test]
-fn commit_allowed_at_session_root() {
+#[tokio::test]
+async fn commit_allowed_at_session_root() {
     let tmp = tempfile::tempdir().unwrap();
     init_temp_repo(tmp.path());
     let session = make_session(tmp.path());
     let git = GitModule::new(session);
 
     std::fs::write(tmp.path().join("root_file.txt"), "content\n").unwrap();
-    let result = git.commit(
-        tmp.path(),
-        "root commit",
-        Some(&["root_file.txt".to_string()]),
-        OtherStagedMode::Stop,
-        false,
-    );
+    let result = git
+        .commit(
+            tmp.path(),
+            "root commit",
+            Some(&["root_file.txt".to_string()]),
+            OtherStagedMode::Stop,
+            false,
+        )
+        .await;
     let commit = result.expect("commit at session root");
     assert_eq!(commit.sha.len(), 40);
     assert_eq!(commit.message, "root commit");
 }
 
-#[test]
-fn status_partitions_staged_unstaged_untracked() {
+#[tokio::test]
+async fn status_partitions_staged_unstaged_untracked() {
     let tmp = tempfile::tempdir().unwrap();
     init_temp_repo(tmp.path());
     let session = make_session(tmp.path());
@@ -338,8 +344,8 @@ fn status_partitions_staged_unstaged_untracked() {
     );
 }
 
-#[test]
-fn diff_distinguishes_staged_from_unstaged() {
+#[tokio::test]
+async fn diff_distinguishes_staged_from_unstaged() {
     let tmp = tempfile::tempdir().unwrap();
     init_temp_repo(tmp.path());
     let session = make_session(tmp.path());
@@ -383,8 +389,8 @@ fn diff_distinguishes_staged_from_unstaged() {
     );
 }
 
-#[test]
-fn reset_moves_head_back() {
+#[tokio::test]
+async fn reset_moves_head_back() {
     let tmp = tempfile::tempdir().unwrap();
     init_temp_repo(tmp.path());
     let session = make_session(tmp.path());
@@ -414,6 +420,7 @@ fn reset_moves_head_back() {
     // Reset back to the first commit.
     let result = git
         .reset(tmp.path(), ResetMode::Hard, &before_sha)
+        .await
         .expect("reset");
     assert!(matches!(result.mode, ResetMode::Hard));
     assert_eq!(result.target, before_sha);
@@ -421,8 +428,8 @@ fn reset_moves_head_back() {
     assert_ne!(result.previous_head, result.current_head);
 }
 
-#[test]
-fn session_release_adopts_orphan_worktree() {
+#[tokio::test]
+async fn session_release_adopts_orphan_worktree() {
     let tmp = tempfile::tempdir().unwrap();
     init_temp_repo(tmp.path());
     let session = make_session(tmp.path());
@@ -444,10 +451,10 @@ fn session_release_adopts_orphan_worktree() {
     let leftover = tmp.path().join(".worktrees/leftover");
 
     // branch_delete must refuse before we adopt.
-    assert!(git.branch_delete("left/over").is_err());
+    assert!(git.branch_delete("left/over").await.is_err());
 
     // Adopt: session_release should pick up `leftover` + branch `left/over`.
-    let release = git.session_release().expect("session_release");
+    let release = git.session_release().await.expect("session_release");
     // macOS resolves /var/... to /private/var/..., so compare canonical paths.
     let canonical_leftover = leftover.canonicalize().unwrap_or(leftover.clone());
     assert!(
@@ -465,8 +472,10 @@ fn session_release_adopts_orphan_worktree() {
     // After adoption, branch_delete on `left/over` should succeed once the
     // worktree has been removed (a branch can't be deleted while checked out).
     git.worktree_remove("leftover")
+        .await
         .expect("worktree_remove after adoption");
     git.branch_delete("left/over")
+        .await
         .expect("branch_delete after adoption");
 }
 
@@ -496,8 +505,8 @@ fn git_add(dir: &Path, path: &str) {
         .unwrap();
 }
 
-#[test]
-fn commit_only_commits_just_those_paths() {
+#[tokio::test]
+async fn commit_only_commits_just_those_paths() {
     let tmp = tempfile::tempdir().unwrap();
     init_temp_repo(tmp.path());
     let session = make_session(tmp.path());
@@ -515,6 +524,7 @@ fn commit_only_commits_just_those_paths() {
             OtherStagedMode::Stop,
             false,
         )
+        .await
         .expect("commit only=keep.txt");
 
     assert_eq!(commit.files_changed, 1);
@@ -542,8 +552,8 @@ fn commit_only_commits_just_those_paths() {
     );
 }
 
-#[test]
-fn commit_only_stop_refuses_when_index_has_intruders() {
+#[tokio::test]
+async fn commit_only_stop_refuses_when_index_has_intruders() {
     let tmp = tempfile::tempdir().unwrap();
     init_temp_repo(tmp.path());
     let session = make_session(tmp.path());
@@ -563,6 +573,7 @@ fn commit_only_stop_refuses_when_index_has_intruders() {
             OtherStagedMode::Stop,
             false,
         )
+        .await
         .expect_err("stop mode must refuse when other paths are staged");
     let msg = err.to_string();
     assert!(
@@ -592,8 +603,8 @@ fn commit_only_stop_refuses_when_index_has_intruders() {
     );
 }
 
-#[test]
-fn commit_only_restage_survives_round_trip() {
+#[tokio::test]
+async fn commit_only_restage_survives_round_trip() {
     let tmp = tempfile::tempdir().unwrap();
     init_temp_repo(tmp.path());
     let session = make_session(tmp.path());
@@ -612,6 +623,7 @@ fn commit_only_restage_survives_round_trip() {
             OtherStagedMode::Restage,
             false,
         )
+        .await
         .expect("restage mode commits target and re-stages other");
 
     assert_eq!(commit.files_changed, 1, "commit must only touch target.txt");
@@ -640,8 +652,8 @@ fn commit_only_restage_survives_round_trip() {
     );
 }
 
-#[test]
-fn commit_only_stop_ignores_other_unstaged_changes() {
+#[tokio::test]
+async fn commit_only_stop_ignores_other_unstaged_changes() {
     // Modified-but-not-staged files are NOT intruders — the mode only cares
     // about the index. This documents that boundary.
     let tmp = tempfile::tempdir().unwrap();
@@ -662,6 +674,7 @@ fn commit_only_stop_ignores_other_unstaged_changes() {
             OtherStagedMode::Stop,
             false,
         )
+        .await
         .expect("stop mode should still succeed when noise is only unstaged");
     assert_eq!(commit.files_changed, 1);
 
@@ -677,8 +690,8 @@ fn commit_only_stop_ignores_other_unstaged_changes() {
 // Dotfile / dot-dir safeguard
 // ---------------------------------------------------------------------------
 
-#[test]
-fn commit_skips_untracked_dotfile_not_in_gitignore() {
+#[tokio::test]
+async fn commit_skips_untracked_dotfile_not_in_gitignore() {
     // `.env` newly-dropped without `.gitignore` coverage: the safeguard
     // must drop it from staging AND warn so the caller sees it.
     let tmp = tempfile::tempdir().unwrap();
@@ -697,6 +710,7 @@ fn commit_skips_untracked_dotfile_not_in_gitignore() {
             OtherStagedMode::Stop,
             false,
         )
+        .await
         .expect("commit should succeed with safe.txt only");
 
     assert_eq!(commit.files_changed, 1, "only safe.txt should be committed");
@@ -724,8 +738,8 @@ fn commit_skips_untracked_dotfile_not_in_gitignore() {
     );
 }
 
-#[test]
-fn commit_silently_skips_gitignored_dotfile() {
+#[tokio::test]
+async fn commit_silently_skips_gitignored_dotfile() {
     // `.env` covered by `.gitignore`: git already hides it from
     // porcelain, so it never even shows up as a candidate. No warning
     // should be emitted for the silent case.
@@ -744,6 +758,7 @@ fn commit_silently_skips_gitignored_dotfile() {
             OtherStagedMode::Stop,
             true, // force_dot: bootstrap the safeguard itself
         )
+        .await
         .expect("bootstrap .gitignore");
 
     std::fs::write(tmp.path().join(".env"), "SECRET=1\n").unwrap();
@@ -757,6 +772,7 @@ fn commit_silently_skips_gitignored_dotfile() {
             OtherStagedMode::Stop,
             false,
         )
+        .await
         .expect("commit safe.txt only");
 
     assert_eq!(commit.files_changed, 1);
@@ -772,8 +788,8 @@ fn commit_silently_skips_gitignored_dotfile() {
     );
 }
 
-#[test]
-fn commit_warns_but_includes_tracked_dotfile_change() {
+#[tokio::test]
+async fn commit_warns_but_includes_tracked_dotfile_change() {
     // Modify a tracked `.gitignore`: safeguard lets the change through
     // (tracked = intentional) but records a warning so pre-publish
     // review can catch unintended edits.
@@ -791,6 +807,7 @@ fn commit_warns_but_includes_tracked_dotfile_change() {
             OtherStagedMode::Stop,
             true,
         )
+        .await
         .expect("bootstrap tracked .gitignore");
 
     // Now edit it.
@@ -804,6 +821,7 @@ fn commit_warns_but_includes_tracked_dotfile_change() {
             OtherStagedMode::Stop,
             false,
         )
+        .await
         .expect("commit tracked dotfile change");
 
     assert_eq!(commit.files_changed, 1, ".gitignore edit must be committed");
@@ -822,8 +840,8 @@ fn commit_warns_but_includes_tracked_dotfile_change() {
     );
 }
 
-#[test]
-fn commit_force_dot_suppresses_safeguard() {
+#[tokio::test]
+async fn commit_force_dot_suppresses_safeguard() {
     // `force_dot=true`: `.env` gets staged and committed like any other
     // file, no warning, no skip. This is the manual override path.
     let tmp = tempfile::tempdir().unwrap();
@@ -841,6 +859,7 @@ fn commit_force_dot_suppresses_safeguard() {
             OtherStagedMode::Stop,
             true,
         )
+        .await
         .expect("force_dot must let .env through");
 
     assert_eq!(commit.files_changed, 1);
@@ -868,8 +887,8 @@ fn commit_force_dot_suppresses_safeguard() {
     );
 }
 
-#[test]
-fn commit_only_drops_dotfile_from_explicit_paths() {
+#[tokio::test]
+async fn commit_only_drops_dotfile_from_explicit_paths() {
     // `only=[.env, safe.txt]` with safeguard on: `.env` is filtered
     // out of the stage list, `safe.txt` proceeds. HEAD contains only
     // safe.txt afterward.
@@ -889,6 +908,7 @@ fn commit_only_drops_dotfile_from_explicit_paths() {
             OtherStagedMode::Stop,
             false,
         )
+        .await
         .expect("commit should proceed with safe.txt only");
 
     assert_eq!(commit.files_changed, 1);
@@ -911,8 +931,8 @@ fn commit_only_drops_dotfile_from_explicit_paths() {
     );
 }
 
-#[test]
-fn commit_detects_dotfile_under_untracked_nondot_dir() {
+#[tokio::test]
+async fn commit_detects_dotfile_under_untracked_nondot_dir() {
     // Regression: previously the safeguard missed `foo/.hidden` because
     // `git status --porcelain` collapsed the untracked `foo/` into a
     // single `?? foo/` record, so the dotfile-classifier only ever saw
@@ -937,6 +957,7 @@ fn commit_detects_dotfile_under_untracked_nondot_dir() {
             OtherStagedMode::Stop,
             false,
         )
+        .await
         .expect("commit should proceed with data/public.txt only");
 
     assert!(
@@ -977,8 +998,8 @@ fn commit_detects_dotfile_under_untracked_nondot_dir() {
     );
 }
 
-#[test]
-fn commit_detects_nested_dotdir_component() {
+#[tokio::test]
+async fn commit_detects_nested_dotdir_component() {
     // `.claude/CLAUDE.md`: dot component is not the basename but a
     // path segment. is_dotfile_path must still catch it.
     let tmp = tempfile::tempdir().unwrap();
@@ -998,6 +1019,7 @@ fn commit_detects_nested_dotdir_component() {
             OtherStagedMode::Stop,
             false,
         )
+        .await
         .expect("commit safe.txt only");
 
     assert_eq!(commit.files_changed, 1);

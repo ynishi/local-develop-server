@@ -12,7 +12,7 @@ use crate::output::{
     CommitEntry, DiffOutput, EntryStatus, LogOutput, StatusKind, StatusOutput, WorktreeEntry,
     WorktreeListOutput,
 };
-use crate::{GitModule, git_cmd};
+use crate::{GitModule, TIMEOUT_LOCAL, git_cmd};
 
 /// Optional narrowing for [`GitModule::log`]. All fields are AND-combined; an
 /// absent field imposes no constraint.
@@ -222,8 +222,13 @@ impl GitModule {
     }
 
     /// List every linked worktree, annotated with session-ownership.
-    pub fn worktree_list(&self) -> Result<WorktreeListOutput> {
-        let raw = git_cmd(self.session().root(), &["worktree", "list", "--porcelain"])?;
+    pub async fn worktree_list(&self) -> Result<WorktreeListOutput> {
+        let raw = git_cmd(
+            self.session().root(),
+            &["worktree", "list", "--porcelain"],
+            TIMEOUT_LOCAL,
+        )
+        .await?;
 
         let mut worktrees = Vec::new();
         let mut current_path: Option<PathBuf> = None;

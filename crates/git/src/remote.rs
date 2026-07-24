@@ -10,7 +10,6 @@
 
 use std::collections::BTreeMap;
 use std::path::Path;
-use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 use git2::Repository;
@@ -19,7 +18,7 @@ use crate::output::{
     BranchStatusOutput, CommitEntry, FetchOutput, IsPushedOutput, RemoteEntry, RemoteListOutput,
     TagPushedOutput, UnpushedCommitsOutput, WorktreeStateOutput,
 };
-use crate::{GitModule, git_cmd, git_cmd_combined};
+use crate::{GitModule, TIMEOUT_LOCAL, TIMEOUT_NETWORK, git_cmd, git_cmd_combined};
 
 impl GitModule {
     /// Fetch from a remote.
@@ -29,7 +28,7 @@ impl GitModule {
     /// locally. The combined stdout + stderr is returned as `raw` for
     /// transport diagnostics — successful fetches usually print nothing on
     /// stdout but emit `From <url>` / `<ref> -> <ref>` lines on stderr.
-    pub fn fetch(
+    pub async fn fetch(
         &self,
         remote: Option<&str>,
         refspec: Option<&str>,
@@ -44,7 +43,7 @@ impl GitModule {
         if let Some(rs) = refspec {
             args.push(rs);
         }
-        let raw = git_cmd_combined(self.session().root(), &args)?;
+        let raw = git_cmd_combined(self.session().root(), &args, TIMEOUT_NETWORK).await?;
         Ok(FetchOutput {
             remote,
             refspec: refspec.map(|s| s.to_string()),
@@ -58,8 +57,8 @@ impl GitModule {
     /// We use `git remote -v` rather than git2's `Repository::remotes` so the
     /// output matches what `git` itself reports (and naturally handles the
     /// case where fetch and push URLs diverge via `pushurl`).
-    pub fn remote_list(&self) -> Result<RemoteListOutput> {
-        let raw = git_cmd(self.session().root(), &["remote", "-v"])?;
+    pub async fn remote_list(&self) -> Result<RemoteListOutput> {
+        let raw = git_cmd(self.session().root(), &["remote", "-v"], TIMEOUT_LOCAL).await?;
         let mut by_name: BTreeMap<String, RemoteEntry> = BTreeMap::new();
         for line in raw.lines() {
             // Format: "<name>\t<url> (fetch)" or "<name>\t<url> (push)"
@@ -93,7 +92,7 @@ impl GitModule {
     /// the merge-base, using git2's `graph_ahead_behind` for the count and a
     /// `git merge-base` shell-out for the common-ancestor sha (git2's
     /// `merge_base` returns an OID but we want the textual form).
-    pub fn branch_status(&self, branch: &str, base: &str) -> Result<BranchStatusOutput> {
+    pub async fn branch_status(&self, branch: &str, base: &str) -> Result<BranchStatusOutput> {
         let repo = Repository::open(self.session().root())?;
         let branch_oid = repo
             .revparse_single(branch)
@@ -123,9 +122,18 @@ impl GitModule {
     }
 
     /// List commits that exist on `branch` but not on `<remote>/<branch>`.
-    pub fn unpushed_commits(&self, branch: &str, remote: &str) -> Result<UnpushedCommitsOutput> {
+    pub async fn unpushed_commits(
+        &self,
+        branch: &str,
+        remote: &str,
+    ) -> Result<UnpushedCommitsOutput> {
         let remote_ref = format!("{remote}/{branch}");
-        let remote_head = git_cmd(self.session().root(), &["rev-parse", &remote_ref])?;
+        let remote_head = git_cmd(
+            self.session().root(),
+            &["rev-parse", &remote_ref],
+            TIMEOUT_LOCAL,
+        )
+        .await?;
         let raw = git_cmd(
             self.session().root(),
             &[
@@ -133,7 +141,9 @@ impl GitModule {
                 "--format=%H%x09%an <%ae>%x09%at%x09%s",
                 &format!("{remote_ref}..{branch}"),
             ],
-        )?;
+            TIMEOUT_LOCAL,
+        )
+        .await?;
         let mut commits = Vec::new();
         for line in raw.lines() {
             if line.is_empty() {
@@ -164,7 +174,7 @@ impl GitModule {
 
     /// Check whether `commit` is reachable from any remote-tracking ref
     /// under `refs/remotes/<remote>/`.
-    pub fn is_pushed(&self, commit: &str, remote: &str) -> Result<IsPushedOutput> {
+    pub async fn is_pushed(&self, commit: &str, remote: &str) -> Result<IsPushedOutput> {
         let refspace = format!("refs/remotes/{remote}/");
         let raw = git_cmd(
             self.session().root(),
@@ -175,7 +185,9 @@ impl GitModule {
                 "--format=%(refname)",
                 &refspace,
             ],
-        )?;
+            TIMEOUT_LOCAL,
+        )
+        .await?;
         let refs: Vec<String> = raw
             .lines()
             .filter(|l| !l.is_empty())
@@ -191,12 +203,14 @@ impl GitModule {
     }
 
     /// Check whether `tag` exists on `remote` (via `git ls-remote --tags`).
-    pub fn tag_pushed(&self, tag: &str, remote: &str) -> Result<TagPushedOutput> {
+    pub async fn tag_pushed(&self, tag: &str, remote: &str) -> Result<TagPushedOutput> {
         let refspec = format!("refs/tags/{tag}");
         let raw = git_cmd(
             self.session().root(),
             &["ls-remote", "--tags", remote, &refspec],
-        )?;
+            TIMEOUT_NETWORK,
+        )
+        .await?;
         let remote_refs: Vec<String> = raw
             .lines()
             .filter(|l| !l.is_empty())
@@ -212,14 +226,14 @@ impl GitModule {
     }
 
     /// Snapshot a worktree's state (branch, tracking, ahead/behind, uncommitted).
-    pub fn worktree_state(&self, branch: Option<&str>) -> Result<WorktreeStateOutput> {
+    pub async fn worktree_state(&self, branch: Option<&str>) -> Result<WorktreeStateOutput> {
         let root = self.session().root();
         let resolved_branch = match branch {
             Some(b) => b.to_string(),
-            None => git_cmd(root, &["branch", "--show-current"])?,
+            None => git_cmd(root, &["branch", "--show-current"], TIMEOUT_LOCAL).await?,
         };
 
-        let tracking = resolve_upstream(root)?;
+        let tracking = resolve_upstream(root).await?;
 
         let (ahead, behind) = if let Some(ref upstream) = tracking {
             let repo = Repository::open(root)?;
@@ -233,7 +247,9 @@ impl GitModule {
             (0, 0)
         };
 
-        let porcelain = git_cmd(root, &["status", "--porcelain"]).unwrap_or_default();
+        let porcelain = git_cmd(root, &["status", "--porcelain"], TIMEOUT_LOCAL)
+            .await
+            .unwrap_or_default();
         let uncommitted = porcelain.lines().filter(|l| !l.is_empty()).count();
         let clean = uncommitted == 0;
         let sync = behind == 0;
@@ -252,12 +268,24 @@ impl GitModule {
 
 /// Resolve the upstream tracking ref of the current HEAD, returning `None`
 /// when no upstream is configured.
-fn resolve_upstream(root: &Path) -> Result<Option<String>> {
-    let output = Command::new("git")
-        .args(["rev-parse", "--abbrev-ref", "@{upstream}"])
+async fn resolve_upstream(root: &Path) -> Result<Option<String>> {
+    let mut cmd = tokio::process::Command::new("git");
+    cmd.args(["rev-parse", "--abbrev-ref", "@{upstream}"])
         .current_dir(root)
-        .output()
-        .context("failed to spawn git rev-parse @{upstream}")?;
+        .kill_on_drop(true);
+    let output = match tokio::time::timeout(TIMEOUT_LOCAL, cmd.output()).await {
+        Ok(Ok(o)) => o,
+        Ok(Err(e)) => {
+            return Err(anyhow::Error::from(e))
+                .context("failed to spawn git rev-parse @{upstream}");
+        }
+        Err(_elapsed) => {
+            bail!(
+                "git rev-parse @{{upstream}}: timed out after {}s",
+                TIMEOUT_LOCAL.as_secs()
+            );
+        }
+    };
     if output.status.success() {
         let raw = String::from_utf8_lossy(&output.stdout).trim().to_string();
         return Ok(if raw.is_empty() { None } else { Some(raw) });

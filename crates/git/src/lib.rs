@@ -13,8 +13,8 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use lds_core::Session;
@@ -136,12 +136,25 @@ impl GitModule {
 /// avoids spawning a subprocess and exposes typed data — but anything that
 /// touches credentials, refspecs, or worktree-level porcelain is delegated
 /// here to keep the implementation honest about what stock `git` would do.
-pub(crate) fn git_cmd(cwd: &Path, args: &[&str]) -> Result<String> {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(cwd)
-        .output()
-        .with_context(|| format!("failed to run git {}", args.first().unwrap_or(&"")))?;
+pub(crate) async fn git_cmd(cwd: &Path, args: &[&str], timeout: Duration) -> Result<String> {
+    let mut cmd = tokio::process::Command::new("git");
+    cmd.args(args).current_dir(cwd).kill_on_drop(true);
+
+    let result = tokio::time::timeout(timeout, cmd.output()).await;
+    let output = match result {
+        Ok(Ok(o)) => o,
+        Ok(Err(e)) => {
+            return Err(anyhow::Error::from(e))
+                .with_context(|| format!("failed to run git {}", args.first().unwrap_or(&"")));
+        }
+        Err(_elapsed) => {
+            bail!(
+                "git {}: timed out after {}s",
+                args.first().unwrap_or(&""),
+                timeout.as_secs()
+            );
+        }
+    };
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -152,12 +165,29 @@ pub(crate) fn git_cmd(cwd: &Path, args: &[&str]) -> Result<String> {
 
 /// Variant of [`git_cmd`] that merges stdout + stderr so callers can capture
 /// transport diagnostics (typical for `git fetch`).
-pub(crate) fn git_cmd_combined(cwd: &Path, args: &[&str]) -> Result<String> {
-    let output = Command::new("git")
-        .args(args)
-        .current_dir(cwd)
-        .output()
-        .with_context(|| format!("failed to run git {}", args.first().unwrap_or(&"")))?;
+pub(crate) async fn git_cmd_combined(
+    cwd: &Path,
+    args: &[&str],
+    timeout: Duration,
+) -> Result<String> {
+    let mut cmd = tokio::process::Command::new("git");
+    cmd.args(args).current_dir(cwd).kill_on_drop(true);
+
+    let result = tokio::time::timeout(timeout, cmd.output()).await;
+    let output = match result {
+        Ok(Ok(o)) => o,
+        Ok(Err(e)) => {
+            return Err(anyhow::Error::from(e))
+                .with_context(|| format!("failed to run git {}", args.first().unwrap_or(&"")));
+        }
+        Err(_elapsed) => {
+            bail!(
+                "git {}: timed out after {}s",
+                args.first().unwrap_or(&""),
+                timeout.as_secs()
+            );
+        }
+    };
 
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -173,4 +203,53 @@ pub(crate) fn git_cmd_combined(cwd: &Path, args: &[&str]) -> Result<String> {
         (true, false) => stderr,
         (false, false) => format!("{stdout}\n{stderr}"),
     })
+}
+
+/// Timeout for git subcommands that only touch local refs / on-disk state
+/// (rev-parse HEAD, status, log, diff, branch --show-current, worktree list,
+/// commit, merge, worktree add/remove, branch -d, reset, check-ignore,
+/// rev-parse @{upstream}, for-each-ref, rev-list --count).
+pub(crate) const TIMEOUT_LOCAL: Duration = Duration::from_secs(10);
+
+/// Timeout for git subcommands that hit the network (fetch, ls-remote,
+/// anything that would talk to a remote transport).
+pub(crate) const TIMEOUT_NETWORK: Duration = Duration::from_secs(60);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A pathologically short timeout should return an anyhow Error whose
+    /// message contains the `timed out after {}s` literal. This is the
+    /// grep-cross-check for the message contract (Acceptance 8) — the same
+    /// path fetch / ls-remote take on network hang, exercised without an
+    /// actually hanging endpoint.
+    #[tokio::test]
+    async fn git_cmd_reports_timeout_with_literal_message() {
+        let tmp = std::env::temp_dir();
+        let err = git_cmd(&tmp, &["version"], Duration::from_nanos(1))
+            .await
+            .expect_err("nanosecond timeout must trip");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("timed out after"),
+            "expected 'timed out after' literal, got: {msg}"
+        );
+        assert!(
+            msg.contains("git version"),
+            "expected subcommand name in message, got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn git_cmd_combined_reports_timeout_with_literal_message() {
+        let tmp = std::env::temp_dir();
+        let err = git_cmd_combined(&tmp, &["version"], Duration::from_nanos(1))
+            .await
+            .expect_err("nanosecond timeout must trip");
+        assert!(
+            err.to_string().contains("timed out after"),
+            "expected 'timed out after' literal, got: {err}"
+        );
+    }
 }

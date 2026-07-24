@@ -1097,6 +1097,7 @@ Filters (all optional, AND-combined): `author` (case-sensitive substring against
         let git = inner.git.as_ref().ok_or_else(no_session_error)?;
         let out = git
             .worktree_list()
+            .await
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         json_result(&out)
     }
@@ -1110,6 +1111,7 @@ Filters (all optional, AND-combined): `author` (case-sensitive substring against
         let git = inner.git.as_mut().ok_or_else(no_session_error)?;
         let out = git
             .worktree_add(&req.name, &req.branch, req.base_branch.as_deref())
+            .await
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         json_result(&out)
     }
@@ -1123,6 +1125,7 @@ Filters (all optional, AND-combined): `author` (case-sensitive substring against
         let git = inner.git.as_mut().ok_or_else(no_session_error)?;
         let out = git
             .worktree_remove(&req.name)
+            .await
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         json_result(&out)
     }
@@ -1156,6 +1159,7 @@ to suppress the safeguard entirely.")]
                 other_staged,
                 req.force_dot.unwrap_or(false),
             )
+            .await
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         json_result(&out)
     }
@@ -1177,6 +1181,7 @@ to suppress the safeguard entirely.")]
             .unwrap_or_else(|| session.root().to_path_buf());
         let out = git
             .merge(&req.branch, &req.into_branch, &working_dir)
+            .await
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         json_result(&out)
     }
@@ -1190,6 +1195,7 @@ to suppress the safeguard entirely.")]
         let git = inner.git.as_ref().ok_or_else(no_session_error)?;
         let out = git
             .branch_delete(&req.branch)
+            .await
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         json_result(&out)
     }
@@ -1203,6 +1209,7 @@ to suppress the safeguard entirely.")]
         let git = inner.git.as_ref().ok_or_else(no_session_error)?;
         let out = git
             .fetch(req.remote.as_deref(), req.refspec.as_deref(), req.prune)
+            .await
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         json_result(&out)
     }
@@ -1213,6 +1220,7 @@ to suppress the safeguard entirely.")]
         let git = inner.git.as_ref().ok_or_else(no_session_error)?;
         let out = git
             .remote_list()
+            .await
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         json_result(&out)
     }
@@ -1226,6 +1234,7 @@ to suppress the safeguard entirely.")]
         let git = inner.git.as_ref().ok_or_else(no_session_error)?;
         let out = git
             .branch_status(&req.branch, &req.base)
+            .await
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         json_result(&out)
     }
@@ -1239,6 +1248,7 @@ to suppress the safeguard entirely.")]
         let git = inner.git.as_ref().ok_or_else(no_session_error)?;
         let out = git
             .unpushed_commits(&req.branch, &req.remote)
+            .await
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         json_result(&out)
     }
@@ -1252,6 +1262,7 @@ to suppress the safeguard entirely.")]
         let git = inner.git.as_ref().ok_or_else(no_session_error)?;
         let out = git
             .is_pushed(&req.commit, &req.remote)
+            .await
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         json_result(&out)
     }
@@ -1265,6 +1276,7 @@ to suppress the safeguard entirely.")]
         let git = inner.git.as_ref().ok_or_else(no_session_error)?;
         let out = git
             .tag_pushed(&req.tag, &req.remote)
+            .await
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         json_result(&out)
     }
@@ -1280,6 +1292,7 @@ to suppress the safeguard entirely.")]
         let git = inner.git.as_ref().ok_or_else(no_session_error)?;
         let out = git
             .worktree_state(req.branch.as_deref())
+            .await
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         json_result(&out)
     }
@@ -1307,6 +1320,7 @@ to suppress the safeguard entirely.")]
         let working_dir = PathBuf::from(&req.working_dir);
         let out = git
             .reset(&working_dir, mode, &req.target)
+            .await
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         json_result(&out)
     }
@@ -1319,6 +1333,7 @@ to suppress the safeguard entirely.")]
         let git = inner.git.as_mut().ok_or_else(no_session_error)?;
         let out = git
             .session_release()
+            .await
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         json_result(&out)
     }
@@ -1436,7 +1451,7 @@ to suppress the safeguard entirely.")]
         let inner = self.state.read().await;
         let publicity = inner.publicity.as_ref().ok_or_else(no_session_error)?;
         let results = match req.platform.as_deref() {
-            None => publicity.detect_all(),
+            None => publicity.detect_all().await,
             Some(label) => {
                 let p = Platform::parse(label).ok_or_else(|| {
                     McpError::invalid_params(
@@ -1446,7 +1461,7 @@ to suppress the safeguard entirely.")]
                         None,
                     )
                 })?;
-                vec![publicity.detect(p)]
+                vec![publicity.detect(p).await]
             }
         };
         let body = serde_json::json!({ "results": results });
