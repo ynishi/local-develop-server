@@ -14,6 +14,31 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **`git_cmd` / `git_cmd_combined` — async migration with tokio timeout**
+  — the `crates/git` shell-out helpers used blocking
+  `std::process::Command::output()` inside async MCP handlers, holding
+  the state `RwLock` read guard and freezing the entire lds MCP server
+  whenever a network git subcommand (`fetch` / `ls-remote` / remote
+  `rev-parse` / `branch_status` / `is_pushed` / `unpushed_commits` /
+  `tag_pushed`) hung. Both helpers are now `async fn` built on
+  `tokio::process::Command` + `tokio::time::timeout`, and every
+  callsite in `crates/git/src/{lib,read,remote,reset,session,write}.rs`,
+  `crates/lds/src/main.rs`, and `crates/publicity/src/lib.rs` has been
+  propagated with `.await`. New timeout constants `TIMEOUT_LOCAL`
+  (`Duration::from_secs(10)`, for cheap ops like `status` / `log` /
+  `diff` / `rev-parse HEAD` / `worktree list` / `commit` / `merge` /
+  `branch delete` / `reset` / `for-each-ref` / `rev-list --count`) and
+  `TIMEOUT_NETWORK` (`Duration::from_secs(60)`, for `fetch` /
+  `ls-remote` / remote `rev-parse`) are selected per callsite.
+  `kill_on_drop(true)` is set on every spawn so the subprocess is
+  killed when the timeout fires. Timeout errors carry the literal
+  message `"git <subcmd>: timed out after Ns"` so grep and tests can
+  identify the variant without introducing a typed enum (K-239 で
+  decided). Two new unit tests
+  (`git_cmd_reports_timeout_with_literal_message` /
+  `git_cmd_combined_reports_timeout_with_literal_message`) and 19
+  existing integration tests (converted to `#[tokio::test]`) all pass.
+
 ### Security
 
 ## [0.13.0] - 2026-07-22
