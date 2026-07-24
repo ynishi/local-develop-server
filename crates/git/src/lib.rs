@@ -93,9 +93,9 @@ impl GitModule {
     /// [`GitModule::worktree_add`] places worktrees on newly-created
     /// branches. Sourced from [`Session::worktrees_dir`], which resolves
     /// [`SessionConfig::worktrees_dir`] (explicit) → env
-    /// `LDS_WORKTREES_DIR` → `<session_root>/.worktrees` (default). See
-    /// [`SessionConfig::worktrees_dir`] for the setup expectation
-    /// (parent-repo gitignore requirement).
+    /// `LDS_WORKTREES_DIR` → `<session_root>/[`lds_core::DEFAULT_WORKTREES_SUBDIR`]`
+    /// (default). See [`SessionConfig::worktrees_dir`] for the setup
+    /// expectation (parent-repo gitignore requirement).
     pub(crate) fn worktrees_dir(&self) -> PathBuf {
         self.session.worktrees_dir().to_path_buf()
     }
@@ -168,8 +168,9 @@ pub(crate) async fn spawn_output(
 
     match tokio::time::timeout(timeout, child.wait_with_output()).await {
         Ok(Ok(output)) => Ok(output),
-        Ok(Err(e)) => Err(anyhow::Error::from(e))
-            .with_context(|| format!("failed to wait on git {display}")),
+        Ok(Err(e)) => {
+            Err(anyhow::Error::from(e)).with_context(|| format!("failed to wait on git {display}"))
+        }
         Err(_elapsed) => {
             // SIGKILL the whole process group so grandchildren (hook / gpg /
             // pinentry) die together. `kill_on_drop` already fired when the

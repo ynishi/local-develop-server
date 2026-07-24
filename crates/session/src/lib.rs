@@ -51,9 +51,9 @@ pub struct SessionConfig {
     /// `git add -A` / commit can silently absorb them (large accidental
     /// commit). Callers overriding this path (env or explicit field) must
     /// ensure the target is either outside the parent repo's tracking or
-    /// listed in the parent's `.gitignore`. `repo-readiness-check` C1
-    /// treats `.worktrees` as a Universal must-have gitignore entry for
-    /// the default path.
+    /// listed in the parent's `.gitignore`. For the default path,
+    /// a top-level `.worktrees` entry in the parent repo's `.gitignore`
+    /// is the recommended coverage.
     ///
     /// Absolute paths are taken verbatim. Relative paths are resolved
     /// against `root`.
@@ -104,13 +104,20 @@ pub struct Session {
     last_used_at: RwLock<u64>,
 }
 
+/// Canonical subdirectory name appended to the session root when no
+/// override (explicit config field or `LDS_WORKTREES_DIR` env) is set.
+///
+/// Single source of truth for the default worktrees dir literal — every
+/// doc comment, test, and downstream module referring to "the default"
+/// links to this constant instead of hardcoding the string.
+pub const DEFAULT_WORKTREES_SUBDIR: &str = ".worktrees";
+
 /// Resolve the effective worktrees directory from
-/// (config → env `LDS_WORKTREES_DIR` → default `<root>/.worktrees`).
+/// (config → env `LDS_WORKTREES_DIR` → default `<root>/[`DEFAULT_WORKTREES_SUBDIR`]`).
 /// Relative paths are anchored to `root`. Only invoked from
 /// [`Session::new`]; exposed as a free function for test coverage of
 /// the precedence rules.
 fn resolve_worktrees_dir(root: &Path, override_dir: Option<PathBuf>) -> PathBuf {
-    const DEFAULT_WORKTREES_SUBDIR: &str = ".worktrees";
     let candidate = override_dir
         .or_else(|| std::env::var_os("LDS_WORKTREES_DIR").map(PathBuf::from))
         .unwrap_or_else(|| PathBuf::from(DEFAULT_WORKTREES_SUBDIR));
@@ -159,8 +166,9 @@ impl Session {
     ///
     /// Absolute path. Resolved once at [`Session::new`] from
     /// [`SessionConfig::worktrees_dir`] → env `LDS_WORKTREES_DIR` →
-    /// `<root>/.worktrees`. See [`SessionConfig::worktrees_dir`] for the
-    /// setup expectation (gitignore requirement).
+    /// `<root>/[`DEFAULT_WORKTREES_SUBDIR`]` (default). See
+    /// [`SessionConfig::worktrees_dir`] for the setup expectation
+    /// (gitignore requirement).
     pub fn worktrees_dir(&self) -> &Path {
         &self.worktrees_dir
     }
@@ -636,7 +644,7 @@ mod tests {
     fn resolve_worktrees_dir_falls_back_to_default_subdir_when_no_override() {
         let root = PathBuf::from("/tmp/some-session-root");
         let got = resolve_worktrees_dir(&root, None);
-        assert_eq!(got, root.join(".worktrees"));
+        assert_eq!(got, root.join(DEFAULT_WORKTREES_SUBDIR));
     }
 
     #[test]

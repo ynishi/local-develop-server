@@ -1108,9 +1108,9 @@ Filters (all optional, AND-combined): `author` (case-sensitive substring against
 
     #[tool(description = "Create a session-owned git worktree on a new branch. \
                        The worktree is placed under the session-scoped worktrees dir \
-                       (SessionConfig::worktrees_dir → env LDS_WORKTREES_DIR → \
-                       <session_root>/.worktrees; the target must be gitignored in \
-                       the parent repo).")]
+                       resolved by SessionConfig::worktrees_dir (explicit config → \
+                       env LDS_WORKTREES_DIR → session default). The target must be \
+                       gitignored in the parent repo.")]
     async fn git_worktree_add(
         &self,
         Parameters(req): Parameters<GitWorktreeAddReq>,
