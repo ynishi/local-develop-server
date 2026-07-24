@@ -14,6 +14,34 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+### Security
+
+## [0.13.1] - 2026-07-24
+
+### Changed
+
+- **`SessionConfig::worktrees_dir` — externalize session-scoped worktree
+  root** — the `.worktrees` directory path used by `GitModule::worktree_add`
+  and `session_release` was hardcoded as a string literal inside
+  `crates/git`, scattered across doc comments / error messages / MCP tool
+  descriptions with no override path. It is now sourced from
+  `SessionConfig::worktrees_dir` (`Option<PathBuf>`), resolved once at
+  `Session::new` with precedence: explicit config field → env
+  `LDS_WORKTREES_DIR` → `<session_root>/.worktrees` (default; backward
+  compatible). Absolute paths are taken verbatim; relative paths are
+  anchored to the session root. The single documentation site for the
+  setup expectation (parent repo must gitignore the target — otherwise
+  worktree contents surface as untracked and can be swept into a
+  `git add -A`) now lives on the `SessionConfig::worktrees_dir` field
+  doc, with every downstream doc comment / error message / tool
+  description referring back to it by name instead of duplicating the
+  literal. Callers who relied on the `<root>/.worktrees` default see no
+  behaviour change; callers who want to place worktrees on a separate
+  volume (SSD, ramdisk, external drive) can now set `LDS_WORKTREES_DIR`
+  without patching the crate.
+
+### Fixed
+
 - **`git_cmd` / `git_cmd_combined` — async migration with tokio timeout**
   — the `crates/git` shell-out helpers used blocking
   `std::process::Command::output()` inside async MCP handlers, holding
@@ -38,8 +66,6 @@ All notable changes to this project will be documented in this file.
   (`git_cmd_reports_timeout_with_literal_message` /
   `git_cmd_combined_reports_timeout_with_literal_message`) and 19
   existing integration tests (converted to `#[tokio::test]`) all pass.
-
-### Security
 
 ## [0.13.0] - 2026-07-22
 
