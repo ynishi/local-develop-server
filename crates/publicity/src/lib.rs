@@ -166,9 +166,9 @@ impl PublicityModule {
     /// a git root with no remotes returns `LOCAL`, and either is a
     /// meaningful signal to callers. The crates probe runs only when a
     /// `Cargo.toml` is present.
-    pub fn detect_all(&self) -> Vec<PublicityResult> {
+    pub async fn detect_all(&self) -> Vec<PublicityResult> {
         let mut out = Vec::new();
-        out.push(self.detect_github());
+        out.push(self.detect_github().await);
         if self.session.root().join("Cargo.toml").is_file() {
             out.push(self.detect_crates());
         }
@@ -176,18 +176,18 @@ impl PublicityModule {
     }
 
     /// Classify exactly one platform.
-    pub fn detect(&self, platform: Platform) -> PublicityResult {
+    pub async fn detect(&self, platform: Platform) -> PublicityResult {
         match platform {
-            Platform::Github => self.detect_github(),
+            Platform::Github => self.detect_github().await,
             Platform::Crates => self.detect_crates(),
         }
     }
 
     /// Classify the current session root's github publicity.
-    pub fn detect_github(&self) -> PublicityResult {
+    pub async fn detect_github(&self) -> PublicityResult {
         let git = GitModule::new(self.session.clone());
         let gh = GhModule::new(self.session.clone());
-        detect_github_impl(&git, &gh)
+        detect_github_impl(&git, &gh).await
     }
 
     /// Classify the current session root's crates.io publicity.
@@ -237,14 +237,14 @@ impl PublicityModule {
 // GitHub classifier
 // ---------------------------------------------------------------------------
 
-fn detect_github_impl(git: &GitModule, gh: &GhModule) -> PublicityResult {
+async fn detect_github_impl(git: &GitModule, gh: &GhModule) -> PublicityResult {
     // 1. Enumerate remotes; failure to open the repo → NOT_GIT.
     //    `remote_list` shells out through `git`, so the error surfaces
     //    "not a git repository" / "repository at <root> not found" the
     //    same way `git remote -v` does. Distinct from LOCAL (git repo
     //    present but no remotes) so callers can tell "path has no .git"
     //    from "git init done, no push target".
-    let remotes = match git.remote_list() {
+    let remotes = match git.remote_list().await {
         Ok(r) => r.remotes,
         Err(e) => {
             return PublicityResult::new(
@@ -869,8 +869,8 @@ serde = "1"
 
     // -- Platform parse -----------------------------------------------------
 
-    #[test]
-    fn detect_github_non_git_root_returns_not_git() {
+    #[tokio::test]
+    async fn detect_github_non_git_root_returns_not_git() {
         // A tempdir with no `.git` inside must classify as NOT_GIT — the
         // classifier distinguishes "not a git repository at all" from
         // "git repo present but no remotes" (LOCAL).
@@ -886,7 +886,7 @@ serde = "1"
             .expect("session"),
         );
         let module = PublicityModule::new(session);
-        let result = module.detect_github();
+        let result = module.detect_github().await;
         assert_eq!(
             result.publicity,
             Publicity::NotGit,

@@ -11,7 +11,7 @@ use std::path::PathBuf;
 use anyhow::Result;
 
 use crate::output::SessionReleaseOutput;
-use crate::{GitModule, git_cmd};
+use crate::{GitModule, TIMEOUT_LOCAL, git_cmd};
 
 impl GitModule {
     /// Adopt orphan worktrees under `.worktrees/` (those known to `git
@@ -22,8 +22,13 @@ impl GitModule {
     /// Returns the set of worktrees / branches that were newly adopted.
     /// Already-owned entries are skipped silently — calling this repeatedly
     /// is idempotent.
-    pub fn session_release(&mut self) -> Result<SessionReleaseOutput> {
-        let raw = git_cmd(self.session().root(), &["worktree", "list", "--porcelain"])?;
+    pub async fn session_release(&mut self) -> Result<SessionReleaseOutput> {
+        let raw = git_cmd(
+            self.session().root(),
+            &["worktree", "list", "--porcelain"],
+            TIMEOUT_LOCAL,
+        )
+        .await?;
 
         let mut adopted_worktrees: Vec<PathBuf> = Vec::new();
         let mut adopted_branches: Vec<String> = Vec::new();
