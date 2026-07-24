@@ -16,6 +16,91 @@ All notable changes to this project will be documented in this file.
 
 ### Security
 
+## [0.13.2] - 2026-07-24
+
+### Changed
+
+- **`.worktrees` default subdir literal — single-source-of-truth via
+  `lds_core::DEFAULT_WORKTREES_SUBDIR`** — the default worktrees dir
+  name was hardcoded as the string literal `".worktrees"` in a
+  function-local `const` inside `resolve_worktrees_dir`, in the
+  `Session::worktrees_dir` accessor doc comment, in the
+  `resolve_worktrees_dir_falls_back_to_default_subdir_when_no_override`
+  unit test, and in the `GitModule::worktrees_dir` doc comment on the
+  sibling `lds-git` crate — four independent copies that would drift
+  the moment the default changed. Promoted the constant to a
+  module-level `pub const DEFAULT_WORKTREES_SUBDIR: &str` in
+  `lds-session` and re-exported it from `lds-core` so downstream crates
+  can reference the canonical value. Doc comments now use rustdoc
+  intra-doc links (`[`lds_core::DEFAULT_WORKTREES_SUBDIR`]`) instead of
+  repeating the literal; the test asserts against the constant. The
+  `git_worktree_add` MCP tool description drops the literal (proc-macro
+  attribute strings can't interpolate a `const`) and refers callers to
+  `SessionConfig::worktrees_dir` for the effective path.
+- **`crates/session/src/lib.rs` `SessionConfig::worktrees_dir` doc
+  comment — remove internal Agent name reference from public API doc**
+  — the doc comment previously mentioned an agent-profiles-internal
+  pipeline gate name when explaining why the target directory has to be
+  gitignored. Reworded to describe the invariant generically ("a
+  top-level `.worktrees` entry in the parent repo's `.gitignore` is
+  the recommended coverage") so the public docs.rs surface does not
+  leak orchestration-side terminology.
+
+### Fixed
+
+- **`git_cmd` / libgit2 — hang-proof timeout + spawn_blocking migration**
+  — two independent bugs let `mcp__lds__git_commit` (and every git tool
+  that shells out via `git_cmd`) wedge the caller for well over 100
+  seconds and leave zombie git subprocesses behind. Both are fixed in
+  this release.
+
+  *Axis 1 — subprocess timeout + process group.* `tokio::process::Command`
+  was configured with `kill_on_drop(true)` only, so SIGKILL on timeout
+  reached the direct git child but nothing spawned by it (pre-commit
+  hooks, `gpg`, `pinentry`, `husky`, `stylua`). Grandchildren survived,
+  got reparented to launchd, and the outer `git commit` stayed alive
+  waiting on them — the 10s timeout never fired in the worst case.
+  A new shared `spawn_output` helper in `crates/git/src/lib.rs` now:
+  sets `Command::process_group(0)` on Unix so the child leads a fresh
+  group; captures the child pid before `wait_with_output()` is polled;
+  on timeout, calls `libc::killpg(pid, SIGKILL)` explicitly so the
+  entire process group dies together. All five shell-out sites
+  (`git_cmd`, `git_cmd_combined`, `enumerate_changes`, `is_ignored`,
+  `resolve_upstream`) route through it. `TIMEOUT_LOCAL` is bumped from
+  10s to 30s — a single-shot ceiling that normal local git never
+  approaches (it completes in milliseconds), sized so callers with
+  legitimate reasons to run longer can thread a custom `Duration`
+  through `git_cmd` explicitly. Timeout errors now carry the literal
+  message `"git <subcmd>: timed out after Ns (SIGKILL sent to process
+  group)"`. Adds `libc = "0.2"` as a `cfg(unix)` dependency.
+
+  *Axis 2 — libgit2 to spawn_blocking (Isle pattern).* `Repository::open`
+  and every operation reachable from a `git2::Repository` is a
+  synchronous C call that blocks the calling thread on FS reads;
+  `Repository` is not `Send` either. The previous `crates/git/src/read.rs`
+  and `crates/git/src/remote.rs` modules invoked them directly from
+  `async fn`, so any slow-disk libgit2 sweep occupied a tokio worker
+  thread and could cascade-block other MCP tool calls on that runtime.
+  `GitModule::status` / `log` / `diff` are now `pub async fn` that
+  clone `Arc<Session>` into a `blocking(move || …)` closure backed by
+  `tokio::task::spawn_blocking`; the synchronous bodies are split out
+  as `status_sync` / `log_sync` / `diff_sync` free functions. The same
+  treatment is applied to `branch_status` (revparse +
+  `graph_ahead_behind` + `merge_base`) and the ahead/behind branch of
+  `worktree_state` in `remote.rs`. Callers updated: three tool handlers
+  in `crates/lds/src/main.rs` (`git_status` / `git_log` / `git_diff`)
+  now `.await` the newly-async methods; 14 call sites in
+  `crates/git/tests/git_integration.rs` gain `.await` before
+  `.unwrap()`.
+
+  Verification: `cargo test --workspace` (219 pass, 0 fail),
+  `cargo clippy --workspace --all-targets` (0 warnings), integration
+  suite includes all 12 commit-path variants, and the timeout literal
+  message contract test now exercises the `spawn_output` helper
+  (process_group + killpg on Unix).
+
+### Security
+
 ## [0.13.1] - 2026-07-24
 
 ### Changed
