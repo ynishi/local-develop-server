@@ -877,6 +877,7 @@ dependencies = [
  "anyhow",
  "git2",
  "lds-core",
+ "libc",
  "serde",
  "serde_json",
  "tempfile",

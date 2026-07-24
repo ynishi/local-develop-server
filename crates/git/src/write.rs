@@ -13,7 +13,7 @@ use crate::output::{
     BranchDeleteOutput, CommitOutput, DotfileWarning, MergeOutput, OtherStagedMode,
     WorktreeAddOutput, WorktreeRemoveOutput,
 };
-use crate::{GitModule, TIMEOUT_LOCAL, git_cmd};
+use crate::{GitModule, TIMEOUT_LOCAL, git_cmd, spawn_output};
 
 impl GitModule {
     /// Create a new worktree at `<worktrees_dir>/<name>` on a new branch.
@@ -396,17 +396,8 @@ fn is_dotfile_path(p: &str) -> bool {
 async fn enumerate_changes(working_dir: &Path) -> Result<Vec<String>> {
     let mut cmd = tokio::process::Command::new("git");
     cmd.args(["status", "--porcelain=v1", "-z", "--untracked-files=all"])
-        .current_dir(working_dir)
-        .kill_on_drop(true);
-    let output = match tokio::time::timeout(TIMEOUT_LOCAL, cmd.output()).await {
-        Ok(Ok(o)) => o,
-        Ok(Err(e)) => {
-            return Err(anyhow::Error::from(e)).context("failed to run git status --porcelain");
-        }
-        Err(_elapsed) => {
-            bail!("git status: timed out after {}s", TIMEOUT_LOCAL.as_secs());
-        }
-    };
+        .current_dir(working_dir);
+    let output = spawn_output(&mut cmd, "status", TIMEOUT_LOCAL).await?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         bail!("git status --porcelain: {}", stderr.trim());
@@ -446,18 +437,17 @@ async fn is_tracked(working_dir: &Path, path: &str) -> Result<bool> {
 /// `true` when `git check-ignore` marks `path` as ignored. `check-ignore`
 /// uses exit 1 as "not ignored" (a normal signal, not an error), so this
 /// bypasses [`git_cmd`] and inspects the exit status directly.
+///
+/// Any error (spawn failure, timeout with SIGKILL sent to the process group,
+/// non-zero exit that isn't 0) collapses to `false` — preserves the
+/// pre-async "never propagate" contract.
 async fn is_ignored(working_dir: &Path, path: &str) -> bool {
     let mut cmd = tokio::process::Command::new("git");
     cmd.args(["check-ignore", "--quiet", "--", path])
-        .current_dir(working_dir)
-        .kill_on_drop(true);
-    match tokio::time::timeout(TIMEOUT_LOCAL, cmd.output()).await {
-        Ok(Ok(o)) => o.status.code() == Some(0),
-        // IO error → not ignored (matches the pre-async contract).
-        Ok(Err(_)) => false,
-        // Timeout Elapsed → not ignored. Preserves the "never propagate"
-        // contract; anyhow::Error must not surface here.
-        Err(_elapsed) => false,
+        .current_dir(working_dir);
+    match spawn_output(&mut cmd, "check-ignore", TIMEOUT_LOCAL).await {
+        Ok(o) => o.status.code() == Some(0),
+        Err(_) => false,
     }
 }
 

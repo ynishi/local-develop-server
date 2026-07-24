@@ -10,6 +10,7 @@
 
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use git2::Repository;
@@ -18,7 +19,8 @@ use crate::output::{
     BranchStatusOutput, CommitEntry, FetchOutput, IsPushedOutput, RemoteEntry, RemoteListOutput,
     TagPushedOutput, UnpushedCommitsOutput, WorktreeStateOutput,
 };
-use crate::{GitModule, TIMEOUT_LOCAL, TIMEOUT_NETWORK, git_cmd, git_cmd_combined};
+use crate::read::blocking;
+use crate::{GitModule, TIMEOUT_LOCAL, TIMEOUT_NETWORK, git_cmd, git_cmd_combined, spawn_output};
 
 impl GitModule {
     /// Fetch from a remote.
@@ -93,32 +95,38 @@ impl GitModule {
     /// `git merge-base` shell-out for the common-ancestor sha (git2's
     /// `merge_base` returns an OID but we want the textual form).
     pub async fn branch_status(&self, branch: &str, base: &str) -> Result<BranchStatusOutput> {
-        let repo = Repository::open(self.session().root())?;
-        let branch_oid = repo
-            .revparse_single(branch)
-            .with_context(|| format!("revparse failed: {branch}"))?
-            .id();
-        let base_oid = repo
-            .revparse_single(base)
-            .with_context(|| format!("revparse failed: {base}"))?
-            .id();
-        let (ahead, behind) = repo
-            .graph_ahead_behind(branch_oid, base_oid)
-            .with_context(|| format!("graph_ahead_behind({branch}, {base})"))?;
+        let session = Arc::clone(&self.session);
+        let branch = branch.to_string();
+        let base = base.to_string();
+        blocking(move || {
+            let repo = Repository::open(session.root())?;
+            let branch_oid = repo
+                .revparse_single(&branch)
+                .with_context(|| format!("revparse failed: {branch}"))?
+                .id();
+            let base_oid = repo
+                .revparse_single(&base)
+                .with_context(|| format!("revparse failed: {base}"))?
+                .id();
+            let (ahead, behind) = repo
+                .graph_ahead_behind(branch_oid, base_oid)
+                .with_context(|| format!("graph_ahead_behind({branch}, {base})"))?;
 
-        let common_ancestor = repo
-            .merge_base(branch_oid, base_oid)
-            .ok()
-            .map(|oid| oid.to_string());
+            let common_ancestor = repo
+                .merge_base(branch_oid, base_oid)
+                .ok()
+                .map(|oid| oid.to_string());
 
-        Ok(BranchStatusOutput {
-            branch: branch.to_string(),
-            base: base.to_string(),
-            ahead: ahead as u32,
-            behind: behind as u32,
-            up_to_date: ahead == 0 && behind == 0,
-            common_ancestor,
+            Ok(BranchStatusOutput {
+                branch,
+                base,
+                ahead: ahead as u32,
+                behind: behind as u32,
+                up_to_date: ahead == 0 && behind == 0,
+                common_ancestor,
+            })
         })
+        .await
     }
 
     /// List commits that exist on `branch` but not on `<remote>/<branch>`.
@@ -235,14 +243,19 @@ impl GitModule {
 
         let tracking = resolve_upstream(root).await?;
 
-        let (ahead, behind) = if let Some(ref upstream) = tracking {
-            let repo = Repository::open(root)?;
-            let branch_oid = repo.revparse_single(&resolved_branch)?.id();
-            let upstream_oid = repo.revparse_single(upstream)?.id();
-            let (a, b) = repo
-                .graph_ahead_behind(branch_oid, upstream_oid)
-                .unwrap_or((0, 0));
-            (a as u32, b as u32)
+        let (ahead, behind) = if let Some(upstream) = tracking.clone() {
+            let session = Arc::clone(&self.session);
+            let branch_for_walk = resolved_branch.clone();
+            blocking(move || {
+                let repo = Repository::open(session.root())?;
+                let branch_oid = repo.revparse_single(&branch_for_walk)?.id();
+                let upstream_oid = repo.revparse_single(&upstream)?.id();
+                let (a, b) = repo
+                    .graph_ahead_behind(branch_oid, upstream_oid)
+                    .unwrap_or((0, 0));
+                Ok((a as u32, b as u32))
+            })
+            .await?
         } else {
             (0, 0)
         };
@@ -271,21 +284,8 @@ impl GitModule {
 async fn resolve_upstream(root: &Path) -> Result<Option<String>> {
     let mut cmd = tokio::process::Command::new("git");
     cmd.args(["rev-parse", "--abbrev-ref", "@{upstream}"])
-        .current_dir(root)
-        .kill_on_drop(true);
-    let output = match tokio::time::timeout(TIMEOUT_LOCAL, cmd.output()).await {
-        Ok(Ok(o)) => o,
-        Ok(Err(e)) => {
-            return Err(anyhow::Error::from(e))
-                .context("failed to spawn git rev-parse @{upstream}");
-        }
-        Err(_elapsed) => {
-            bail!(
-                "git rev-parse @{{upstream}}: timed out after {}s",
-                TIMEOUT_LOCAL.as_secs()
-            );
-        }
-    };
+        .current_dir(root);
+    let output = spawn_output(&mut cmd, "rev-parse", TIMEOUT_LOCAL).await?;
     if output.status.success() {
         let raw = String::from_utf8_lossy(&output.stdout).trim().to_string();
         return Ok(if raw.is_empty() { None } else { Some(raw) });

@@ -1038,6 +1038,7 @@ impl LdsServer {
         let git = inner.git.as_ref().ok_or_else(no_session_error)?;
         let out = git
             .status()
+            .await
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         json_result(&out)
     }
@@ -1073,6 +1074,7 @@ Filters (all optional, AND-combined): `author` (case-sensitive substring against
         };
         let out = git
             .log(filters)
+            .await
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         json_result(&out)
     }
@@ -1088,6 +1090,7 @@ Filters (all optional, AND-combined): `author` (case-sensitive substring against
         let git = inner.git.as_ref().ok_or_else(no_session_error)?;
         let out = git
             .diff(req.staged)
+            .await
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         json_result(&out)
     }

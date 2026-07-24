@@ -94,6 +94,7 @@ async fn worktree_lifecycle() {
             max_count: 5,
             ..Default::default()
         })
+        .await
         .unwrap();
     assert!(
         log.commits
@@ -147,6 +148,7 @@ async fn log_filters_by_author_paths_and_since() {
             author: Some("Bob".to_string()),
             ..Default::default()
         })
+        .await
         .unwrap();
     assert_eq!(bob_only.commits.len(), 1);
     assert_eq!(bob_only.commits[0].summary, "add b.txt");
@@ -159,6 +161,7 @@ async fn log_filters_by_author_paths_and_since() {
             paths: Some(vec!["b.txt".to_string()]),
             ..Default::default()
         })
+        .await
         .unwrap();
     assert_eq!(touches_b.commits.len(), 1);
     assert_eq!(touches_b.commits[0].summary, "add b.txt");
@@ -170,6 +173,7 @@ async fn log_filters_by_author_paths_and_since() {
             paths: Some(vec!["a.txt".to_string()]),
             ..Default::default()
         })
+        .await
         .unwrap();
     assert_eq!(touches_a.commits.len(), 2);
 
@@ -181,6 +185,7 @@ async fn log_filters_by_author_paths_and_since() {
             since: Some(head_ts + 1),
             ..Default::default()
         })
+        .await
         .unwrap();
     assert_eq!(none.commits.len(), 0);
 
@@ -191,6 +196,7 @@ async fn log_filters_by_author_paths_and_since() {
             author: Some("Alice".to_string()),
             ..Default::default()
         })
+        .await
         .unwrap();
     assert_eq!(capped.commits.len(), 1);
 
@@ -201,6 +207,7 @@ async fn log_filters_by_author_paths_and_since() {
             grep: Some("update".to_string()),
             ..Default::default()
         })
+        .await
         .unwrap();
     assert_eq!(updates.commits.len(), 1);
     assert_eq!(updates.commits[0].summary, "update a.txt");
@@ -211,6 +218,7 @@ async fn log_filters_by_author_paths_and_since() {
             grep: Some("does-not-appear".to_string()),
             ..Default::default()
         })
+        .await
         .unwrap();
     assert_eq!(no_match.commits.len(), 0);
 
@@ -305,7 +313,7 @@ async fn status_partitions_staged_unstaged_untracked() {
     // Clean state right after the initial commit.
     // The `.worktrees/` directory created by init_temp_repo is itself
     // untracked, so the clean predicate examines staged + unstaged only.
-    let status = git.status().unwrap();
+    let status = git.status().await.unwrap();
     assert!(status.staged.is_empty(), "staged was {:?}", status.staged);
     assert!(
         status.unstaged.is_empty(),
@@ -317,7 +325,7 @@ async fn status_partitions_staged_unstaged_untracked() {
 
     // Add an untracked file.
     std::fs::write(tmp.path().join("untracked.txt"), "u\n").unwrap();
-    let status = git.status().unwrap();
+    let status = git.status().await.unwrap();
     assert!(
         status
             .untracked
@@ -333,7 +341,7 @@ async fn status_partitions_staged_unstaged_untracked() {
         .current_dir(tmp.path())
         .output()
         .unwrap();
-    let status = git.status().unwrap();
+    let status = git.status().await.unwrap();
     assert!(
         status
             .staged
@@ -359,7 +367,7 @@ async fn diff_distinguishes_staged_from_unstaged() {
         .output()
         .unwrap();
 
-    let unstaged = git.diff(false).unwrap();
+    let unstaged = git.diff(false).await.unwrap();
     assert!(!unstaged.staged);
     assert_eq!(
         unstaged.file_count, 0,
@@ -367,7 +375,7 @@ async fn diff_distinguishes_staged_from_unstaged() {
         unstaged.patch
     );
 
-    let staged = git.diff(true).unwrap();
+    let staged = git.diff(true).await.unwrap();
     assert!(staged.staged);
     assert_eq!(staged.file_count, 1);
     assert!(
@@ -379,7 +387,7 @@ async fn diff_distinguishes_staged_from_unstaged() {
     // Re-modify README without staging: that further change shows in the
     // unstaged diff (worktree-vs-index).
     std::fs::write(tmp.path().join("README.md"), "init\nchanged\nagain\n").unwrap();
-    let unstaged = git.diff(false).unwrap();
+    let unstaged = git.diff(false).await.unwrap();
     assert!(!unstaged.staged);
     assert_eq!(unstaged.file_count, 1);
     assert!(

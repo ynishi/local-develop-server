@@ -135,6 +135,64 @@ impl GitModule {
     }
 }
 
+/// Spawn `cmd` in a new process group (Unix), pipe stdout/stderr, wait for
+/// completion with a timeout. On timeout, sends `SIGKILL` to the entire
+/// process group so grandchildren (pre-commit hooks, gpg, pinentry, husky,
+/// etc.) are killed together — plain `kill_on_drop` only reaps the direct
+/// child, letting grandchildren survive as orphans and appear as zombies.
+///
+/// `display` is used as the subcommand label in the timeout error message
+/// (typically the first arg, e.g. `"commit"` for `git commit`).
+///
+/// Returns raw [`std::process::Output`]; callers inspect `status` themselves
+/// (needed for `git check-ignore` where exit 1 is data, `git rev-parse
+/// @{upstream}` where exit 128 is data, etc.).
+pub(crate) async fn spawn_output(
+    cmd: &mut tokio::process::Command,
+    display: &str,
+    timeout: Duration,
+) -> Result<std::process::Output> {
+    use std::process::Stdio;
+
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    #[cfg(unix)]
+    cmd.process_group(0);
+
+    let child = cmd
+        .spawn()
+        .with_context(|| format!("failed to spawn git {display}"))?;
+    let pid = child.id();
+
+    match tokio::time::timeout(timeout, child.wait_with_output()).await {
+        Ok(Ok(output)) => Ok(output),
+        Ok(Err(e)) => Err(anyhow::Error::from(e))
+            .with_context(|| format!("failed to wait on git {display}")),
+        Err(_elapsed) => {
+            // SIGKILL the whole process group so grandchildren (hook / gpg /
+            // pinentry) die together. `kill_on_drop` already fired when the
+            // inner future was dropped, but only reaches the direct child.
+            #[cfg(unix)]
+            if let Some(pid) = pid {
+                // SAFETY: killpg with SIGKILL is always safe; worst case the
+                // group has already exited and we get ESRCH which we ignore.
+                unsafe {
+                    libc::killpg(pid as i32, libc::SIGKILL);
+                }
+            }
+            #[cfg(not(unix))]
+            let _ = pid;
+            bail!(
+                "git {}: timed out after {}s (SIGKILL sent to process group)",
+                display,
+                timeout.as_secs()
+            );
+        }
+    }
+}
+
 /// Run `git <args>` inside `cwd`, returning trimmed stdout on success.
 ///
 /// Shared by every module that needs to shell out (fetch, ls-remote,
@@ -145,27 +203,13 @@ impl GitModule {
 /// here to keep the implementation honest about what stock `git` would do.
 pub(crate) async fn git_cmd(cwd: &Path, args: &[&str], timeout: Duration) -> Result<String> {
     let mut cmd = tokio::process::Command::new("git");
-    cmd.args(args).current_dir(cwd).kill_on_drop(true);
-
-    let result = tokio::time::timeout(timeout, cmd.output()).await;
-    let output = match result {
-        Ok(Ok(o)) => o,
-        Ok(Err(e)) => {
-            return Err(anyhow::Error::from(e))
-                .with_context(|| format!("failed to run git {}", args.first().unwrap_or(&"")));
-        }
-        Err(_elapsed) => {
-            bail!(
-                "git {}: timed out after {}s",
-                args.first().unwrap_or(&""),
-                timeout.as_secs()
-            );
-        }
-    };
+    cmd.args(args).current_dir(cwd);
+    let display = args.first().copied().unwrap_or("");
+    let output = spawn_output(&mut cmd, display, timeout).await?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!("git {}: {}", args.first().unwrap_or(&""), stderr.trim());
+        bail!("git {}: {}", display, stderr.trim());
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
@@ -178,30 +222,16 @@ pub(crate) async fn git_cmd_combined(
     timeout: Duration,
 ) -> Result<String> {
     let mut cmd = tokio::process::Command::new("git");
-    cmd.args(args).current_dir(cwd).kill_on_drop(true);
-
-    let result = tokio::time::timeout(timeout, cmd.output()).await;
-    let output = match result {
-        Ok(Ok(o)) => o,
-        Ok(Err(e)) => {
-            return Err(anyhow::Error::from(e))
-                .with_context(|| format!("failed to run git {}", args.first().unwrap_or(&"")));
-        }
-        Err(_elapsed) => {
-            bail!(
-                "git {}: timed out after {}s",
-                args.first().unwrap_or(&""),
-                timeout.as_secs()
-            );
-        }
-    };
+    cmd.args(args).current_dir(cwd);
+    let display = args.first().copied().unwrap_or("");
+    let output = spawn_output(&mut cmd, display, timeout).await?;
 
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
 
     if !output.status.success() {
         let combined = if stderr.is_empty() { stdout } else { stderr };
-        bail!("git {}: {}", args.first().unwrap_or(&""), combined);
+        bail!("git {}: {}", display, combined);
     }
 
     Ok(match (stdout.is_empty(), stderr.is_empty()) {
@@ -216,7 +246,12 @@ pub(crate) async fn git_cmd_combined(
 /// (rev-parse HEAD, status, log, diff, branch --show-current, worktree list,
 /// commit, merge, worktree add/remove, branch -d, reset, check-ignore,
 /// rev-parse @{upstream}, for-each-ref, rev-list --count).
-pub(crate) const TIMEOUT_LOCAL: Duration = Duration::from_secs(10);
+///
+/// 30s is a "should never realistically be hit" ceiling — normal local git
+/// completes in milliseconds. Callers that legitimately need longer (e.g.
+/// grep over a multi-GB working tree) should thread a custom `Duration`
+/// through `git_cmd` / `spawn_output` explicitly.
+pub(crate) const TIMEOUT_LOCAL: Duration = Duration::from_secs(30);
 
 /// Timeout for git subcommands that hit the network (fetch, ls-remote,
 /// anything that would talk to a remote transport).
