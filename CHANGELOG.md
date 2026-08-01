@@ -16,6 +16,42 @@ All notable changes to this project will be documented in this file.
 
 ### Security
 
+## [0.13.3] - 2026-08-01
+
+### Added
+
+- **Stash transaction management (`git_stash_*` MCP tools + `git_reset`
+  guard)** — new sub-module `crates/git/src/stash.rs` and six MCP tools
+  (`git_stash_list` / `git_stash_show` / `git_stash_apply` /
+  `git_stash_abort` / `git_stash_finalize` / `git_stash_restore`) that
+  turn `git stash` from a single-shot `pop` into an explicit
+  apply → verify → finalize transaction. `git_stash_apply` refuses to
+  run unless the working tree is clean (staged/unstaged empty; untracked
+  files are allowed) so that a rollback is always total, keeps the entry
+  on success, and auto-rolls back on conflict with the entry intact.
+  `git_stash_abort` reverts every path the entry touches back to HEAD
+  without dropping the entry. `git_stash_finalize` is the only drop path
+  and always returns `dropped_sha` — the stash commit stays reachable
+  until `git gc` prunes it, so `git_stash_restore(dropped_sha)`
+  reattaches it to `refs/stash` (rejected when the sha is not
+  stash-shaped or is already in the list). `git_reset` gains a `force`
+  field: `mode="hard"` is now refused when stash entries exist and the
+  working tree is dirty (the shape of a half-verified apply) unless
+  `force=true` is passed. `stash push` / `stash pop` / bare `stash drop`
+  / `stash clear` are permanently out of scope — parking work belongs to
+  `git_worktree_add`, and every drop must surface its sha so nothing is
+  silently discarded.
+
+### Changed
+
+### Deprecated
+
+### Removed
+
+### Fixed
+
+### Security
+
 ## [0.13.2] - 2026-07-24
 
 ### Changed
