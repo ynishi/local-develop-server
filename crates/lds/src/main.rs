@@ -507,6 +507,44 @@ struct GitResetReq {
     mode: String,
     /// Revspec or sha to move HEAD to.
     target: String,
+    /// `false` (default) keeps the stash guard: `mode="hard"` is refused when
+    /// stash entries exist and the working tree is dirty. `true` proceeds
+    /// anyway.
+    #[serde(default)]
+    force: bool,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct GitStashShowReq {
+    /// Position in the stash list (`stash@{index}`), 0 == most recent.
+    index: usize,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct GitStashRestoreReq {
+    /// Working directory inside a session-owned worktree.
+    working_dir: String,
+    /// Object id of the stash commit to put back (>= 7 hex chars) — normally
+    /// the `dropped_sha` reported by `git_stash_finalize`. Revspecs such as
+    /// `HEAD` or a branch name are rejected.
+    sha: String,
+    /// Reflog message for the restored entry. Defaults to the stash commit's
+    /// own summary, i.e. the message the entry had before it was dropped.
+    #[serde(default)]
+    message: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct GitStashTxReq {
+    /// Working directory inside a session-owned worktree.
+    working_dir: String,
+    /// Position in the stash list (`stash@{index}`), 0 == most recent.
+    index: usize,
+    /// Sha (full or >= 7-char prefix) the caller expects at `index`. Indexes
+    /// shift whenever an entry is dropped; passing the sha from an earlier
+    /// `git_stash_list` turns a silent wrong-entry operation into an error.
+    #[serde(default)]
+    expected_sha: Option<String>,
 }
 
 fn default_origin() -> String {
@@ -1306,7 +1344,10 @@ to suppress the safeguard entirely.")]
     }
 
     #[tool(
-        description = "Reset HEAD in a session-owned working directory. mode = soft | mixed | hard"
+        description = "Reset HEAD in a session-owned working directory. mode = soft | mixed | hard. \
+mode=hard is refused when the repo has stash entries AND the working tree is dirty — that shape \
+means an applied stash is in flight, and --hard would destroy it without a trace. Undo the apply \
+with git_stash_abort (the entry survives), or pass force=true when the reset is genuinely intended."
     )]
     async fn git_reset(
         &self,
@@ -1327,7 +1368,124 @@ to suppress the safeguard entirely.")]
         };
         let working_dir = PathBuf::from(&req.working_dir);
         let out = git
-            .reset(&working_dir, mode, &req.target)
+            .reset(&working_dir, mode, &req.target, req.force)
+            .await
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        json_result(&out)
+    }
+
+    #[tool(
+        description = "List git stash entries as JSON ({stashes: [{index, sha, message, has_untracked}]}). \
+Read-only. `sha` is stable while `index` shifts on every drop — carry the sha into the \
+apply / abort / finalize calls as expected_sha."
+    )]
+    async fn git_stash_list(&self) -> Result<CallToolResult, McpError> {
+        let inner = self.state.read().await;
+        let git = inner.git.as_ref().ok_or_else(no_session_error)?;
+        let out = git
+            .stash_list()
+            .await
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        json_result(&out)
+    }
+
+    #[tool(
+        description = "Inspect one stash entry without applying it: patch against the commit it was \
+taken on, the tracked paths it touches, and the untracked paths it carries (git stash push -u). \
+Read-only."
+    )]
+    async fn git_stash_show(
+        &self,
+        Parameters(req): Parameters<GitStashShowReq>,
+    ) -> Result<CallToolResult, McpError> {
+        let inner = self.state.read().await;
+        let git = inner.git.as_ref().ok_or_else(no_session_error)?;
+        let out = git
+            .stash_show(req.index)
+            .await
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        json_result(&out)
+    }
+
+    #[tool(
+        description = "Apply a stash entry into a session-owned working directory, KEEPING the entry \
+(step 1 of 2). Requires a clean working tree: any staged or unstaged change is refused so the \
+applied content never mixes with hand edits (untracked files are allowed). Also refused when the \
+entry's untracked files already exist on disk. On conflict the working tree is rolled back \
+automatically and the entry is left intact. Verify the result, then call git_stash_finalize to \
+drop the entry, or git_stash_abort to undo. There is no pop tool by design — pop would drop the \
+entry before anyone could check the apply."
+    )]
+    async fn git_stash_apply(
+        &self,
+        Parameters(req): Parameters<GitStashTxReq>,
+    ) -> Result<CallToolResult, McpError> {
+        let inner = self.state.read().await;
+        let git = inner.git.as_ref().ok_or_else(no_session_error)?;
+        let working_dir = PathBuf::from(&req.working_dir);
+        let out = git
+            .stash_apply(&working_dir, req.index, req.expected_sha)
+            .await
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        json_result(&out)
+    }
+
+    #[tool(
+        description = "Undo an applied stash: every path the entry touches goes back to its HEAD \
+state and the entry itself is kept. Edits layered on top of the applied stash are discarded too \
+(the apply's clean-tree precondition is what makes that safe). Use this instead of \
+git_reset mode=hard when a stash apply turned out wrong."
+    )]
+    async fn git_stash_abort(
+        &self,
+        Parameters(req): Parameters<GitStashTxReq>,
+    ) -> Result<CallToolResult, McpError> {
+        let inner = self.state.read().await;
+        let git = inner.git.as_ref().ok_or_else(no_session_error)?;
+        let working_dir = PathBuf::from(&req.working_dir);
+        let out = git
+            .stash_abort(&working_dir, req.index, req.expected_sha)
+            .await
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        json_result(&out)
+    }
+
+    #[tool(
+        description = "Drop a stash entry after its applied content has been verified (step 2 of 2). \
+Returns dropped_sha — the stash commit stays reachable until git gc prunes it, so \
+`git stash apply <dropped_sha>` still recovers the content. Record it; it is the difference \
+between dropped and lost. This is the only drop path: bare drop / clear are not exposed."
+    )]
+    async fn git_stash_finalize(
+        &self,
+        Parameters(req): Parameters<GitStashTxReq>,
+    ) -> Result<CallToolResult, McpError> {
+        let inner = self.state.read().await;
+        let git = inner.git.as_ref().ok_or_else(no_session_error)?;
+        let working_dir = PathBuf::from(&req.working_dir);
+        let out = git
+            .stash_finalize(&working_dir, req.index, req.expected_sha)
+            .await
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        json_result(&out)
+    }
+
+    #[tool(
+        description = "Put a dropped stash entry back on refs/stash: pass the dropped_sha that \
+git_stash_finalize returned. A drop only removes the reflog entry — the commit itself survives \
+unreferenced until git gc prunes it, so this works until gc runs (and not after). The restored \
+entry lands at stash@{0}, keeping its original message unless `message` overrides it. Refused \
+when the sha is not stash-shaped (>= 2 parents) or is already in the stash list."
+    )]
+    async fn git_stash_restore(
+        &self,
+        Parameters(req): Parameters<GitStashRestoreReq>,
+    ) -> Result<CallToolResult, McpError> {
+        let inner = self.state.read().await;
+        let git = inner.git.as_ref().ok_or_else(no_session_error)?;
+        let working_dir = PathBuf::from(&req.working_dir);
+        let out = git
+            .stash_restore(&working_dir, &req.sha, req.message)
             .await
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         json_result(&out)

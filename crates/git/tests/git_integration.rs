@@ -427,7 +427,7 @@ async fn reset_moves_head_back() {
 
     // Reset back to the first commit.
     let result = git
-        .reset(tmp.path(), ResetMode::Hard, &before_sha)
+        .reset(tmp.path(), ResetMode::Hard, &before_sha, false)
         .await
         .expect("reset");
     assert!(matches!(result.mode, ResetMode::Hard));
@@ -1038,5 +1038,591 @@ async fn commit_detects_nested_dotdir_component() {
             .any(|p| p.starts_with(".claude/")),
         "expected .claude/... in skipped, got {:?}",
         commit.dotfile_skipped
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Stash transaction (apply / abort / finalize)
+// ---------------------------------------------------------------------------
+
+/// Run `git <args>` in `dir`, asserting success. Test-only helper for seeding
+/// stash state the way a human would (`git stash push` is deliberately not
+/// exposed by the module under test).
+fn git_run(dir: &Path, args: &[&str]) {
+    let out = Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+fn read(dir: &Path, rel: &str) -> String {
+    std::fs::read_to_string(dir.join(rel)).unwrap()
+}
+
+#[tokio::test]
+async fn stash_list_reports_entries_and_untracked_flag() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_temp_repo(tmp.path());
+    let session = make_session(tmp.path());
+    let git = GitModule::new(session);
+
+    // Entry 1: tracked modification only.
+    std::fs::write(tmp.path().join("README.md"), "init\ntracked edit\n").unwrap();
+    git_run(tmp.path(), &["stash", "push", "-m", "wip tracked"]);
+
+    // Entry 2: untracked file, stashed with -u (3rd parent).
+    std::fs::write(tmp.path().join("u.txt"), "untracked\n").unwrap();
+    git_run(tmp.path(), &["stash", "push", "-u", "-m", "wip untracked"]);
+
+    let list = git.stash_list().await.expect("stash_list");
+    assert_eq!(list.stashes.len(), 2, "got: {list:?}");
+
+    // Newest first: index 0 is the -u entry.
+    assert_eq!(list.stashes[0].index, 0);
+    assert_eq!(list.stashes[0].sha.len(), 40, "expected full SHA-1");
+    assert!(
+        list.stashes[0].message.contains("wip untracked"),
+        "got: {:?}",
+        list.stashes[0].message
+    );
+    assert!(
+        list.stashes[0].has_untracked,
+        "stash push -u must set has_untracked, got: {:?}",
+        list.stashes[0]
+    );
+
+    assert_eq!(list.stashes[1].index, 1);
+    assert!(
+        !list.stashes[1].has_untracked,
+        "tracked-only stash must not claim untracked, got: {:?}",
+        list.stashes[1]
+    );
+}
+
+#[tokio::test]
+async fn stash_show_reports_patch_files_and_untracked_paths() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_temp_repo(tmp.path());
+    let session = make_session(tmp.path());
+    let git = GitModule::new(session);
+
+    std::fs::write(tmp.path().join("README.md"), "init\nstashed line\n").unwrap();
+    std::fs::create_dir_all(tmp.path().join("nested")).unwrap();
+    std::fs::write(tmp.path().join("nested/u.txt"), "untracked\n").unwrap();
+    git_run(tmp.path(), &["stash", "push", "-u", "-m", "wip both"]);
+
+    let show = git.stash_show(0).await.expect("stash_show");
+    assert_eq!(show.index, 0);
+    assert_eq!(show.sha.len(), 40);
+    assert_eq!(show.file_count, 1, "only README.md is a tracked change");
+    assert_eq!(show.files, vec!["README.md".to_string()]);
+    assert!(
+        show.patch.contains("+stashed line"),
+        "patch must carry the stashed hunk, got: {}",
+        show.patch
+    );
+    assert_eq!(
+        show.untracked_paths,
+        vec!["nested/u.txt".to_string()],
+        "untracked snapshot must be enumerated with its full relative path"
+    );
+
+    // Nothing was applied by the read path.
+    assert_eq!(read(tmp.path(), "README.md"), "init\n");
+    assert!(!tmp.path().join("nested/u.txt").exists());
+}
+
+#[tokio::test]
+async fn stash_apply_refuses_dirty_worktree() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_temp_repo(tmp.path());
+    let session = make_session(tmp.path());
+    let git = GitModule::new(session);
+
+    std::fs::write(tmp.path().join("README.md"), "init\nstashed\n").unwrap();
+    git_run(tmp.path(), &["stash", "push", "-m", "wip"]);
+
+    // Hand edit on top: mixing this with an apply would make abort unsafe.
+    std::fs::write(tmp.path().join("other.txt"), "hand edit\n").unwrap();
+    git_add(tmp.path(), "other.txt");
+    std::fs::write(tmp.path().join("README.md"), "init\nhand edit\n").unwrap();
+
+    let err = git
+        .stash_apply(tmp.path(), 0, None)
+        .await
+        .expect_err("dirty worktree must be refused");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("working tree must be clean"),
+        "expected clean-tree refusal, got: {msg}"
+    );
+    assert!(
+        msg.contains("other.txt") && msg.contains("README.md"),
+        "refusal must name the offending paths, got: {msg}"
+    );
+
+    // Refusal is a no-op: the entry is untouched and so is the hand edit.
+    assert_eq!(git.stash_list().await.unwrap().stashes.len(), 1);
+    assert_eq!(read(tmp.path(), "README.md"), "init\nhand edit\n");
+}
+
+#[tokio::test]
+async fn stash_apply_restores_content_and_keeps_entry() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_temp_repo(tmp.path());
+    let session = make_session(tmp.path());
+    let git = GitModule::new(session);
+
+    std::fs::write(tmp.path().join("README.md"), "init\nstashed\n").unwrap();
+    std::fs::write(tmp.path().join("u.txt"), "untracked\n").unwrap();
+    git_run(tmp.path(), &["stash", "push", "-u", "-m", "wip"]);
+    let sha = git.stash_list().await.unwrap().stashes[0].sha.clone();
+
+    let applied = git
+        .stash_apply(tmp.path(), 0, Some(sha.clone()))
+        .await
+        .expect("apply on a clean tree");
+
+    assert_eq!(applied.index, 0);
+    assert_eq!(applied.sha, sha);
+    assert!(applied.entry_kept);
+    assert_eq!(applied.applied_paths, vec!["README.md".to_string()]);
+    assert_eq!(applied.restored_untracked, vec!["u.txt".to_string()]);
+
+    assert_eq!(read(tmp.path(), "README.md"), "init\nstashed\n");
+    assert_eq!(read(tmp.path(), "u.txt"), "untracked\n");
+
+    // The entry survives — that's what makes finalize a separate decision.
+    let list = git.stash_list().await.unwrap();
+    assert_eq!(list.stashes.len(), 1, "apply must not drop, got: {list:?}");
+    assert_eq!(list.stashes[0].sha, sha);
+}
+
+#[tokio::test]
+async fn stash_apply_refuses_existing_untracked_collision() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_temp_repo(tmp.path());
+    let session = make_session(tmp.path());
+    let git = GitModule::new(session);
+
+    std::fs::write(tmp.path().join("u.txt"), "stashed untracked\n").unwrap();
+    git_run(tmp.path(), &["stash", "push", "-u", "-m", "wip"]);
+
+    // Same path reappears — git would abort part-way through the apply.
+    std::fs::write(tmp.path().join("u.txt"), "current untracked\n").unwrap();
+
+    let err = git
+        .stash_apply(tmp.path(), 0, None)
+        .await
+        .expect_err("untracked collision must be refused");
+    assert!(
+        err.to_string().contains("u.txt"),
+        "refusal must name the colliding path, got: {err}"
+    );
+    assert_eq!(read(tmp.path(), "u.txt"), "current untracked\n");
+    assert_eq!(git.stash_list().await.unwrap().stashes.len(), 1);
+}
+
+#[tokio::test]
+async fn stash_apply_rejects_mismatched_expected_sha() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_temp_repo(tmp.path());
+    let session = make_session(tmp.path());
+    let git = GitModule::new(session);
+
+    std::fs::write(tmp.path().join("README.md"), "init\nstashed\n").unwrap();
+    git_run(tmp.path(), &["stash", "push", "-m", "wip"]);
+
+    let err = git
+        .stash_apply(tmp.path(), 0, Some("0".repeat(40)))
+        .await
+        .expect_err("sha mismatch must be refused");
+    assert!(
+        err.to_string().contains("stash index shifted"),
+        "expected an index-shift diagnosis, got: {err}"
+    );
+    // Nothing applied.
+    assert_eq!(read(tmp.path(), "README.md"), "init\n");
+
+    // A too-short prefix is rejected rather than silently accepted.
+    let err = git
+        .stash_apply(tmp.path(), 0, Some("abc".to_string()))
+        .await
+        .expect_err("short sha must be refused");
+    assert!(
+        err.to_string().contains("too short"),
+        "expected a length complaint, got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn stash_abort_returns_worktree_to_head() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_temp_repo(tmp.path());
+    let session = make_session(tmp.path());
+    let git = GitModule::new(session);
+
+    // Stash carries: a modified tracked file, a newly added tracked file,
+    // and an untracked file — abort must undo all three shapes.
+    std::fs::write(tmp.path().join("README.md"), "init\nstashed\n").unwrap();
+    std::fs::write(tmp.path().join("added.txt"), "added\n").unwrap();
+    git_add(tmp.path(), "added.txt");
+    std::fs::write(tmp.path().join("u.txt"), "untracked\n").unwrap();
+    git_run(tmp.path(), &["stash", "push", "-u", "-m", "wip"]);
+
+    let sha = git.stash_list().await.unwrap().stashes[0].sha.clone();
+    git.stash_apply(tmp.path(), 0, Some(sha.clone()))
+        .await
+        .expect("apply");
+    assert!(tmp.path().join("added.txt").exists());
+
+    let aborted = git
+        .stash_abort(tmp.path(), 0, Some(sha.clone()))
+        .await
+        .expect("abort");
+    assert_eq!(aborted.sha, sha);
+    assert!(aborted.entry_kept);
+    assert!(
+        aborted.reverted_paths.iter().any(|p| p == "README.md")
+            && aborted.reverted_paths.iter().any(|p| p == "added.txt"),
+        "both tracked shapes must be reported, got: {:?}",
+        aborted.reverted_paths
+    );
+    assert_eq!(aborted.removed_untracked, vec!["u.txt".to_string()]);
+
+    // Worktree is back at HEAD: modification undone, added file gone,
+    // restored untracked file gone.
+    assert_eq!(read(tmp.path(), "README.md"), "init\n");
+    assert!(
+        !tmp.path().join("added.txt").exists(),
+        "a file the stash added must not survive the abort"
+    );
+    assert!(!tmp.path().join("u.txt").exists());
+    assert!(
+        porcelain_status(tmp.path()).is_empty(),
+        "abort must leave a clean tree, got: {:?}",
+        porcelain_status(tmp.path())
+    );
+
+    // Entry untouched — abort undoes the apply, it does not discard work.
+    let list = git.stash_list().await.unwrap();
+    assert_eq!(list.stashes.len(), 1);
+    assert_eq!(list.stashes[0].sha, sha);
+}
+
+#[tokio::test]
+async fn stash_finalize_drops_entry_and_reports_recovery_sha() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_temp_repo(tmp.path());
+    let session = make_session(tmp.path());
+    let git = GitModule::new(session);
+
+    std::fs::write(tmp.path().join("README.md"), "init\nstashed\n").unwrap();
+    git_run(tmp.path(), &["stash", "push", "-m", "wip"]);
+    let entry = git.stash_list().await.unwrap().stashes[0].clone();
+
+    git.stash_apply(tmp.path(), 0, Some(entry.sha.clone()))
+        .await
+        .expect("apply");
+    let finalized = git
+        .stash_finalize(tmp.path(), 0, Some(entry.sha.clone()))
+        .await
+        .expect("finalize");
+
+    assert_eq!(finalized.index, 0);
+    assert_eq!(
+        finalized.dropped_sha, entry.sha,
+        "dropped_sha must be the pre-drop sha, i.e. the recovery key"
+    );
+    assert_eq!(finalized.message, entry.message);
+
+    let list = git.stash_list().await.unwrap();
+    assert!(list.stashes.is_empty(), "entry must be gone, got: {list:?}");
+
+    // The applied content stays in the working tree.
+    assert_eq!(read(tmp.path(), "README.md"), "init\nstashed\n");
+
+    // dropped_sha is still reachable — "dropped", not "lost".
+    let show = Command::new("git")
+        .args(["show", "--pretty=format:%H", "-s", &finalized.dropped_sha])
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+    assert!(
+        show.status.success(),
+        "dropped stash commit must remain reachable until gc: {}",
+        String::from_utf8_lossy(&show.stderr)
+    );
+}
+
+#[tokio::test]
+async fn stash_apply_conflict_rolls_back_and_keeps_entry() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_temp_repo(tmp.path());
+    let session = make_session(tmp.path());
+    let git = GitModule::new(session);
+
+    // Stash one version of README, then commit a diverging version so the
+    // apply is guaranteed to conflict.
+    std::fs::write(tmp.path().join("README.md"), "stash version\n").unwrap();
+    git_run(tmp.path(), &["stash", "push", "-m", "wip"]);
+    std::fs::write(tmp.path().join("README.md"), "head version\n").unwrap();
+    git_run(tmp.path(), &["add", "README.md"]);
+    git_run(tmp.path(), &["commit", "-m", "diverge"]);
+
+    let sha = git.stash_list().await.unwrap().stashes[0].sha.clone();
+
+    let err = git
+        .stash_apply(tmp.path(), 0, Some(sha.clone()))
+        .await
+        .expect_err("conflicting apply must fail");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("rolled back"),
+        "error must state the rollback happened, got: {msg}"
+    );
+    assert!(
+        msg.contains("intact"),
+        "error must state the entry survived, got: {msg}"
+    );
+
+    // Rollback is total: no conflict markers, no unmerged index entries.
+    assert_eq!(read(tmp.path(), "README.md"), "head version\n");
+    assert!(
+        porcelain_status(tmp.path()).is_empty(),
+        "failed apply must leave a clean tree, got: {:?}",
+        porcelain_status(tmp.path())
+    );
+
+    let list = git.stash_list().await.unwrap();
+    assert_eq!(list.stashes.len(), 1, "entry must survive, got: {list:?}");
+    assert_eq!(list.stashes[0].sha, sha);
+}
+
+#[tokio::test]
+async fn reset_hard_refuses_while_a_stash_apply_is_in_flight() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_temp_repo(tmp.path());
+    let session = make_session(tmp.path());
+    let git = GitModule::new(session);
+
+    std::fs::write(tmp.path().join("README.md"), "init\nstashed\n").unwrap();
+    git_run(tmp.path(), &["stash", "push", "-m", "wip"]);
+    let sha = git.stash_list().await.unwrap().stashes[0].sha.clone();
+    git.stash_apply(tmp.path(), 0, Some(sha))
+        .await
+        .expect("apply");
+
+    // Stash entries + dirty tree == "an apply is in flight": --hard here
+    // would erase the applied work with no undo.
+    let err = git
+        .reset(tmp.path(), ResetMode::Hard, "HEAD", false)
+        .await
+        .expect_err("hard reset must be guarded");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("git_stash_abort"),
+        "guard must point at the non-destructive undo, got: {msg}"
+    );
+    assert_eq!(read(tmp.path(), "README.md"), "init\nstashed\n");
+
+    // Soft / mixed are unaffected by the guard.
+    git.reset(tmp.path(), ResetMode::Mixed, "HEAD", false)
+        .await
+        .expect("mixed reset is not guarded");
+    assert_eq!(read(tmp.path(), "README.md"), "init\nstashed\n");
+
+    // force=true is the deliberate override.
+    git.reset(tmp.path(), ResetMode::Hard, "HEAD", true)
+        .await
+        .expect("force must bypass the guard");
+    assert_eq!(read(tmp.path(), "README.md"), "init\n");
+}
+
+#[tokio::test]
+async fn reset_hard_unguarded_when_no_stash_exists() {
+    // The guard keys on stash presence — a plain repo must keep the old
+    // behaviour without needing force=true.
+    let tmp = tempfile::tempdir().unwrap();
+    init_temp_repo(tmp.path());
+    let session = make_session(tmp.path());
+    let git = GitModule::new(session);
+
+    std::fs::write(tmp.path().join("README.md"), "init\ndirty\n").unwrap();
+    git.reset(tmp.path(), ResetMode::Hard, "HEAD", false)
+        .await
+        .expect("no stash entries -> no guard");
+    assert_eq!(read(tmp.path(), "README.md"), "init\n");
+}
+
+// ---------------------------------------------------------------------------
+// Stash restore (undo of a finalize)
+// ---------------------------------------------------------------------------
+
+/// Trimmed stdout of `git <args>` in `dir`. Test-only helper.
+fn git_capture(dir: &Path, args: &[&str]) -> String {
+    let out = Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+#[tokio::test]
+async fn stash_restore_completes_the_apply_finalize_restore_cycle() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_temp_repo(tmp.path());
+    let session = make_session(tmp.path());
+    let git = GitModule::new(session);
+
+    std::fs::write(tmp.path().join("README.md"), "init\nstashed\n").unwrap();
+    git_run(tmp.path(), &["stash", "push", "-m", "wip"]);
+    let original = git.stash_list().await.unwrap().stashes[0].clone();
+
+    // Full transaction: apply, verify, drop.
+    git.stash_apply(tmp.path(), 0, Some(original.sha.clone()))
+        .await
+        .expect("apply");
+    let finalized = git
+        .stash_finalize(tmp.path(), 0, Some(original.sha.clone()))
+        .await
+        .expect("finalize");
+    assert!(git.stash_list().await.unwrap().stashes.is_empty());
+
+    // The caller decides the drop was wrong. Put the tree back first so the
+    // re-apply below has the clean tree it requires.
+    git_run(tmp.path(), &["checkout", "--", "README.md"]);
+
+    let restored = git
+        .stash_restore(tmp.path(), &finalized.dropped_sha, None)
+        .await
+        .expect("restore from dropped_sha");
+    assert_eq!(restored.restored_sha, original.sha);
+    assert_eq!(restored.index, 0, "store pushes onto the top of the list");
+    assert_eq!(
+        restored.message, original.message,
+        "the entry must come back under the name it had"
+    );
+
+    // Back in the list, addressable exactly as before.
+    let list = git.stash_list().await.unwrap();
+    assert_eq!(list.stashes.len(), 1, "got: {list:?}");
+    assert_eq!(list.stashes[0].index, 0);
+    assert_eq!(list.stashes[0].sha, original.sha);
+    assert_eq!(list.stashes[0].message, original.message);
+
+    // And it still restores the same content.
+    assert_eq!(read(tmp.path(), "README.md"), "init\n");
+    git.stash_apply(tmp.path(), 0, Some(original.sha.clone()))
+        .await
+        .expect("re-apply the restored entry");
+    assert_eq!(read(tmp.path(), "README.md"), "init\nstashed\n");
+}
+
+#[tokio::test]
+async fn stash_restore_rejects_a_non_stash_commit() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_temp_repo(tmp.path());
+    let session = make_session(tmp.path());
+    let git = GitModule::new(session);
+
+    // HEAD is an ordinary commit — storing it would create an entry whose
+    // "apply" means something nobody asked for.
+    let head_sha = git_capture(tmp.path(), &["rev-parse", "HEAD"]);
+    let err = git
+        .stash_restore(tmp.path(), &head_sha, None)
+        .await
+        .expect_err("an ordinary commit must be refused");
+    assert!(
+        err.to_string().contains("not a stash commit"),
+        "expected a shape complaint, got: {err}"
+    );
+    assert!(git.stash_list().await.unwrap().stashes.is_empty());
+}
+
+#[tokio::test]
+async fn stash_restore_rejects_an_entry_already_in_the_list() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_temp_repo(tmp.path());
+    let session = make_session(tmp.path());
+    let git = GitModule::new(session);
+
+    std::fs::write(tmp.path().join("README.md"), "init\nstashed\n").unwrap();
+    git_run(tmp.path(), &["stash", "push", "-m", "wip"]);
+    let sha = git.stash_list().await.unwrap().stashes[0].sha.clone();
+
+    let err = git
+        .stash_restore(tmp.path(), &sha, None)
+        .await
+        .expect_err("a live entry must not be duplicated");
+    assert!(
+        err.to_string().contains("already present at stash@{0}"),
+        "expected a duplicate complaint naming the index, got: {err}"
+    );
+    assert_eq!(
+        git.stash_list().await.unwrap().stashes.len(),
+        1,
+        "refusal must not add a second reference to the same content"
+    );
+}
+
+#[tokio::test]
+async fn stash_restore_rejects_malformed_shas() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_temp_repo(tmp.path());
+    let session = make_session(tmp.path());
+    let git = GitModule::new(session);
+
+    let err = git
+        .stash_restore(tmp.path(), "abc123", None)
+        .await
+        .expect_err("a 6-char sha must be refused");
+    assert!(
+        err.to_string().contains("too short"),
+        "expected a length complaint, got: {err}"
+    );
+
+    // Long enough, but a revspec rather than an object id.
+    let err = git
+        .stash_restore(tmp.path(), "refs/heads/main", None)
+        .await
+        .expect_err("a revspec must be refused");
+    assert!(
+        err.to_string().contains("not an object id"),
+        "expected a revspec complaint, got: {err}"
+    );
+}
+
+#[tokio::test]
+async fn stash_restore_reports_a_pruned_sha_as_unresolvable() {
+    let tmp = tempfile::tempdir().unwrap();
+    init_temp_repo(tmp.path());
+    let session = make_session(tmp.path());
+    let git = GitModule::new(session);
+
+    let err = git
+        .stash_restore(tmp.path(), &"f".repeat(40), None)
+        .await
+        .expect_err("an absent object must be refused");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("cannot resolve"),
+        "expected a resolution failure, got: {msg}"
+    );
+    assert!(
+        msg.contains("git gc"),
+        "error must name gc as the likely cause, got: {msg}"
     );
 }

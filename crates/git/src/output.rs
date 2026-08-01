@@ -286,6 +286,104 @@ pub struct ResetOutput {
 }
 
 // ---------------------------------------------------------------------------
+// Stash
+// ---------------------------------------------------------------------------
+
+/// One entry from `git stash list`.
+///
+/// `index` is the position in the stash reflog (`stash@{index}`) at the time
+/// of the call — it shifts whenever an entry is dropped, which is why every
+/// mutating stash method accepts an `expected_sha` to pin the identity.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StashEntry {
+    /// Position in the stash reflog (`stash@{index}`).
+    pub index: usize,
+    /// Stash commit sha (full 40-char hex). Stable across index shifts.
+    pub sha: String,
+    /// Reflog message (e.g. `"WIP on main: 1a2b3c4 subject"`).
+    pub message: String,
+    /// `true` when the entry carries untracked files (`git stash push -u`),
+    /// detected via the stash commit's third parent.
+    pub has_untracked: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StashListOutput {
+    /// Entries in reflog order (index 0 == most recent).
+    pub stashes: Vec<StashEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StashShowOutput {
+    pub index: usize,
+    /// Stash commit sha (full 40-char hex).
+    pub sha: String,
+    /// Reflog message of the entry.
+    pub message: String,
+    /// Unified diff of the stashed tracked changes (base commit vs stash).
+    pub patch: String,
+    /// Number of tracked files the entry touches.
+    pub file_count: usize,
+    /// Repo-relative paths (git pathspec form) of the tracked files above.
+    pub files: Vec<String>,
+    /// Repo-relative paths carried as untracked files (`git stash push -u`).
+    /// Empty when `has_untracked` is `false`; no patch is produced for them.
+    pub untracked_paths: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StashApplyOutput {
+    pub index: usize,
+    /// Stash commit sha (full 40-char hex) that was applied.
+    pub sha: String,
+    /// Tracked paths the entry restored into the working tree.
+    pub applied_paths: Vec<String>,
+    /// Untracked paths the entry restored into the working tree.
+    pub restored_untracked: Vec<String>,
+    /// Always `true` — apply never drops the entry. Dropping is
+    /// [`super::GitModule::stash_finalize`]'s job.
+    pub entry_kept: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StashAbortOutput {
+    pub index: usize,
+    /// Stash commit sha (full 40-char hex) whose apply was rolled back.
+    pub sha: String,
+    /// Tracked paths returned to their HEAD state (restored or, when the
+    /// entry added them, removed from the working tree).
+    pub reverted_paths: Vec<String>,
+    /// Untracked paths removed from the working tree.
+    pub removed_untracked: Vec<String>,
+    /// Always `true` — abort undoes the apply, it does not drop the entry.
+    pub entry_kept: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StashFinalizeOutput {
+    /// Index the entry occupied before the drop.
+    pub index: usize,
+    /// Sha of the dropped stash commit (full 40-char hex). The commit itself
+    /// survives until `git gc` prunes it, so this is the recovery key: feed
+    /// it to [`super::GitModule::stash_restore`] to put the entry back.
+    pub dropped_sha: String,
+    /// Reflog message of the dropped entry.
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StashRestoreOutput {
+    /// Full 40-char sha of the stash commit now back on `refs/stash`.
+    pub restored_sha: String,
+    /// Always `0` — `git stash store` pushes onto the top of the list, so the
+    /// restored entry is `stash@{0}` and every pre-existing index shifts by 1.
+    pub index: usize,
+    /// Reflog message the restored entry carries (the caller's `message`, or
+    /// the stash commit's own summary when none was given).
+    pub message: String,
+}
+
+// ---------------------------------------------------------------------------
 // Session
 // ---------------------------------------------------------------------------
 

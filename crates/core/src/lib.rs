@@ -14,8 +14,8 @@ pub mod config;
 pub mod log_store;
 
 pub use lds_session::{
-    CheckStatus, CoreError, DEFAULT_WORKTREES_SUBDIR, DoctorCheck, DoctorReport, LdsState,
-    Session, SessionConfig, SessionEntry, SessionError,
+    CheckStatus, CoreError, DEFAULT_WORKTREES_SUBDIR, DoctorCheck, DoctorReport, LdsState, Session,
+    SessionConfig, SessionEntry, SessionError,
 };
 
 use std::path::PathBuf;

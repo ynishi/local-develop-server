@@ -24,6 +24,7 @@ mod read;
 mod remote;
 mod reset;
 mod session;
+mod stash;
 mod write;
 
 pub use read::LogFilters;
@@ -31,9 +32,11 @@ pub use read::LogFilters;
 pub use output::{
     BranchDeleteOutput, BranchStatusOutput, CommitEntry, CommitOutput, DiffOutput, EntryStatus,
     FetchOutput, IsPushedOutput, LogOutput, MergeOutput, OtherStagedMode, RemoteEntry,
-    RemoteListOutput, ResetMode, ResetOutput, SessionReleaseOutput, StatusKind, StatusOutput,
-    TagPushedOutput, UnpushedCommitsOutput, WorktreeAddOutput, WorktreeEntry, WorktreeListOutput,
-    WorktreeRemoveOutput, WorktreeStateOutput,
+    RemoteListOutput, ResetMode, ResetOutput, SessionReleaseOutput, StashAbortOutput,
+    StashApplyOutput, StashEntry, StashFinalizeOutput, StashListOutput, StashRestoreOutput,
+    StashShowOutput, StatusKind, StatusOutput, TagPushedOutput, UnpushedCommitsOutput,
+    WorktreeAddOutput, WorktreeEntry, WorktreeListOutput, WorktreeRemoveOutput,
+    WorktreeStateOutput,
 };
 
 /// Git module instance, tied to a [`Session`].
