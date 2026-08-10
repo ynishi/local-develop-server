@@ -6,6 +6,7 @@ members = [
     "crates/git",
     "crates/journal",
     "crates/outline",
+    "crates/pack",
     "crates/publicity",
     "crates/recipe",
     "crates/router",
@@ -44,3 +45,7 @@ toml = "0.8"
 toml_edit = "0.22"
 dirs = "5"
 clap = { version = "4", features = ["derive"] }
+tar = "0.4"
+zstd = "0.13"
+walkdir = "2"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }

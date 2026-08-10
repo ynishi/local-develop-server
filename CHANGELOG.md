@@ -6,6 +6,43 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **`lds pack` — whole-project portability (`lds-pack` crate + three CLI
+  subcommands)** — new crate `crates/pack` and `lds pack create|restore|inspect`,
+  which bundle a project *as it exists on the machine* into a single
+  zstd-compressed archive and put it back somewhere else.
+
+  The `.git` directory is copied wholesale rather than converted to a
+  `git bundle`. A bundle is assembled from an enumerated set of refs, so
+  everything outside that set — stashes, the reflog, local-only branches,
+  objects no ref points at — is quietly left behind; copying the directory
+  means there is no set to enumerate and nothing to forget. Verified against
+  this repository: after a round trip `git fsck` still reports the dangling
+  commit the source had, all five local-only branches survive, `git reflog`
+  is intact, and `git status` still shows the uncommitted work in progress.
+
+  Alongside git, the pack carries the untracked local state that ordinarily
+  never leaves the machine — `workspace/` (including `.journal.db`),
+  `.mcp.json`, `.ryo`, `.sandbox-snapshots` — and rewrites both halves of each
+  registered worktree's absolute `gitdir` wiring so worktrees still resolve
+  after landing at a new path.
+
+  Three classes are handled deliberately rather than blindly:
+
+  | class | treatment |
+  |---|---|
+  | secrets (`.env`, `*.pem`, `id_rsa`, …) | **not packed**, reported — moving credentials stays the operator's own business |
+  | caches (`target/`, `node_modules/`, …) | **not packed**, recorded — regenerable by definition |
+  | symlinks | packed as links, never followed; recorded so a restore elsewhere can name what dangles |
+
+  `.claude/` is its own layer: packed verbatim, with its links counted and
+  their shared root summarized rather than enumerated (a profile-managed
+  setup commonly has 150+ of them, and a per-file list would bury the rest of
+  the manifest). User-global state outside the project root is not collected.
+
+  Every pack opens with a `pack.toml` manifest, so `lds pack inspect` answers
+  "what is in here, and what did it leave behind?" without decompressing the
+  payload.
+
 ### Changed
 
 ### Deprecated

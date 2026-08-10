@@ -23,6 +23,7 @@ lds-recipe = { path = "../recipe", version = "0.13.2" }
 lds-sandbox = { path = "../sandbox", version = "0.13.2" }
 lds-journal = { path = "../journal", version = "0.13.2" }
 lds-outline = { path = "../outline", version = "0.13.2" }
+lds-pack = { path = "../pack", version = "0.13.3" }
 lds-publicity = { path = "../publicity", version = "0.13.2" }
 lds-router = { path = "../router", version = "0.13.2" }
 anyhow.workspace = true
@@ -35,7 +36,7 @@ rmcp.workspace = true
 schemars.workspace = true
 clap.workspace = true
 dirs.workspace = true
-chrono = { version = "0.4", default-features = false, features = ["std"] }
+chrono.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

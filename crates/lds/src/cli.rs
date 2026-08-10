@@ -1,13 +1,15 @@
 //! CLI subcommands for `lds`.
 //!
 //! Entry point: `run()` — called from `main()` when CLI arguments are present.
-//! Provides `recipe-dir add|list|remove` to manage `~/.config/lds/config.toml`.
+//! Provides `recipe-dir add|list|remove` to manage `~/.config/lds/config.toml`,
+//! and `pack create|restore|inspect` to move a whole project between machines.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use lds_core::config::{Config, tilde_expand};
+use lds_pack::{CreateOptions, Manifest, RestoreOptions, RestoreReport};
 
 // ---------------------------------------------------------------------------
 // CLI structure
@@ -28,6 +30,46 @@ pub enum Commands {
     RecipeDir {
         #[command(subcommand)]
         action: RecipeDirAction,
+    },
+    /// Bundle a whole project — `.git` and untracked local state — into one archive.
+    Pack {
+        #[command(subcommand)]
+        action: PackAction,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum PackAction {
+    /// Pack a project directory into a single archive.
+    Create {
+        /// Project root to pack (default: current directory).
+        #[arg(long)]
+        root: Option<String>,
+        /// Destination archive (default: `<project>-<timestamp>.pack` here).
+        #[arg(long, short)]
+        out: Option<String>,
+        /// zstd compression level.
+        #[arg(long, default_value_t = lds_pack::DEFAULT_COMPRESSION_LEVEL)]
+        level: i32,
+    },
+    /// Restore a pack into a directory.
+    Restore {
+        /// Archive to restore.
+        archive: String,
+        /// Destination directory (default: the project name, here).
+        #[arg(long)]
+        into: Option<String>,
+        /// Unpack even if the destination already exists.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Show what a pack contains without unpacking it.
+    Inspect {
+        /// Archive to inspect.
+        archive: String,
+        /// Also list every packed path (reads the whole archive).
+        #[arg(long)]
+        files: bool,
     },
 }
 
@@ -61,6 +103,7 @@ pub fn run() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Commands::RecipeDir { action } => handle_recipe_dir(action),
+        Commands::Pack { action } => handle_pack(action),
     }
 }
 
@@ -121,6 +164,251 @@ fn cmd_list() -> Result<()> {
         println!("{}", dir.display());
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// pack
+// ---------------------------------------------------------------------------
+
+/// Handle `pack create|restore|inspect`.
+fn handle_pack(action: PackAction) -> Result<()> {
+    match action {
+        PackAction::Create { root, out, level } => cmd_pack_create(root, out, level),
+        PackAction::Restore {
+            archive,
+            into,
+            force,
+        } => cmd_pack_restore(&archive, into, force),
+        PackAction::Inspect { archive, files } => cmd_pack_inspect(&archive, files),
+    }
+}
+
+/// `pack create`: classify the project, write the archive, report what was left out.
+fn cmd_pack_create(root: Option<String>, out: Option<String>, level: i32) -> Result<()> {
+    let root = match root {
+        Some(raw) => resolve_arg_path(&raw)?,
+        None => std::env::current_dir().context("failed to read current directory")?,
+    };
+
+    let out = match out {
+        Some(raw) => resolve_arg_path(&raw)?,
+        None => default_pack_name(&root),
+    };
+
+    let mut opts = CreateOptions::new(&root, &out, env!("CARGO_PKG_VERSION"));
+    opts.compression_level = level;
+
+    let report = lds_pack::create(&opts).context("failed to create pack")?;
+    let m = &report.manifest;
+
+    println!(
+        "packed: {} -> {}",
+        root.display(),
+        report.out_path.display()
+    );
+    println!(
+        "  {} files, {} symlinks, {} -> {}",
+        m.stats.file_count,
+        m.stats.symlink_count,
+        human_bytes(m.stats.total_bytes),
+        human_bytes(report.compressed_bytes)
+    );
+
+    print_manifest_notes(m);
+    Ok(())
+}
+
+/// `pack restore`: unpack, repair worktree pointers, report what needs attention.
+fn cmd_pack_restore(archive: &str, into: Option<String>, force: bool) -> Result<()> {
+    let archive = resolve_arg_path(archive)?;
+
+    let dest = match into {
+        Some(raw) => resolve_arg_path(&raw)?,
+        None => {
+            let manifest = lds_pack::inspect(&archive)
+                .with_context(|| format!("failed to read {}", archive.display()))?;
+            std::env::current_dir()
+                .context("failed to read current directory")?
+                .join(manifest.project_name)
+        }
+    };
+
+    let opts = RestoreOptions {
+        archive: archive.clone(),
+        dest,
+        force,
+    };
+    let report = lds_pack::restore(&opts).context("failed to restore pack")?;
+
+    println!(
+        "restored: {} -> {} ({} entries)",
+        archive.display(),
+        report.dest.display(),
+        report.entries_written
+    );
+    if !report.rewritten_worktrees.is_empty() {
+        println!(
+            "  rewrote worktree pointers: {}",
+            report.rewritten_worktrees.join(", ")
+        );
+    }
+
+    print_restore_attention(&report);
+    Ok(())
+}
+
+/// `pack inspect`: read the manifest, optionally list every packed path.
+fn cmd_pack_inspect(archive: &str, files: bool) -> Result<()> {
+    let archive = resolve_arg_path(archive)?;
+    let m = lds_pack::inspect(&archive)
+        .with_context(|| format!("failed to read {}", archive.display()))?;
+
+    println!("archive: {}", archive.display());
+    println!("  project     {}", m.project_name);
+    println!("  created     {}", m.created_at);
+    println!("  source      {}", m.source_root);
+    println!("  lds         {}", m.lds_version);
+    println!("  format      {}", m.format_version);
+    println!(
+        "  payload     {} files, {} symlinks, {}",
+        m.stats.file_count,
+        m.stats.symlink_count,
+        human_bytes(m.stats.total_bytes)
+    );
+
+    print_manifest_notes(&m);
+
+    if files {
+        println!();
+        for path in lds_pack::list_payload_paths(&archive).context("failed to list payload")? {
+            println!("{path}");
+        }
+    }
+
+    Ok(())
+}
+
+/// Print the parts of a manifest an operator has to act on.
+fn print_manifest_notes(m: &Manifest) {
+    if !m.skipped_secret.is_empty() {
+        println!("\nnot packed — secrets (move these yourself):");
+        for s in &m.skipped_secret {
+            println!("  {}  ({})", s.path, s.reason);
+        }
+    }
+
+    if !m.skipped_cache.is_empty() {
+        println!("\nnot packed — caches (regenerable):");
+        for s in &m.skipped_cache {
+            println!("  {}", s.path);
+        }
+    }
+
+    if !m.symlinks.is_empty() {
+        let outside = m.symlinks.iter().filter(|s| s.outside_root).count();
+        println!(
+            "\nsymlinks: {} recorded ({outside} pointing outside the project)",
+            m.symlinks.len()
+        );
+        for s in m.symlinks.iter().filter(|s| s.outside_root) {
+            println!("  {} -> {}", s.path, s.target);
+        }
+    }
+
+    if m.claude.present {
+        println!(
+            "\n.claude/: packed as-is, {} symlinks",
+            m.claude.symlink_count
+        );
+        for root in &m.claude.link_roots {
+            println!("  links into {root}");
+        }
+    }
+
+    if !m.worktrees.is_empty() {
+        println!("\nworktrees:");
+        for w in &m.worktrees {
+            let state = if w.included {
+                "packed"
+            } else {
+                "outside the project root, not packed"
+            };
+            println!("  {}  ({state})", w.name);
+        }
+    }
+}
+
+/// Print the follow-up a restore leaves to the operator.
+fn print_restore_attention(report: &RestoreReport) {
+    if !report.needs_attention() {
+        return;
+    }
+
+    println!("\nneeds attention:");
+
+    if !report.dangling_symlinks.is_empty() {
+        println!(
+            "  {} symlink(s) dangle here:",
+            report.dangling_symlinks.len()
+        );
+        for s in &report.dangling_symlinks {
+            println!("    {} -> {}", s.path, s.target);
+        }
+    }
+
+    if !report.missing_claude_link_roots.is_empty() {
+        println!("  .claude/ links point at roots that are absent here:");
+        for root in &report.missing_claude_link_roots {
+            println!("    {root}");
+        }
+    }
+
+    if !report.missing_worktrees.is_empty() {
+        println!(
+            "  worktrees registered outside the project root, not in this pack: {}",
+            report.missing_worktrees.join(", ")
+        );
+    }
+
+    if !report.secrets_not_carried.is_empty() {
+        println!("  secrets were not carried; move them yourself:");
+        for s in &report.secrets_not_carried {
+            println!("    {}", s.path);
+        }
+    }
+}
+
+/// Expand a tilde and make the path absolute.
+fn resolve_arg_path(raw: &str) -> Result<PathBuf> {
+    let expanded = tilde_expand(raw).with_context(|| format!("failed to expand path '{raw}'"))?;
+    std::path::absolute(&expanded)
+        .with_context(|| format!("failed to make path absolute: {}", expanded.display()))
+}
+
+/// Default archive name: `<project>-<timestamp>.pack` in the current directory.
+fn default_pack_name(root: &Path) -> PathBuf {
+    let name = root
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "project".to_string());
+    let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
+    PathBuf::from(format!("{name}-{stamp}.pack"))
+}
+
+/// Format a byte count with a binary unit suffix.
+fn human_bytes(bytes: u64) -> String {
+    const UNITS: &[&str] = &["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut value = bytes as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{bytes} {}", UNITS[0])
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
 }
 
 /// `recipe-dir remove <path>`: expand → absolute → retain all non-matching → write back.

@@ -89,6 +89,7 @@ crates/
 ├── sandbox/ lds-sandbox  SandboxModule (file-scoped read/append, snapshot/rollback)
 ├── journal/ lds-journal  JournalModule (journal-mcp-rmcp SDK consumer, `journal_*` tools forwarded)
 ├── outline/ lds-outline  OutlineModule (outline-mcp-rmcp SDK consumer, prefixed `outline_*` tools)
+├── pack/    lds-pack     Whole-project archives (`lds pack`, CLI-only — not an MCP surface)
 └── lds/     lds          MCP binary (rmcp v1.7, stdio transport)
 ```
 
@@ -269,6 +270,43 @@ cargo install --path crates/lds
   }
 }
 ```
+
+### `lds pack` — moving a whole project
+
+A pack carries a project *as it exists on this machine*: the `.git` directory
+itself, plus the untracked local state that normally never leaves — a
+`workspace/` tree, journal databases, `.mcp.json`, sandbox snapshots.
+
+```sh
+lds pack create                        # -> <project>-<timestamp>.pack, here
+lds pack create --root ~/proj -o p.pack
+lds pack inspect p.pack                # manifest only; no decompression
+lds pack restore p.pack --into ~/dest
+```
+
+**Why the `.git` directory and not `git bundle`.** A bundle is built from an
+enumerated set of refs, so anything outside that set does not make the trip:
+stashes, the reflog, local-only branches, objects no ref points at. Copying the
+directory removes the question — whatever git had, the pack has. On this
+repository, a round trip preserves the dangling commit `git fsck` reports, all
+local-only branches, the reflog, and uncommitted work in progress.
+
+Three classes are handled deliberately:
+
+| class | treatment |
+|---|---|
+| secrets (`.env`, `*.pem`, `id_rsa`, …) | **not packed**, reported — moving credentials stays yours to do |
+| caches (`target/`, `node_modules/`, `.venv/`, …) | **not packed**, recorded — regenerable by definition |
+| symlinks | packed as links, never followed; recorded so a restore elsewhere names what dangles |
+
+`.claude/` is packed verbatim as its own layer, with its links counted and their
+shared root summarized rather than listed one by one. State outside the project
+root (`~/.config/...`) is not collected.
+
+Registered worktrees travel too. Both halves of a worktree's wiring —
+`.git/worktrees/<name>/gitdir` and the worktree's own `.git` file — are absolute
+paths, so `restore` rewrites them for the new location; a plain `tar` extract
+would leave both aimed at the machine the pack came from.
 
 ### Plugin Recipes
 
