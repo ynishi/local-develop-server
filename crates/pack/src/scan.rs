@@ -23,48 +23,10 @@ use walkdir::WalkDir;
 
 use crate::error::PackError;
 use crate::manifest::{ClaudeInfo, SkipRecord, SymlinkRecord, WorktreeRecord};
-
-/// Directory names treated as regenerable caches.
-///
-/// `dist` and `build` are deliberately absent: both are common names for
-/// hand-written source in projects that do not use them as output directories,
-/// and wrongly dropping source is far worse than carrying a rebuildable tree.
-pub const CACHE_DIRS: &[&str] = &[
-    "target",
-    "node_modules",
-    ".venv",
-    "venv",
-    "__pycache__",
-    ".pytest_cache",
-    ".mypy_cache",
-    ".ruff_cache",
-    ".turbo",
-    ".next",
-    ".nuxt",
-    ".parcel-cache",
-    ".gradle",
-];
+use crate::rules::PackRules;
 
 /// File names dropped silently — OS debris that is neither cache nor content.
 const NOISE_FILES: &[&str] = &[".DS_Store", "Thumbs.db"];
-
-/// Exact file names treated as secrets.
-const SECRET_EXACT: &[&str] = &[
-    ".env",
-    ".netrc",
-    ".npmrc",
-    "credentials",
-    "id_rsa",
-    "id_dsa",
-    "id_ecdsa",
-    "id_ed25519",
-];
-
-/// Extensions treated as secrets.
-const SECRET_EXTENSIONS: &[&str] = &["pem", "key", "p12", "pfx", "jks", "keystore"];
-
-/// `.env.*` suffixes that are templates rather than secrets, so they travel.
-const ENV_TEMPLATE_SUFFIXES: &[&str] = &["example", "sample", "template", "dist", "defaults"];
 
 /// The `.claude/` directory name, handled as its own layer.
 const CLAUDE_DIR: &str = ".claude";
@@ -133,11 +95,24 @@ impl Scan {
     }
 }
 
+/// Classify every path under `root` using the default rules.
+///
+/// Convenience wrapper over [`scan_with`] for callers that do not customize
+/// classification.
+///
+/// # Errors
+///
+/// Same as [`scan_with`].
+pub fn scan(root: &Path) -> Result<Scan, PackError> {
+    scan_with(root, &PackRules::default())
+}
+
 /// Classify every path under `root`.
 ///
 /// # Arguments
 ///
 /// * `root` — Absolute path to the project root.
+/// * `rules` — Which names count as secrets and caches (see [`PackRules`]).
 ///
 /// # Returns
 ///
@@ -147,7 +122,7 @@ impl Scan {
 ///
 /// - [`PackError::NotADirectory`] if `root` is not a directory.
 /// - [`PackError::Io`] if the tree cannot be walked or a link cannot be read.
-pub fn scan(root: &Path) -> Result<Scan, PackError> {
+pub fn scan_with(root: &Path, rules: &PackRules) -> Result<Scan, PackError> {
     if !root.is_dir() {
         return Err(PackError::NotADirectory(root.to_path_buf()));
     }
@@ -174,7 +149,7 @@ pub fn scan(root: &Path) -> Result<Scan, PackError> {
         if e.file_type().is_symlink() {
             return true;
         }
-        if e.file_type().is_dir() && CACHE_DIRS.contains(&name.as_ref()) {
+        if e.file_type().is_dir() && rules.is_cache_dir(name.as_ref()) {
             return false;
         }
         true
@@ -182,7 +157,7 @@ pub fn scan(root: &Path) -> Result<Scan, PackError> {
 
     // Cache directories are pruned above, which also hides them from the
     // record; walk their parents separately so each dropped cache is named.
-    collect_cache_records(root, &mut scan)?;
+    collect_cache_records(root, rules, &mut scan)?;
 
     for next in it {
         let entry = next?;
@@ -234,7 +209,7 @@ pub fn scan(root: &Path) -> Result<Scan, PackError> {
             continue;
         }
 
-        if let Some(reason) = secret_reason(&name) {
+        if let Some(reason) = rules.secret_reason(&name) {
             scan.skipped_secret.push(SkipRecord { path: rel, reason });
             continue;
         }
@@ -260,7 +235,7 @@ pub fn scan(root: &Path) -> Result<Scan, PackError> {
 /// would otherwise vanish without a record. This pass descends normally but
 /// stops at each cache directory it names, so the cost stays proportional to
 /// the surviving tree.
-fn collect_cache_records(root: &Path, scan: &mut Scan) -> Result<(), PackError> {
+fn collect_cache_records(root: &Path, rules: &PackRules, scan: &mut Scan) -> Result<(), PackError> {
     let walker = WalkDir::new(root)
         .follow_links(false)
         .min_depth(1)
@@ -280,7 +255,7 @@ fn collect_cache_records(root: &Path, scan: &mut Scan) -> Result<(), PackError> 
     while let Some(next) = it.next() {
         let entry = next?;
         let name = entry.file_name().to_string_lossy().to_string();
-        if !CACHE_DIRS.contains(&name.as_str()) {
+        if !rules.is_cache_dir(&name) {
             continue;
         }
         if let Some(rel) = rel_path(root, entry.path()) {
@@ -304,38 +279,6 @@ fn rel_path(root: &Path, abs: &Path) -> Option<String> {
         .collect::<Vec<_>>()
         .join("/");
     if s.is_empty() { None } else { Some(s) }
-}
-
-/// Decide whether a file name looks like a secret, and say which rule matched.
-///
-/// # Arguments
-///
-/// * `name` — File name (not a full path).
-///
-/// # Returns
-///
-/// `Some(reason)` when the file must not be packed, `None` otherwise.
-pub fn secret_reason(name: &str) -> Option<String> {
-    if SECRET_EXACT.contains(&name) {
-        return Some(format!("secret pattern: {name}"));
-    }
-
-    if let Some(rest) = name.strip_prefix(".env.") {
-        // `.env.example` and friends are checked-in templates, not secrets.
-        if ENV_TEMPLATE_SUFFIXES.contains(&rest) {
-            return None;
-        }
-        return Some(format!("secret pattern: .env.* ({name})"));
-    }
-
-    if let Some(ext) = Path::new(name).extension().and_then(|e| e.to_str()) {
-        let lower = ext.to_ascii_lowercase();
-        if SECRET_EXTENSIONS.contains(&lower.as_str()) {
-            return Some(format!("secret extension: .{lower}"));
-        }
-    }
-
-    None
 }
 
 /// Whether a link target escapes the project root.
@@ -364,7 +307,7 @@ fn canonicalize_or(path: &Path) -> PathBuf {
 }
 
 /// Lexically normalize a path, collapsing `.` and `..` without touching disk.
-fn normalize(path: &Path) -> PathBuf {
+pub(crate) fn normalize(path: &Path) -> PathBuf {
     let mut out = PathBuf::new();
     for component in path.components() {
         match component {
@@ -501,49 +444,6 @@ mod tests {
 
     fn rels(scan: &Scan) -> Vec<String> {
         scan.entries.iter().map(|e| e.rel.clone()).collect()
-    }
-
-    // ------------------------------------------------------------------
-    // secret classification
-    // ------------------------------------------------------------------
-
-    /// Exact-name secrets are recognized.
-    #[test]
-    fn test_secret_reason_exact_names() {
-        assert!(secret_reason(".env").is_some());
-        assert!(secret_reason("id_rsa").is_some());
-        assert!(secret_reason(".netrc").is_some());
-    }
-
-    /// Extension-based secrets are recognized, case-insensitively.
-    #[test]
-    fn test_secret_reason_extensions() {
-        assert!(secret_reason("server.pem").is_some());
-        assert!(secret_reason("SERVER.PEM").is_some());
-        assert!(secret_reason("store.jks").is_some());
-    }
-
-    /// `.env.*` templates are content, not secrets.
-    #[test]
-    fn test_secret_reason_env_templates_travel() {
-        assert!(secret_reason(".env.example").is_none());
-        assert!(secret_reason(".env.sample").is_none());
-        assert!(secret_reason(".env.template").is_none());
-    }
-
-    /// A real `.env.<stage>` file is still a secret.
-    #[test]
-    fn test_secret_reason_env_stage_is_secret() {
-        assert!(secret_reason(".env.production").is_some());
-        assert!(secret_reason(".env.local").is_some());
-    }
-
-    /// Ordinary files are not secrets.
-    #[test]
-    fn test_secret_reason_ordinary_files() {
-        assert!(secret_reason("main.rs").is_none());
-        assert!(secret_reason("README.md").is_none());
-        assert!(secret_reason(".mcp.json").is_none());
     }
 
     // ------------------------------------------------------------------

@@ -280,9 +280,29 @@ itself, plus the untracked local state that normally never leaves — a
 ```sh
 lds pack create                        # -> <project>-<timestamp>.pack, here
 lds pack create --root ~/proj -o p.pack
+lds pack create --dry-run              # classify only; write nothing
 lds pack inspect p.pack                # manifest only; no decompression
 lds pack restore p.pack --into ~/dest
+lds pack restore p.pack --into ~/proj --dry-run # predict the restore; write nothing
 lds pack restore p.pack --into ~/proj --force   # restore over a working copy
+```
+
+Both halves have a dry run, and they answer different questions. `create
+--dry-run` asks *what would travel*; `restore --dry-run` asks *what would
+happen here* — which existing files get replaced, which survive, which symlinks
+land dangling on this machine, which worktree pointers get rewritten. An
+existing destination is not an error during a preview, since reporting the
+collision is the whole point:
+
+```sh
+$ lds pack restore proj.pack --into ~/proj --dry-run
+dry run: restore proj.pack -> /home/u/proj (nothing written)
+  would write 2014 entries
+  destination exists: 1515 file(s) would be replaced, 1 would remain untouched (needs --force)
+
+would need attention:
+  1 existing file(s) the pack does not carry would REMAIN (restore overwrites, it does not wipe):
+    LOCAL-ONLY.txt
 ```
 
 `restore` refuses a destination that already exists unless `--force` is given.
@@ -315,6 +335,41 @@ Three classes are handled deliberately:
 `.claude/` is packed verbatim as its own layer, with its links counted and their
 shared root summarized rather than listed one by one. State outside the project
 root (`~/.config/...`) is not collected.
+
+#### Teaching it your own secret names
+
+Secret file names are open-ended — every ecosystem invents its own
+(`credentials.toml`, `terraform.tfvars`, `service-account.json`), and a project
+can always have one nobody has heard of. The built-in list covers the common
+ones; extend it in `~/.config/lds/config.toml`:
+
+```toml
+[pack]
+secret_globs = ["my-app-keys.json", "*.vault"]  # also treat these as secrets
+cache_dirs   = ["dist"]                         # also treat these as caches
+keep         = [".npmrc"]                       # pack these despite a built-in rule
+```
+
+Globs match the **file name**, not the path. `secret_globs` and `cache_dirs`
+**add to** the built-ins rather than replacing them, so declaring one
+project-specific name cannot silently disable the rest of the protection.
+`keep` is the only subtractive list, for when a built-in rule is wrong for this
+project. A malformed glob is a hard error naming itself — a typo must not
+silently match nothing.
+
+Use `--dry-run` to see the effect before writing an archive:
+
+```sh
+$ lds pack create --dry-run
+dry run: /home/u/proj -> proj-20260811-004500.pack (nothing written)
+  would pack 2 files, 0 symlinks, 38 B
+  (with [pack] overrides from config.toml)
+
+not packed — secrets (move these yourself):
+  .env              (secret pattern: .env)
+  my-app-keys.json  (secret pattern: my-app-keys.json)
+  prod.vault        (secret pattern: *.vault)
+```
 
 Registered worktrees travel too. Both halves of a worktree's wiring —
 `.git/worktrees/<name>/gitdir` and the worktree's own `.git` file — are absolute

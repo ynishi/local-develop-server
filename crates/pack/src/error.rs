@@ -19,6 +19,18 @@ pub enum PackError {
     #[error("not a directory: {0}")]
     NotADirectory(PathBuf),
 
+    /// A configured glob could not be compiled.
+    ///
+    /// Carries the offending pattern so a typo in `[pack]` points at itself
+    /// rather than silently matching nothing.
+    #[error("invalid pack pattern '{pattern}': {message}")]
+    BadPattern {
+        /// The pattern as written in configuration.
+        pattern: String,
+        /// Why it failed to compile.
+        message: String,
+    },
+
     /// The manifest could not be serialized.
     #[error("manifest serialize error: {0}")]
     ManifestSerialize(#[from] toml::ser::Error),

@@ -48,4 +48,5 @@ clap = { version = "4", features = ["derive"] }
 tar = "0.4"
 zstd = "0.13"
 walkdir = "2"
+glob = "0.3"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }

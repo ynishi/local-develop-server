@@ -43,6 +43,45 @@ All notable changes to this project will be documented in this file.
   "what is in here, and what did it leave behind?" without decompressing the
   payload.
 
+  **Secret and cache classification is configurable, and `--dry-run` shows the
+  result before anything is written.** The built-in secret list was also
+  widened well past `.env` — `secret*.toml` / `secrets.*` / `credentials.toml`
+  / `terraform.tfvars` / `*.auto.tfvars` / `service-account*.json` /
+  `kubeconfig` / `.pgpass` / `.pypirc` / `.htpasswd` / `.dockercfg` / `*.p8` /
+  `*.ppk` / `*.asc` / `*.gpg` are now recognized. That list can never be
+  complete, though, so `~/.config/lds/config.toml` gained a `[pack]` section:
+
+  ```toml
+  [pack]
+  secret_globs = ["my-app-keys.json", "*.vault"]
+  cache_dirs   = ["dist"]
+  keep         = [".npmrc"]
+  ```
+
+  `secret_globs` and `cache_dirs` **add to** the built-ins rather than
+  replacing them, so declaring one project-specific name cannot silently
+  disable the rest of the protection; `keep` is the sole subtractive list, for
+  when a built-in rule is wrong for a given project. A malformed glob fails
+  loudly and names itself rather than silently matching nothing.
+
+  `lds pack create --dry-run` classifies and reports without writing an
+  archive, which is what makes a configuration change checkable: edit `[pack]`,
+  re-run the dry run, read what moved between "packed" and "not packed".
+
+  `lds pack restore --dry-run` answers the other half — not *what would
+  travel* but *what would happen here*: how many existing files would be
+  replaced, which ones the pack does not carry and would therefore survive the
+  restore, which symlinks would land dangling on this machine, and which
+  worktree pointers would be rewritten. An existing destination is not an error
+  during a preview (reporting the collision is the point), so `--force` is not
+  needed to look. The "would remain" list is the concrete form of the overwrite
+  semantics above: every path in it is still there afterwards.
+
+  Predicting a dangling symlink before the link exists needs the payload, not
+  just the filesystem — a relative link whose target is supplied by the pack
+  itself resolves fine once both land, and checking the disk alone would report
+  every such link as broken.
+
   `restore` refuses an existing destination unless `--force`, and `--force`
   overwrites rather than wipes: files already in the destination that the pack
   does not carry survive. Restoring a backup over a damaged working copy thus

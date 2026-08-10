@@ -64,6 +64,8 @@ pub struct Config {
     pub recipes: Recipes,
     /// Path overrides.
     pub paths: Paths,
+    /// `lds pack` classification overrides.
+    pub pack: Pack,
 }
 
 /// Recipe-related configuration.
@@ -75,6 +77,27 @@ pub struct Recipes {
     /// Entries are absolute paths.  Tilde is expanded on load and must be
     /// absent from `config.toml` on disk.
     pub dirs: Vec<PathBuf>,
+}
+
+/// Classification overrides for `lds pack`.
+///
+/// Every list here is **added to** the built-in defaults rather than replacing
+/// them, so a project that declares one project-specific secret name does not
+/// silently lose the protection of the built-in list. `keep` is the one escape
+/// hatch that subtracts: it names files the built-ins would classify as secret
+/// or cache but that this operator wants carried anyway.
+///
+/// Patterns are globs matched against the **file name** (not the full path),
+/// e.g. `*.vault`, `secret*.toml`, `my-app-keys.json`.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(default)]
+pub struct Pack {
+    /// Extra file-name globs to treat as secrets (never packed, only reported).
+    pub secret_globs: Vec<String>,
+    /// Extra directory names to treat as regenerable caches (never packed).
+    pub cache_dirs: Vec<String>,
+    /// File-name globs that must be packed even if a built-in rule excludes them.
+    pub keep: Vec<String>,
 }
 
 /// Path overrides for well-known lds locations.

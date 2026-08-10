@@ -43,6 +43,7 @@ pub mod error;
 pub mod inspect;
 pub mod manifest;
 pub mod restore;
+pub mod rules;
 pub mod scan;
 
 pub use create::{CreateOptions, CreateReport, DEFAULT_COMPRESSION_LEVEL, create};
@@ -53,4 +54,5 @@ pub use manifest::{
     WorktreeRecord,
 };
 pub use restore::{RestoreOptions, RestoreReport, restore};
-pub use scan::{CACHE_DIRS, Scan, scan, secret_reason};
+pub use rules::{DEFAULT_CACHE_DIRS, DEFAULT_KEEP, DEFAULT_SECRET_GLOBS, PackRules, RuleOverrides};
+pub use scan::{Scan, scan, scan_with};

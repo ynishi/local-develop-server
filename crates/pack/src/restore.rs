@@ -15,6 +15,7 @@
 //! *overwrite*, not *wipe*: files already present that the pack does not carry
 //! survive the restore. Nothing is deleted on the operator's behalf.
 
+use std::collections::BTreeSet;
 use std::fs::File;
 use std::path::{Component, Path, PathBuf};
 
@@ -37,6 +38,18 @@ pub struct RestoreOptions {
     /// recovers everything the pack holds without deleting anything it does
     /// not know about — at the cost of leaving unrelated leftovers in place.
     pub force: bool,
+    /// Predict the restore and report it, writing nothing.
+    ///
+    /// A restore has consequences a listing of the archive cannot show: which
+    /// files in the destination would be overwritten, which would survive
+    /// untouched, which symlinks would land dangling on *this* machine, and
+    /// which worktree pointers would be rewritten. A dry run answers those
+    /// before the first byte is written.
+    ///
+    /// An existing destination is not an error during a dry run — reporting
+    /// what would collide is precisely the point — so `force` is not required
+    /// to preview one.
+    pub dry_run: bool,
 }
 
 impl RestoreOptions {
@@ -46,19 +59,37 @@ impl RestoreOptions {
             archive: archive.into(),
             dest: dest.into(),
             force: false,
+            dry_run: false,
         }
     }
 }
 
-/// What [`restore`] did, and what the operator still has to do.
+/// What [`restore`] did — or, on a dry run, what it would do.
 #[derive(Debug, Clone)]
 pub struct RestoreReport {
-    /// Where the project was restored.
+    /// Where the project was restored, or would be.
     pub dest: PathBuf,
     /// Manifest read from the archive.
     pub manifest: Manifest,
-    /// Number of entries written.
+    /// Whether this was a prediction rather than a restore.
+    pub dry_run: bool,
+    /// Number of entries written, or that would be written.
     pub entries_written: u64,
+    /// Whether the destination already exists.
+    ///
+    /// Only meaningful on a dry run; a real restore either refused or was
+    /// given `force`.
+    pub destination_exists: bool,
+    /// Existing files the restore would replace.
+    ///
+    /// Populated on a dry run only. Empty when the destination is new.
+    pub would_overwrite: Vec<String>,
+    /// Existing files the pack does not carry, which would survive the restore.
+    ///
+    /// This is the concrete form of "`--force` overwrites, it does not wipe":
+    /// everything listed here is still there afterwards. Populated on a dry
+    /// run only.
+    pub would_remain: Vec<String>,
     /// Worktrees whose pointer files were rewritten for the new location.
     pub rewritten_worktrees: Vec<String>,
     /// Worktrees that were registered at pack time but live outside the root,
@@ -76,11 +107,17 @@ pub struct RestoreReport {
 
 impl RestoreReport {
     /// Whether anything needs operator attention after the restore.
+    ///
+    /// On a dry run this reads as "would need attention", and additionally
+    /// counts a destination that already holds files: proceeding there needs
+    /// `--force`, and whatever the pack does not carry stays behind.
     pub fn needs_attention(&self) -> bool {
         !self.dangling_symlinks.is_empty()
             || !self.missing_claude_link_roots.is_empty()
             || !self.missing_worktrees.is_empty()
             || !self.secrets_not_carried.is_empty()
+            || !self.would_overwrite.is_empty()
+            || !self.would_remain.is_empty()
     }
 }
 
@@ -103,8 +140,13 @@ impl RestoreReport {
 /// - [`PackError::Io`] on read or write failure.
 pub fn restore(opts: &RestoreOptions) -> Result<RestoreReport, PackError> {
     let manifest = crate::inspect::verify(&opts.archive)?;
+    let destination_exists = opts.dest.exists();
 
-    if opts.dest.exists() && !opts.force {
+    if opts.dry_run {
+        return predict(opts, manifest, destination_exists);
+    }
+
+    if destination_exists && !opts.force {
         return Err(PackError::DestinationExists(opts.dest.clone()));
     }
     std::fs::create_dir_all(&opts.dest)?;
@@ -137,7 +179,11 @@ pub fn restore(opts: &RestoreOptions) -> Result<RestoreReport, PackError> {
 
     Ok(RestoreReport {
         dest,
+        dry_run: false,
         entries_written,
+        destination_exists,
+        would_overwrite: Vec::new(),
+        would_remain: Vec::new(),
         rewritten_worktrees,
         missing_worktrees,
         dangling_symlinks,
@@ -146,6 +192,144 @@ pub fn restore(opts: &RestoreOptions) -> Result<RestoreReport, PackError> {
         secrets_not_carried: manifest.skipped_secret.clone(),
         manifest,
     })
+}
+
+/// Work out what a restore would do, touching nothing.
+///
+/// Everything here is derived from the archive plus the current state of the
+/// destination, so the prediction is about *this* machine — a symlink is
+/// reported as dangling because its target is absent here, not because it was
+/// absent where the pack was made.
+fn predict(
+    opts: &RestoreOptions,
+    manifest: Manifest,
+    destination_exists: bool,
+) -> Result<RestoreReport, PackError> {
+    let dest = std::fs::canonicalize(&opts.dest).unwrap_or_else(|_| opts.dest.clone());
+    let payload = crate::inspect::list_payload_paths(&opts.archive)?;
+    let payload_set: BTreeSet<&str> = payload.iter().map(|s| s.as_str()).collect();
+
+    let (would_overwrite, would_remain) = if destination_exists {
+        compare_destination(&dest, &payload_set)
+    } else {
+        (Vec::new(), Vec::new())
+    };
+
+    let rewritten_worktrees = manifest
+        .worktrees
+        .iter()
+        .filter(|w| w.included)
+        .map(|w| w.name.clone())
+        .collect();
+
+    let missing_worktrees = manifest
+        .worktrees
+        .iter()
+        .filter(|w| !w.included)
+        .map(|w| w.name.clone())
+        .collect();
+
+    let dangling_symlinks = manifest
+        .symlinks
+        .iter()
+        .filter(|s| would_dangle(&dest, s, &payload_set))
+        .cloned()
+        .collect();
+
+    let missing_claude_link_roots = manifest
+        .claude
+        .link_roots
+        .iter()
+        .filter(|r| !Path::new(r).exists())
+        .cloned()
+        .collect();
+
+    Ok(RestoreReport {
+        dest,
+        dry_run: true,
+        entries_written: payload.len() as u64,
+        destination_exists,
+        would_overwrite,
+        would_remain,
+        rewritten_worktrees,
+        missing_worktrees,
+        dangling_symlinks,
+        missing_claude_link_roots,
+        regenerable_caches: manifest.skipped_cache.clone(),
+        secrets_not_carried: manifest.skipped_secret.clone(),
+        manifest,
+    })
+}
+
+/// Split the destination's existing files into "would be replaced" and
+/// "would survive".
+///
+/// Directories are ignored on both sides: only file contents can be lost, and
+/// a directory that exists in both places is not a collision worth reporting.
+fn compare_destination(dest: &Path, incoming: &BTreeSet<&str>) -> (Vec<String>, Vec<String>) {
+    let mut overwrite = Vec::new();
+    let mut remain = Vec::new();
+
+    let walker = walkdir::WalkDir::new(dest)
+        .follow_links(false)
+        .min_depth(1)
+        .sort_by_file_name();
+
+    for entry in walker.into_iter().filter_map(|e| e.ok()) {
+        if entry.file_type().is_dir() {
+            continue;
+        }
+        let Ok(rel) = entry.path().strip_prefix(dest) else {
+            continue;
+        };
+        let rel = rel
+            .components()
+            .map(|c| c.as_os_str().to_string_lossy())
+            .collect::<Vec<_>>()
+            .join("/");
+        if rel.is_empty() {
+            continue;
+        }
+        if incoming.contains(rel.as_str()) {
+            overwrite.push(rel);
+        } else {
+            remain.push(rel);
+        }
+    }
+
+    (overwrite, remain)
+}
+
+/// Whether a symlink from the archive would land dangling here.
+///
+/// The link does not exist yet, so its target is resolved as it *would* be.
+/// An absolute target is checked as written — it keeps pointing at the machine
+/// it named, which is exactly why moving a project can break it. A relative
+/// target is resolved inside the restored tree, and may well be satisfied by
+/// the pack itself: the target file does not exist on disk yet, but it is in
+/// the payload and will be there by the time the link is. Checking the
+/// filesystem alone would report every such link as dangling.
+fn would_dangle(dest: &Path, record: &SymlinkRecord, payload: &BTreeSet<&str>) -> bool {
+    let target = Path::new(&record.target);
+
+    if target.is_absolute() {
+        return !target.exists();
+    }
+
+    let link_parent = Path::new(&record.path).parent().unwrap_or(Path::new(""));
+    let resolved = crate::scan::normalize(&link_parent.join(target));
+
+    let as_key = resolved
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/");
+    if payload.contains(as_key.as_str()) {
+        // The pack supplies it; it will exist alongside the link.
+        return false;
+    }
+
+    !dest.join(&resolved).exists()
 }
 
 /// Extract every `payload/` entry into `dest`, stripping the prefix.
@@ -395,6 +579,192 @@ mod tests {
         let report = restore(&RestoreOptions::new(&out, &dest)).expect("restore");
 
         assert!(report.dangling_symlinks.is_empty());
+    }
+
+    // ------------------------------------------------------------------
+    // dry run
+    // ------------------------------------------------------------------
+
+    /// A dry run creates nothing at all, not even the destination directory.
+    #[test]
+    fn test_dry_run_writes_nothing() {
+        let dir = TempDir::new().expect("tempdir");
+        let root = dir.path().join("proj");
+        touch(&root.join("a.txt"), "a");
+        let out = dir.path().join("proj.pack");
+        create(&CreateOptions::new(&root, &out, "0.13.3")).expect("create");
+
+        let dest = dir.path().join("nowhere");
+        let opts = RestoreOptions {
+            dry_run: true,
+            ..RestoreOptions::new(&out, &dest)
+        };
+        let report = restore(&opts).expect("dry run");
+
+        assert!(report.dry_run);
+        assert!(!dest.exists(), "dry run must not create the destination");
+        assert!(
+            report.entries_written > 0,
+            "it still counts what would land"
+        );
+        assert!(!report.destination_exists);
+        assert!(report.would_overwrite.is_empty());
+        assert!(report.would_remain.is_empty());
+    }
+
+    /// An existing destination is previewable without `--force`, and the split
+    /// between "replaced" and "remains" is what makes the overwrite semantics
+    /// legible before committing to them.
+    #[test]
+    fn test_dry_run_splits_existing_destination() {
+        let dir = TempDir::new().expect("tempdir");
+        let root = dir.path().join("proj");
+        touch(&root.join("shared.txt"), "from pack");
+        touch(&root.join("only-in-pack.txt"), "new");
+        let out = dir.path().join("proj.pack");
+        create(&CreateOptions::new(&root, &out, "0.13.3")).expect("create");
+
+        let dest = dir.path().join("existing");
+        touch(&dest.join("shared.txt"), "old content");
+        touch(&dest.join("only-in-dest.txt"), "leftover");
+
+        // No force, and yet the preview succeeds — refusing here would defeat
+        // the purpose of asking what would happen.
+        let opts = RestoreOptions {
+            dry_run: true,
+            ..RestoreOptions::new(&out, &dest)
+        };
+        let report = restore(&opts).expect("dry run over existing dest");
+
+        assert!(report.destination_exists);
+        assert_eq!(report.would_overwrite, vec!["shared.txt".to_string()]);
+        assert_eq!(report.would_remain, vec!["only-in-dest.txt".to_string()]);
+        assert!(report.needs_attention());
+
+        // And the destination is untouched by the preview itself.
+        assert_eq!(
+            fs::read_to_string(dest.join("shared.txt")).expect("read"),
+            "old content"
+        );
+    }
+
+    /// The prediction matches what the real restore then does.
+    #[test]
+    fn test_dry_run_agrees_with_real_restore() {
+        let dir = TempDir::new().expect("tempdir");
+        let root = dir.path().join("proj");
+        touch(&root.join("a.txt"), "a");
+        touch(&root.join("sub/b.txt"), "b");
+        let out = dir.path().join("proj.pack");
+        create(&CreateOptions::new(&root, &out, "0.13.3")).expect("create");
+
+        let dest = dir.path().join("dest");
+        let predicted = restore(&RestoreOptions {
+            dry_run: true,
+            ..RestoreOptions::new(&out, &dest)
+        })
+        .expect("dry run");
+
+        let actual = restore(&RestoreOptions::new(&out, &dest)).expect("real restore");
+
+        assert_eq!(
+            predicted.entries_written, actual.entries_written,
+            "a dry run that miscounts is worse than none"
+        );
+        assert_eq!(predicted.rewritten_worktrees, actual.rewritten_worktrees);
+        assert_eq!(
+            predicted.dangling_symlinks.len(),
+            actual.dangling_symlinks.len()
+        );
+    }
+
+    /// A dangling symlink is predicted before the link exists.
+    #[cfg(unix)]
+    #[test]
+    fn test_dry_run_predicts_dangling_symlink() {
+        let dir = TempDir::new().expect("tempdir");
+        let root = dir.path().join("proj");
+        fs::create_dir_all(&root).expect("mkdir");
+        let vanishing = dir.path().join("vanishing");
+        fs::create_dir_all(&vanishing).expect("mkdir");
+        touch(&vanishing.join("t.md"), "t");
+        std::os::unix::fs::symlink(vanishing.join("t.md"), root.join("link.md")).expect("symlink");
+
+        let out = dir.path().join("proj.pack");
+        create(&CreateOptions::new(&root, &out, "0.13.3")).expect("create");
+        fs::remove_dir_all(&vanishing).expect("rm");
+
+        let dest = dir.path().join("dest");
+        let predicted = restore(&RestoreOptions {
+            dry_run: true,
+            ..RestoreOptions::new(&out, &dest)
+        })
+        .expect("dry run");
+
+        assert_eq!(predicted.dangling_symlinks.len(), 1);
+        assert_eq!(predicted.dangling_symlinks[0].path, "link.md");
+        assert!(!dest.exists(), "still nothing written");
+
+        // The real restore then agrees.
+        let actual = restore(&RestoreOptions::new(&out, &dest)).expect("restore");
+        assert_eq!(actual.dangling_symlinks.len(), 1);
+    }
+
+    /// A relative link that stays inside the project is not predicted dangling.
+    #[cfg(unix)]
+    #[test]
+    fn test_dry_run_does_not_predict_live_relative_link() {
+        let dir = TempDir::new().expect("tempdir");
+        let root = dir.path().join("proj");
+        fs::create_dir_all(&root).expect("mkdir");
+        touch(&root.join("real.txt"), "r");
+        std::os::unix::fs::symlink("real.txt", root.join("rel-link")).expect("symlink");
+
+        let out = dir.path().join("proj.pack");
+        create(&CreateOptions::new(&root, &out, "0.13.3")).expect("create");
+
+        let dest = dir.path().join("dest");
+        let predicted = restore(&RestoreOptions {
+            dry_run: true,
+            ..RestoreOptions::new(&out, &dest)
+        })
+        .expect("dry run");
+
+        assert!(
+            predicted.dangling_symlinks.is_empty(),
+            "a link resolving inside the restored tree is fine"
+        );
+    }
+
+    /// Worktree pointer rewrites are announced ahead of time.
+    #[test]
+    fn test_dry_run_announces_worktree_rewrite() {
+        let dir = TempDir::new().expect("tempdir");
+        let root = dir.path().join("proj");
+        touch(&root.join(".git/HEAD"), "ref: refs/heads/main\n");
+        let wt = root.join(".worktrees/feature");
+        touch(&wt.join("f.txt"), "w");
+        let admin = root.join(".git/worktrees/feature");
+        fs::create_dir_all(&admin).expect("mkdir");
+        fs::write(wt.join(".git"), format!("gitdir: {}\n", admin.display())).expect("write");
+        fs::write(
+            admin.join("gitdir"),
+            format!("{}\n", wt.join(".git").display()),
+        )
+        .expect("write");
+
+        let out = dir.path().join("proj.pack");
+        create(&CreateOptions::new(&root, &out, "0.13.3")).expect("create");
+
+        let dest = dir.path().join("dest");
+        let predicted = restore(&RestoreOptions {
+            dry_run: true,
+            ..RestoreOptions::new(&out, &dest)
+        })
+        .expect("dry run");
+
+        assert_eq!(predicted.rewritten_worktrees, vec!["feature".to_string()]);
+        assert!(!dest.exists());
     }
 
     /// Skipped secrets and caches are carried into the report so the operator

@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use lds_core::config::{Config, tilde_expand};
-use lds_pack::{CreateOptions, Manifest, RestoreOptions, RestoreReport};
+use lds_pack::{CreateOptions, Manifest, PackRules, RestoreOptions, RestoreReport, RuleOverrides};
 
 // ---------------------------------------------------------------------------
 // CLI structure
@@ -51,6 +51,9 @@ pub enum PackAction {
         /// zstd compression level.
         #[arg(long, default_value_t = lds_pack::DEFAULT_COMPRESSION_LEVEL)]
         level: i32,
+        /// Report what would be packed and skipped, without writing an archive.
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Restore a pack into a directory.
     Restore {
@@ -63,6 +66,9 @@ pub enum PackAction {
         /// files the pack does not carry).
         #[arg(long)]
         force: bool,
+        /// Report what the restore would do here, without writing anything.
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Show what a pack contains without unpacking it.
     Inspect {
@@ -174,18 +180,29 @@ fn cmd_list() -> Result<()> {
 /// Handle `pack create|restore|inspect`.
 fn handle_pack(action: PackAction) -> Result<()> {
     match action {
-        PackAction::Create { root, out, level } => cmd_pack_create(root, out, level),
+        PackAction::Create {
+            root,
+            out,
+            level,
+            dry_run,
+        } => cmd_pack_create(root, out, level, dry_run),
         PackAction::Restore {
             archive,
             into,
             force,
-        } => cmd_pack_restore(&archive, into, force),
+            dry_run,
+        } => cmd_pack_restore(&archive, into, force, dry_run),
         PackAction::Inspect { archive, files } => cmd_pack_inspect(&archive, files),
     }
 }
 
 /// `pack create`: classify the project, write the archive, report what was left out.
-fn cmd_pack_create(root: Option<String>, out: Option<String>, level: i32) -> Result<()> {
+fn cmd_pack_create(
+    root: Option<String>,
+    out: Option<String>,
+    level: i32,
+    dry_run: bool,
+) -> Result<()> {
     let root = match root {
         Some(raw) => resolve_arg_path(&raw)?,
         None => std::env::current_dir().context("failed to read current directory")?,
@@ -196,31 +213,69 @@ fn cmd_pack_create(root: Option<String>, out: Option<String>, level: i32) -> Res
         None => default_pack_name(&root),
     };
 
+    let rules = pack_rules_from_config()?;
+    let customized = rules.is_customized();
+
     let mut opts = CreateOptions::new(&root, &out, env!("CARGO_PKG_VERSION"));
     opts.compression_level = level;
+    opts.rules = rules;
+    opts.dry_run = dry_run;
 
     let report = lds_pack::create(&opts).context("failed to create pack")?;
     let m = &report.manifest;
 
-    println!(
-        "packed: {} -> {}",
-        root.display(),
-        report.out_path.display()
-    );
-    println!(
-        "  {} files, {} symlinks, {} -> {}",
-        m.stats.file_count,
-        m.stats.symlink_count,
-        human_bytes(m.stats.total_bytes),
-        human_bytes(report.compressed_bytes)
-    );
+    if report.dry_run {
+        println!(
+            "dry run: {} -> {} (nothing written)",
+            root.display(),
+            out.display()
+        );
+        println!(
+            "  would pack {} files, {} symlinks, {}",
+            m.stats.file_count,
+            m.stats.symlink_count,
+            human_bytes(m.stats.total_bytes)
+        );
+    } else {
+        println!(
+            "packed: {} -> {}",
+            root.display(),
+            report.out_path.display()
+        );
+        println!(
+            "  {} files, {} symlinks, {} -> {}",
+            m.stats.file_count,
+            m.stats.symlink_count,
+            human_bytes(m.stats.total_bytes),
+            human_bytes(report.compressed_bytes)
+        );
+    }
+
+    if customized {
+        println!("  (with [pack] overrides from config.toml)");
+    }
 
     print_manifest_notes(m);
     Ok(())
 }
 
+/// Build classification rules from `[pack]` in `~/.config/lds/config.toml`.
+///
+/// A missing config leaves the built-in rules in force. A malformed glob is a
+/// hard error rather than a warning: silently dropping it would leave the
+/// operator believing a file is excluded when it is not.
+fn pack_rules_from_config() -> Result<PackRules> {
+    let cfg = Config::load_or_default();
+    let overrides = RuleOverrides {
+        secret_globs: cfg.pack.secret_globs.clone(),
+        cache_dirs: cfg.pack.cache_dirs.clone(),
+        keep: cfg.pack.keep.clone(),
+    };
+    PackRules::new(&overrides).context("invalid [pack] configuration in config.toml")
+}
+
 /// `pack restore`: unpack, repair worktree pointers, report what needs attention.
-fn cmd_pack_restore(archive: &str, into: Option<String>, force: bool) -> Result<()> {
+fn cmd_pack_restore(archive: &str, into: Option<String>, force: bool, dry_run: bool) -> Result<()> {
     let archive = resolve_arg_path(archive)?;
 
     let dest = match into {
@@ -238,18 +293,41 @@ fn cmd_pack_restore(archive: &str, into: Option<String>, force: bool) -> Result<
         archive: archive.clone(),
         dest,
         force,
+        dry_run,
     };
     let report = lds_pack::restore(&opts).context("failed to restore pack")?;
 
-    println!(
-        "restored: {} -> {} ({} entries)",
-        archive.display(),
-        report.dest.display(),
-        report.entries_written
-    );
+    if report.dry_run {
+        println!(
+            "dry run: restore {} -> {} (nothing written)",
+            archive.display(),
+            report.dest.display()
+        );
+        println!("  would write {} entries", report.entries_written);
+        if report.destination_exists {
+            println!(
+                "  destination exists: {} file(s) would be replaced, {} would remain untouched{}",
+                report.would_overwrite.len(),
+                report.would_remain.len(),
+                if force { "" } else { " (needs --force)" }
+            );
+        }
+    } else {
+        println!(
+            "restored: {} -> {} ({} entries)",
+            archive.display(),
+            report.dest.display(),
+            report.entries_written
+        );
+    }
     if !report.rewritten_worktrees.is_empty() {
         println!(
-            "  rewrote worktree pointers: {}",
+            "  {} worktree pointers: {}",
+            if report.dry_run {
+                "would rewrite"
+            } else {
+                "rewrote"
+            },
             report.rewritten_worktrees.join(", ")
         );
     }
@@ -345,12 +423,47 @@ fn print_restore_attention(report: &RestoreReport) {
         return;
     }
 
-    println!("\nneeds attention:");
+    println!(
+        "\n{}:",
+        if report.dry_run {
+            "would need attention"
+        } else {
+            "needs attention"
+        }
+    );
+
+    if report.dry_run && report.destination_exists {
+        if !report.would_overwrite.is_empty() {
+            println!(
+                "  {} existing file(s) would be replaced:",
+                report.would_overwrite.len()
+            );
+            for p in report.would_overwrite.iter().take(5) {
+                println!("    {p}");
+            }
+            if report.would_overwrite.len() > 5 {
+                println!("    … and {} more", report.would_overwrite.len() - 5);
+            }
+        }
+        if !report.would_remain.is_empty() {
+            println!(
+                "  {} existing file(s) the pack does not carry would REMAIN (restore overwrites, it does not wipe):",
+                report.would_remain.len()
+            );
+            for p in report.would_remain.iter().take(5) {
+                println!("    {p}");
+            }
+            if report.would_remain.len() > 5 {
+                println!("    … and {} more", report.would_remain.len() - 5);
+            }
+        }
+    }
 
     if !report.dangling_symlinks.is_empty() {
         println!(
-            "  {} symlink(s) dangle here:",
-            report.dangling_symlinks.len()
+            "  {} symlink(s) {} dangle here:",
+            report.dangling_symlinks.len(),
+            if report.dry_run { "would" } else { "" }
         );
         for s in &report.dangling_symlinks {
             println!("    {} -> {}", s.path, s.target);

@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 
 use crate::error::PackError;
 use crate::manifest::{MANIFEST_NAME, Manifest, PACK_FORMAT_VERSION, Stats};
+use crate::rules::PackRules;
 use crate::scan::{self, Entry, EntryKind, Scan};
 
 /// Directory prefix under which payload entries are stored inside the archive.
@@ -39,16 +40,26 @@ pub struct CreateOptions {
     pub lds_version: String,
     /// zstd compression level.
     pub compression_level: i32,
+    /// Which names count as secrets and caches.
+    pub rules: PackRules,
+    /// Classify and build the manifest, but write no archive.
+    ///
+    /// The point of a dry run is to answer "what would travel, and what would
+    /// be left behind?" — particularly after editing `[pack]` in config —
+    /// without producing a file that then has to be cleaned up.
+    pub dry_run: bool,
 }
 
 impl CreateOptions {
-    /// Build options with the default compression level.
+    /// Build options with the default compression level and rules.
     pub fn new(root: impl Into<PathBuf>, out: impl Into<PathBuf>, lds_version: &str) -> Self {
         Self {
             root: root.into(),
             out: out.into(),
             lds_version: lds_version.to_string(),
             compression_level: DEFAULT_COMPRESSION_LEVEL,
+            rules: PackRules::default(),
+            dry_run: false,
         }
     }
 }
@@ -56,12 +67,14 @@ impl CreateOptions {
 /// What [`create`] produced.
 #[derive(Debug, Clone)]
 pub struct CreateReport {
-    /// Manifest embedded in the archive.
+    /// Manifest embedded in the archive (or that would have been, on a dry run).
     pub manifest: Manifest,
-    /// Path of the written archive.
+    /// Path of the written archive, or where one would have been written.
     pub out_path: PathBuf,
-    /// Size of the archive on disk, after compression.
+    /// Size of the archive on disk, after compression. `0` on a dry run.
     pub compressed_bytes: u64,
+    /// Whether this was a dry run, in which case nothing was written.
+    pub dry_run: bool,
 }
 
 /// Pack a project root into a single archive.
@@ -83,10 +96,21 @@ pub struct CreateReport {
 /// - [`PackError::ManifestSerialize`] if the manifest cannot be serialized.
 pub fn create(opts: &CreateOptions) -> Result<CreateReport, PackError> {
     let root = canonical_or_self(&opts.root);
-    let scanned = scan::scan(&root)?;
+    let scanned = scan::scan_with(&root, &opts.rules)?;
 
     let manifest = build_manifest(&root, &scanned, &opts.lds_version);
     let manifest_toml = manifest.to_toml()?;
+
+    if opts.dry_run {
+        // Everything the caller needs to decide is in the manifest; stop
+        // before the first byte is written.
+        return Ok(CreateReport {
+            manifest,
+            out_path: opts.out.clone(),
+            compressed_bytes: 0,
+            dry_run: true,
+        });
+    }
 
     if let Some(parent) = opts.out.parent()
         && !parent.as_os_str().is_empty()
@@ -116,6 +140,7 @@ pub fn create(opts: &CreateOptions) -> Result<CreateReport, PackError> {
         manifest,
         out_path: opts.out.clone(),
         compressed_bytes,
+        dry_run: false,
     })
 }
 
@@ -294,6 +319,141 @@ mod tests {
         let out = dir.path().join("deeply/nested/proj.pack");
         create(&CreateOptions::new(&root, &out, "0.13.3")).expect("create");
         assert!(out.is_file());
+    }
+
+    /// A dry run classifies everything but writes no archive.
+    #[test]
+    fn test_dry_run_writes_nothing() {
+        let dir = TempDir::new().expect("tempdir");
+        let root = dir.path().join("proj");
+        fs::create_dir_all(&root).expect("mkdir");
+        sample_project(&root);
+
+        let out = dir.path().join("would-be.pack");
+        let mut opts = CreateOptions::new(&root, &out, "0.13.3");
+        opts.dry_run = true;
+
+        let report = create(&opts).expect("dry run should succeed");
+
+        assert!(report.dry_run);
+        assert_eq!(report.compressed_bytes, 0);
+        assert!(!out.exists(), "dry run must not write an archive");
+        // The classification is still complete, which is the point of asking.
+        assert!(report.manifest.stats.file_count > 0);
+        assert!(
+            report
+                .manifest
+                .skipped_secret
+                .iter()
+                .any(|s| s.path == ".env"),
+            "a dry run still reports what would be left behind"
+        );
+    }
+
+    /// A project-specific secret name declared in config is honored end to end.
+    #[test]
+    fn test_custom_secret_glob_reaches_the_archive() {
+        let dir = TempDir::new().expect("tempdir");
+        let root = dir.path().join("proj");
+        fs::create_dir_all(&root).expect("mkdir");
+        touch(&root.join("keep-me.txt"), "content");
+        touch(&root.join("my-app-keys.json"), "SECRET");
+        touch(&root.join("prod.vault"), "SECRET");
+
+        let out = dir.path().join("proj.pack");
+        let mut opts = CreateOptions::new(&root, &out, "0.13.3");
+        opts.rules = crate::rules::PackRules::new(&crate::rules::RuleOverrides {
+            secret_globs: vec!["my-app-keys.json".to_string(), "*.vault".to_string()],
+            ..Default::default()
+        })
+        .expect("rules compile");
+
+        let report = create(&opts).expect("create");
+
+        let skipped: Vec<&str> = report
+            .manifest
+            .skipped_secret
+            .iter()
+            .map(|s| s.path.as_str())
+            .collect();
+        assert!(skipped.contains(&"my-app-keys.json"));
+        assert!(skipped.contains(&"prod.vault"));
+
+        let payload = crate::inspect::list_payload_paths(&out).expect("list");
+        assert!(payload.iter().any(|p| p == "keep-me.txt"));
+        assert!(!payload.iter().any(|p| p == "my-app-keys.json"));
+        assert!(!payload.iter().any(|p| p == "prod.vault"));
+    }
+
+    /// `keep` overrides a built-in exclusion end to end.
+    #[test]
+    fn test_keep_carries_a_builtin_secret() {
+        let dir = TempDir::new().expect("tempdir");
+        let root = dir.path().join("proj");
+        fs::create_dir_all(&root).expect("mkdir");
+        touch(&root.join(".npmrc"), "registry=...");
+
+        let out = dir.path().join("proj.pack");
+        let mut opts = CreateOptions::new(&root, &out, "0.13.3");
+        opts.rules = crate::rules::PackRules::new(&crate::rules::RuleOverrides {
+            keep: vec![".npmrc".to_string()],
+            ..Default::default()
+        })
+        .expect("rules compile");
+
+        let report = create(&opts).expect("create");
+        assert!(
+            report.manifest.skipped_secret.is_empty(),
+            "keep must remove it from the skip list"
+        );
+        let payload = crate::inspect::list_payload_paths(&out).expect("list");
+        assert!(payload.iter().any(|p| p == ".npmrc"));
+    }
+
+    /// An extra cache directory declared in config is pruned and recorded.
+    #[test]
+    fn test_custom_cache_dir_is_pruned() {
+        let dir = TempDir::new().expect("tempdir");
+        let root = dir.path().join("proj");
+        fs::create_dir_all(&root).expect("mkdir");
+        touch(&root.join("src/main.rs"), "fn main() {}");
+        touch(&root.join("dist/bundle.js"), "built");
+
+        let out = dir.path().join("proj.pack");
+        let mut opts = CreateOptions::new(&root, &out, "0.13.3");
+        opts.rules = crate::rules::PackRules::new(&crate::rules::RuleOverrides {
+            cache_dirs: vec!["dist".to_string()],
+            ..Default::default()
+        })
+        .expect("rules compile");
+
+        let report = create(&opts).expect("create");
+        assert!(
+            report
+                .manifest
+                .skipped_cache
+                .iter()
+                .any(|c| c.path == "dist"),
+            "custom cache must be recorded"
+        );
+        let payload = crate::inspect::list_payload_paths(&out).expect("list");
+        assert!(!payload.iter().any(|p| p.starts_with("dist")));
+        assert!(payload.iter().any(|p| p == "src/main.rs"));
+    }
+
+    /// Without that config, `dist/` is packed — it is source in many projects.
+    #[test]
+    fn test_dist_is_packed_by_default() {
+        let dir = TempDir::new().expect("tempdir");
+        let root = dir.path().join("proj");
+        fs::create_dir_all(&root).expect("mkdir");
+        touch(&root.join("dist/hand-written.js"), "source");
+
+        let out = dir.path().join("proj.pack");
+        create(&CreateOptions::new(&root, &out, "0.13.3")).expect("create");
+
+        let payload = crate::inspect::list_payload_paths(&out).expect("list");
+        assert!(payload.iter().any(|p| p == "dist/hand-written.js"));
     }
 
     /// Packing a path that is not a directory is an error.

@@ -3094,6 +3094,7 @@ mod tests {
             paths: Paths {
                 global_justfile: Some(PathBuf::from("/custom/justfile")),
             },
+            ..Default::default()
         };
 
         // env_var with two paths (colon-separated on Unix, semicolon on Windows).
@@ -3147,6 +3148,7 @@ mod tests {
             paths: Paths {
                 global_justfile: None,
             },
+            ..Default::default()
         };
         let dirs = resolve_startup_global_dirs(cfg, None);
         assert_eq!(dirs, vec![PathBuf::from("/config/only")]);

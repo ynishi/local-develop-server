@@ -20,6 +20,7 @@ tar.workspace = true
 zstd.workspace = true
 walkdir.workspace = true
 chrono.workspace = true
+glob.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
