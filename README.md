@@ -89,7 +89,7 @@ crates/
 ├── sandbox/ lds-sandbox  SandboxModule (file-scoped read/append, snapshot/rollback)
 ├── journal/ lds-journal  JournalModule (journal-mcp-rmcp SDK consumer, `journal_*` tools forwarded)
 ├── outline/ lds-outline  OutlineModule (outline-mcp-rmcp SDK consumer, prefixed `outline_*` tools)
-├── pack/    lds-pack     Whole-project archives (`lds pack`, CLI-only — not an MCP surface)
+├── pack/    lds-pack     Whole-project archives (`pack_*` MCP tools + `lds pack` CLI)
 └── lds/     lds          MCP binary (rmcp v1.7, stdio transport)
 ```
 
@@ -270,6 +270,18 @@ cargo install --path crates/lds
   }
 }
 ```
+
+### Pack
+
+| Tool | Description |
+|---|---|
+| `pack_create` | Pack a whole project (`.git` + untracked local state) into one archive. `root` defaults to the session root; `dry_run` classifies without writing |
+| `pack_restore` | Restore a pack, rewriting worktree gitdir wiring for the new location. `dry_run` predicts (what gets replaced / what remains / what dangles) without writing |
+| `pack_inspect` | Read a pack's manifest without unpacking; `files` also lists every packed path |
+
+Each runs on a blocking thread (`spawn_blocking`), so packing a large tree
+never occupies a tokio worker. The same operations are also available as CLI
+subcommands — see below.
 
 ### `lds pack` — moving a whole project
 

@@ -92,6 +92,15 @@ All notable changes to this project will be documented in this file.
   copy and restoring that, with worktree pointers rewritten correctly in every
   case.
 
+  Exposed as **MCP tools** (`pack_create` / `pack_restore` / `pack_inspect`)
+  as well as CLI subcommands. lds exists to be driven by coding agents, so the
+  MCP surface is the primary one and the CLI is the convenience. The handlers
+  hand their work to `spawn_blocking`, since packing a whole project is
+  synchronous, filesystem-bound and unbounded in size — the same reasoning that
+  moved libgit2 off the async workers in 0.13.2. `pack_create.root` defaults to
+  the active session root, while `out` and `into` are required rather than
+  inherited from a working directory, so a caller always names where bytes land.
+
 ### Changed
 
 ### Deprecated

@@ -772,6 +772,61 @@ struct McpRouteRemoveReq {
     name: String,
 }
 
+#[derive(Debug, Deserialize, JsonSchema)]
+struct PackCreateReq {
+    /// Project root to pack. Defaults to the active session root.
+    #[serde(default)]
+    root: Option<String>,
+    /// Destination archive path. Required — an agent should name where the
+    /// archive lands rather than inherit a working directory.
+    out: String,
+    /// zstd compression level (default 3).
+    #[serde(default)]
+    level: Option<i32>,
+    /// Classify and report without writing an archive.
+    #[serde(default)]
+    dry_run: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct PackRestoreReq {
+    /// Archive to restore.
+    archive: String,
+    /// Destination directory. Required for the same reason as `pack_create.out`.
+    into: String,
+    /// Unpack even if the destination exists. Overwrites; never deletes files
+    /// the pack does not carry.
+    #[serde(default)]
+    force: Option<bool>,
+    /// Predict the restore and report it, writing nothing.
+    #[serde(default)]
+    dry_run: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+struct PackInspectReq {
+    /// Archive to inspect.
+    archive: String,
+    /// Also list every packed path (reads the whole archive).
+    #[serde(default)]
+    files: Option<bool>,
+}
+
+/// Build pack classification rules from `[pack]` in `config.toml`.
+///
+/// A malformed glob is surfaced as an invalid-params error rather than being
+/// dropped: an operator who mistyped a pattern would otherwise believe a file
+/// is excluded when it is not.
+fn pack_rules() -> Result<lds_pack::PackRules, McpError> {
+    let cfg = Config::load_or_default();
+    lds_pack::PackRules::new(&lds_pack::RuleOverrides {
+        secret_globs: cfg.pack.secret_globs.clone(),
+        cache_dirs: cfg.pack.cache_dirs.clone(),
+        keep: cfg.pack.keep.clone(),
+    })
+    .map_err(|e| McpError::invalid_params(e.to_string(), None))
+}
+
 /// Shared factory for the "no session active" MCP error.
 ///
 /// All tool handlers that require an active session use this factory so that
@@ -2379,6 +2434,158 @@ when the sha is not stash-shaped (>= 2 parents) or is already in the stash list.
                 .map_err(|e| McpError::internal_error(e.to_string(), None))?;
             json_result(&report_value(&r))
         }
+    }
+
+    // ------------------------------------------------------------------
+    // pack
+    // ------------------------------------------------------------------
+    //
+    // Pack work is synchronous, filesystem-bound, and unbounded in size (a
+    // whole project, `.git` included), so each handler hands the job to
+    // `spawn_blocking` rather than occupying a tokio worker while it walks and
+    // compresses a tree. Same reasoning as the libgit2 migration in v0.13.2.
+
+    #[tool(
+        description = "Pack a whole project — the `.git` directory itself plus untracked local state \
+(workspace/, .mcp.json, .claude/, sandbox snapshots) — into one zstd-compressed archive. \
+`.git` is copied wholesale, so stashes, the reflog, local-only branches and unreferenced objects \
+all travel (a `git bundle` would drop them). Secrets (.env, *.pem, credentials.toml, …) are \
+reported but never packed; caches (target/, node_modules/, …) are dropped; symlinks are stored \
+as links, never followed. Extend the secret/cache lists via `[pack]` in ~/.config/lds/config.toml. \
+Set `dry_run` to classify and report without writing anything. \
+Returns JSON {out_path, dry_run, stats, skipped_secret, skipped_cache, symlinks, worktrees, claude}."
+    )]
+    async fn pack_create(
+        &self,
+        Parameters(req): Parameters<PackCreateReq>,
+    ) -> Result<CallToolResult, McpError> {
+        let root = match req.root {
+            Some(r) => PathBuf::from(r),
+            None => {
+                let inner = self.state.read().await;
+                inner
+                    .lds
+                    .session()
+                    .map_err(|_| no_session_error())?
+                    .root()
+                    .to_path_buf()
+            }
+        };
+
+        let mut opts =
+            lds_pack::CreateOptions::new(root, PathBuf::from(req.out), env!("CARGO_PKG_VERSION"));
+        opts.rules = pack_rules()?;
+        if let Some(level) = req.level {
+            opts.compression_level = level;
+        }
+        opts.dry_run = req.dry_run.unwrap_or(false);
+
+        let report = spawn_blocking(move || lds_pack::create(&opts))
+            .await
+            .map_err(|e| McpError::internal_error(format!("pack task failed: {e}"), None))?
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+
+        let m = &report.manifest;
+        json_result(&serde_json::json!({
+            "out_path": report.out_path.display().to_string(),
+            "dry_run": report.dry_run,
+            "compressed_bytes": report.compressed_bytes,
+            "stats": m.stats,
+            "skipped_secret": m.skipped_secret,
+            "skipped_cache": m.skipped_cache,
+            "symlinks": m.symlinks,
+            "worktrees": m.worktrees,
+            "claude": m.claude,
+        }))
+    }
+
+    #[tool(
+        description = "Restore a pack into a directory, rewriting each registered worktree's absolute \
+gitdir wiring for the new location (a plain extract would leave both halves aimed at the source \
+machine). Refuses an existing destination unless `force`; `force` overwrites and never deletes \
+files the pack does not carry. Set `dry_run` to predict instead: how many entries would be written, \
+which existing files would be replaced, which would remain untouched, which symlinks would dangle \
+here, and which worktree pointers would be rewritten — an existing destination is not an error \
+during a dry run. Returns JSON {dest, dry_run, entries_written, destination_exists, would_overwrite, \
+would_remain, rewritten_worktrees, missing_worktrees, dangling_symlinks, secrets_not_carried}."
+    )]
+    async fn pack_restore(
+        &self,
+        Parameters(req): Parameters<PackRestoreReq>,
+    ) -> Result<CallToolResult, McpError> {
+        let opts = lds_pack::RestoreOptions {
+            archive: PathBuf::from(req.archive),
+            dest: PathBuf::from(req.into),
+            force: req.force.unwrap_or(false),
+            dry_run: req.dry_run.unwrap_or(false),
+        };
+
+        let report = spawn_blocking(move || lds_pack::restore(&opts))
+            .await
+            .map_err(|e| McpError::internal_error(format!("pack task failed: {e}"), None))?
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+
+        json_result(&serde_json::json!({
+            "dest": report.dest.display().to_string(),
+            "dry_run": report.dry_run,
+            "entries_written": report.entries_written,
+            "destination_exists": report.destination_exists,
+            "would_overwrite": report.would_overwrite,
+            "would_remain": report.would_remain,
+            "rewritten_worktrees": report.rewritten_worktrees,
+            "missing_worktrees": report.missing_worktrees,
+            "dangling_symlinks": report.dangling_symlinks,
+            "missing_claude_link_roots": report.missing_claude_link_roots,
+            "regenerable_caches": report.regenerable_caches,
+            "secrets_not_carried": report.secrets_not_carried,
+            "needs_attention": report.needs_attention(),
+        }))
+    }
+
+    #[tool(
+        description = "Read a pack's manifest without unpacking it — the manifest is the archive's first \
+entry, so this costs one small read rather than a full decompression. Reports provenance \
+(source_root, created_at, lds_version), payload stats, and everything the pack deliberately left \
+behind (secrets, caches) plus what needs attention on restore (symlinks, worktrees). \
+Set `files` to also list every packed path, which does read the whole archive."
+    )]
+    async fn pack_inspect(
+        &self,
+        Parameters(req): Parameters<PackInspectReq>,
+    ) -> Result<CallToolResult, McpError> {
+        let archive = PathBuf::from(req.archive);
+        let want_files = req.files.unwrap_or(false);
+
+        let (manifest, files) = spawn_blocking(move || {
+            let manifest = lds_pack::inspect(&archive)?;
+            let files = if want_files {
+                Some(lds_pack::list_payload_paths(&archive)?)
+            } else {
+                None
+            };
+            Ok::<_, lds_pack::PackError>((manifest, files))
+        })
+        .await
+        .map_err(|e| McpError::internal_error(format!("pack task failed: {e}"), None))?
+        .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+
+        let mut out = serde_json::json!({
+            "project_name": manifest.project_name,
+            "created_at": manifest.created_at,
+            "source_root": manifest.source_root,
+            "lds_version": manifest.lds_version,
+            "format_version": manifest.format_version,
+            "stats": manifest.stats,
+            "skipped_secret": manifest.skipped_secret,
+            "skipped_cache": manifest.skipped_cache,
+            "symlinks": manifest.symlinks,
+            "worktrees": manifest.worktrees,
+            "claude": manifest.claude,
+        });
+        if let Some(files) = files {
+            out["files"] = serde_json::json!(files);
+        }
+        json_result(&out)
     }
 
     // Journal tools (17) are forwarded to journal-mcp-rmcp's OutlineMcpServer
