@@ -6,8 +6,23 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
-- **`lds pack` — whole-project portability (`lds-pack` crate + three CLI
-  subcommands)** — new crate `crates/pack` and `lds pack create|restore|inspect`,
+### Changed
+
+### Deprecated
+
+### Removed
+
+### Fixed
+
+### Security
+
+## [0.14.0] - 2026-08-11
+
+### Added
+
+- **`lds pack` — whole-project portability (`lds-pack` crate, `pack_*` MCP
+  tools, and three CLI subcommands)** — new crate `crates/pack`, MCP tools
+  `pack_create` / `pack_restore` / `pack_inspect`, and `lds pack create|restore|inspect`,
   which bundle a project *as it exists on the machine* into a single
   zstd-compressed archive and put it back somewhere else.
 
