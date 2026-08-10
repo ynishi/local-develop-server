@@ -43,6 +43,16 @@ All notable changes to this project will be documented in this file.
   "what is in here, and what did it leave behind?" without decompressing the
   payload.
 
+  `restore` refuses an existing destination unless `--force`, and `--force`
+  overwrites rather than wipes: files already in the destination that the pack
+  does not carry survive. Restoring a backup over a damaged working copy thus
+  recovers everything the pack holds without deleting anything it never knew
+  about, at the cost of leaving unrelated leftovers behind. The destination
+  path itself is unconstrained — deeply nested, space-containing, non-ASCII,
+  and relative destinations were all exercised, as was re-packing a restored
+  copy and restoring that, with worktree pointers rewritten correctly in every
+  case.
+
 ### Changed
 
 ### Deprecated

@@ -59,7 +59,8 @@ pub enum PackAction {
         /// Destination directory (default: the project name, here).
         #[arg(long)]
         into: Option<String>,
-        /// Unpack even if the destination already exists.
+        /// Unpack even if the destination exists (overwrites; never deletes
+        /// files the pack does not carry).
         #[arg(long)]
         force: bool,
     },

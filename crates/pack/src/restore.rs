@@ -10,6 +10,10 @@
 //! - **symlinks leaving the project.** They are restored verbatim; the ones
 //!   whose targets do not exist on this machine are reported rather than
 //!   silently left broken.
+//!
+//! Restoring over an existing directory requires `force`, and that flag means
+//! *overwrite*, not *wipe*: files already present that the pack does not carry
+//! survive the restore. Nothing is deleted on the operator's behalf.
 
 use std::fs::File;
 use std::path::{Component, Path, PathBuf};
@@ -26,6 +30,12 @@ pub struct RestoreOptions {
     /// Directory to create and unpack into.
     pub dest: PathBuf,
     /// Unpack into `dest` even if it already exists.
+    ///
+    /// This overwrites, it does not wipe: entries in the pack replace their
+    /// counterparts in `dest`, and files already there that the pack does not
+    /// contain are left untouched. Restoring over a working copy therefore
+    /// recovers everything the pack holds without deleting anything it does
+    /// not know about — at the cost of leaving unrelated leftovers in place.
     pub force: bool,
 }
 

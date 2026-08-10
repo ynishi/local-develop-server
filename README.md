@@ -282,7 +282,20 @@ lds pack create                        # -> <project>-<timestamp>.pack, here
 lds pack create --root ~/proj -o p.pack
 lds pack inspect p.pack                # manifest only; no decompression
 lds pack restore p.pack --into ~/dest
+lds pack restore p.pack --into ~/proj --force   # restore over a working copy
 ```
+
+`restore` refuses a destination that already exists unless `--force` is given.
+`--force` **overwrites, it does not wipe**: entries in the pack replace their
+counterparts, and files already in the destination that the pack does not carry
+are left alone. Restoring a backup over a damaged working copy therefore brings
+back everything the pack holds without deleting anything it never knew about —
+so unrelated leftovers stay behind, and the destination can end up dirtier than
+the machine the pack came from.
+
+The destination path is otherwise unconstrained: deeply nested, containing
+spaces, non-ASCII, or given relative to the current directory all work, and the
+worktree pointers are rewritten to match wherever it lands.
 
 **Why the `.git` directory and not `git bundle`.** A bundle is built from an
 enumerated set of refs, so anything outside that set does not make the trip:
