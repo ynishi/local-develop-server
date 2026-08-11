@@ -22,7 +22,7 @@ use std::path::{Component, Path, PathBuf};
 use walkdir::WalkDir;
 
 use crate::error::PackError;
-use crate::manifest::{ClaudeInfo, SkipRecord, SymlinkRecord, WorktreeRecord};
+use crate::manifest::{ClaudeInfo, SkipRecord, SymlinkRecord, WorktreeOrigin, WorktreeRecord};
 use crate::rules::PackRules;
 
 /// File names dropped silently — OS debris that is neither cache nor content.
@@ -70,6 +70,8 @@ pub struct Scan {
     pub claude: ClaudeInfo,
     /// Registered git worktrees discovered under `.git/worktrees/`.
     pub worktrees: Vec<WorktreeRecord>,
+    /// Set when this root is itself a worktree of a repository elsewhere.
+    pub worktree_of: Option<WorktreeOrigin>,
 }
 
 impl Scan {
@@ -225,6 +227,7 @@ pub fn scan_with(root: &Path, rules: &PackRules) -> Result<Scan, PackError> {
 
     scan.claude.link_roots = summarize_link_roots(&claude_link_targets);
     scan.worktrees = discover_worktrees(root)?;
+    scan.worktree_of = discover_worktree_origin(root);
 
     Ok(scan)
 }
@@ -422,11 +425,53 @@ fn discover_worktrees(root: &Path) -> Result<Vec<WorktreeRecord>, PackError> {
             name,
             included: rel.is_some(),
             path: rel,
-            source_path: worktree_root.to_string_lossy().into_owned(),
+            // Resolved rather than verbatim, so it can be compared against
+            // `source_root` — which is canonical — when restore works out where
+            // an outside worktree moved to.
+            source_path: resolved.to_string_lossy().into_owned(),
         });
     }
 
     Ok(records)
+}
+
+/// Work out whether this root is itself a worktree, and of what.
+///
+/// A worktree checkout has no `.git` *directory*: its `.git` is a file holding
+/// `gitdir: <parent>/.git/worktrees/<name>`. That single line is the only trace
+/// of the parent in the checkout, and it is an absolute path — so it is
+/// recorded here for restore to rebuild rather than lost with the machine.
+///
+/// Only the layout git itself writes is accepted. Anything else (a `commondir`
+/// pointing somewhere unusual, a hand-made `.git` file) yields `None`: guessing
+/// a parent from an unrecognized shape would be worse than reporting nothing.
+fn discover_worktree_origin(root: &Path) -> Option<WorktreeOrigin> {
+    let dot_git = root.join(".git");
+    if !dot_git.is_file() {
+        return None;
+    }
+    let contents = std::fs::read_to_string(&dot_git).ok()?;
+    let admin = PathBuf::from(contents.trim().strip_prefix("gitdir:")?.trim());
+
+    // `<parent_root>/.git/worktrees/<name>` — anything else is not ours to read.
+    let name = admin.file_name()?.to_string_lossy().into_owned();
+    let worktrees_dir = admin.parent()?;
+    if worktrees_dir.file_name()? != "worktrees" {
+        return None;
+    }
+    let git_dir = worktrees_dir.parent()?;
+    if git_dir.file_name()? != ".git" {
+        return None;
+    }
+    let parent_root = canonicalize_or(git_dir.parent()?);
+
+    Some(WorktreeOrigin {
+        name,
+        admin_path: admin.to_string_lossy().into_owned(),
+        // Canonical, to be comparable with `source_root` when restore works out
+        // where the parent repository moved to.
+        parent_root: parent_root.to_string_lossy().into_owned(),
+    })
 }
 
 #[cfg(test)]
@@ -636,6 +681,61 @@ mod tests {
         assert!(!scan.worktrees[0].included);
         assert!(scan.worktrees[0].path.is_none());
         assert!(!rels(&scan).iter().any(|p| p.contains("detached/file.txt")));
+    }
+
+    /// A worktree checkout knows which repository it belongs to, and says so —
+    /// its `.git` file is the only trace, and it names an absolute path that
+    /// will not survive the move on its own.
+    #[test]
+    fn test_scan_records_the_repository_a_worktree_belongs_to() {
+        let dir = TempDir::new().expect("tempdir");
+        let parent = dir.path().join("proj");
+        let admin = parent.join(".git/worktrees/feature");
+        fs::create_dir_all(&admin).expect("mkdir");
+
+        let wt = dir.path().join("proj-feature");
+        touch(&wt.join("work.txt"));
+        fs::write(wt.join(".git"), format!("gitdir: {}\n", admin.display())).expect("write");
+
+        let scan = scan(&wt).expect("scan should succeed");
+
+        let origin = scan
+            .worktree_of
+            .expect("a worktree must know its repository");
+        assert_eq!(origin.name, "feature");
+        assert_eq!(origin.admin_path, admin.display().to_string());
+        assert_eq!(
+            origin.parent_root,
+            fs::canonicalize(&parent)
+                .expect("canonicalize")
+                .display()
+                .to_string()
+        );
+        // It has no worktrees of its own.
+        assert!(scan.worktrees.is_empty());
+    }
+
+    /// An ordinary repository is not a worktree of anything.
+    #[test]
+    fn test_scan_records_no_origin_for_an_ordinary_repository() {
+        let dir = TempDir::new().expect("tempdir");
+        touch(&dir.path().join(".git/HEAD"));
+
+        let scan = scan(dir.path()).expect("scan should succeed");
+
+        assert!(scan.worktree_of.is_none());
+    }
+
+    /// A `.git` file that is not the shape git writes is left alone rather than
+    /// guessed at — inventing a repository path would be worse than none.
+    #[test]
+    fn test_scan_ignores_an_unrecognized_git_file() {
+        let dir = TempDir::new().expect("tempdir");
+        fs::write(dir.path().join(".git"), "gitdir: /somewhere/odd\n").expect("write");
+
+        let scan = scan(dir.path()).expect("scan should succeed");
+
+        assert!(scan.worktree_of.is_none());
     }
 
     /// Scanning a file rather than a directory is an error.

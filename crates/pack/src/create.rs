@@ -167,6 +167,7 @@ fn build_manifest(root: &Path, scanned: &Scan, lds_version: &str) -> Manifest {
         skipped_secret: scanned.skipped_secret.clone(),
         symlinks: scanned.symlinks.clone(),
         worktrees: scanned.worktrees.clone(),
+        worktree_of: scanned.worktree_of.clone(),
     }
 }
 

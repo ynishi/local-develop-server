@@ -276,7 +276,7 @@ cargo install --path crates/lds
 | Tool | Description |
 |---|---|
 | `pack_create` | Pack a whole project (`.git` + untracked local state) into one archive. `root` defaults to the session root; `dry_run` classifies without writing |
-| `pack_restore` | Restore a pack, rewriting worktree gitdir wiring for the new location. `dry_run` predicts (what gets replaced / what remains / what dangles) without writing |
+| `pack_restore` | Restore a pack, rewriting worktree gitdir wiring for the new location — including worktrees living beside the project, wired up as soon as both packs are restored side by side. `dry_run` predicts (what gets replaced / what remains / what dangles) without writing |
 | `pack_inspect` | Read a pack's manifest without unpacking; `files` also lists every packed path |
 
 Each runs on a blocking thread (`spawn_blocking`), so packing a large tree
@@ -387,6 +387,28 @@ Registered worktrees travel too. Both halves of a worktree's wiring —
 `.git/worktrees/<name>/gitdir` and the worktree's own `.git` file — are absolute
 paths, so `restore` rewrites them for the new location; a plain `tar` extract
 would leave both aimed at the machine the pack came from.
+
+A worktree made with `git worktree add ../name` sits *beside* the project rather
+than inside it, so the two halves belong to two different projects and travel in
+two different packs. Pack each, restore them beside each other, and whichever
+lands second wires the pair up:
+
+```sh
+lds pack create --root ~/projects/proj         --out proj.pack
+lds pack create --root ~/projects/proj-feature --out proj-feature.pack
+
+lds pack restore proj.pack         --into /backup/proj
+#   worktrees registered outside the project root, not found here: proj-feature
+lds pack restore proj-feature.pack --into /backup/proj-feature
+#   rewrote worktree pointers: proj-feature
+```
+
+Order does not matter, and `--force` re-restoring one side repairs a pair left
+half-attached. The counterpart is looked for at the same offset from the new
+root it had from the old one — restore the set together and it is found. One
+that is not on this machine is reported (`missing_worktrees`, or
+`missing_worktree_parent` when the pack is itself a worktree) rather than
+guessed at.
 
 ### Plugin Recipes
 

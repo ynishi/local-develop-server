@@ -14,6 +14,41 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- **`pack_restore` now rewrites the wiring of worktrees that live *beside* the
+  project, not only those inside it.** `pack_restore`'s contract is that it
+  repairs each registered worktree's absolute gitdir wiring for the new
+  location. It only ever did so for worktrees inside the packed root
+  (`.worktrees/<name>`), which travel in the same pack. The layout `git
+  worktree add ../name` produces — a sibling directory — was recorded as
+  `included: false` and then skipped outright: `rewritten_worktrees` came back
+  empty, and both halves stayed aimed at the machine the pack came from, which
+  is precisely the state the tool documents itself as preventing. Restoring
+  such a project left the repository and every one of its worktrees mutually
+  unreachable, with nothing in the report saying so.
+
+  A sibling worktree's two halves live in two different packs, so neither pack
+  can complete the wiring alone. Restore now looks for the counterpart at the
+  same offset from the new root that it had from the old one, which is where
+  restoring a set of sibling projects puts it, and wires the pair up as soon as
+  both are present. Order does not matter — whichever pack lands second
+  completes it — and re-restoring with `force` repairs a pair that was left
+  half-attached. A counterpart that is genuinely not on this machine is still
+  reported rather than guessed at.
+
+  This needed the pack of a worktree checkout to know which repository it
+  belongs to: such a root has no `.git/worktrees/` of its own, only a `.git`
+  *file* naming an absolute path on the source machine. The manifest gained
+  `worktree_of` (name, admin path, repository root) to carry it. The field is
+  optional and packs written before it read back as `None`, so the format
+  version is unchanged.
+
+  `RestoreReport` gained `missing_worktree_parent`, set when the restored pack
+  is a worktree checkout whose repository is not beside it — the one case where
+  the restored tree has no repository at all, and previously the report's
+  quietest failure. `missing_worktrees` now means "the checkout is not on this
+  machine" rather than "the checkout was outside the packed root", so a
+  worktree sitting right where it belongs is no longer reported as missing.
+
 ### Security
 
 ## [0.14.0] - 2026-08-11

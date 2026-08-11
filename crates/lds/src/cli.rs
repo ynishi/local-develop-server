@@ -410,10 +410,19 @@ fn print_manifest_notes(m: &Manifest) {
             let state = if w.included {
                 "packed"
             } else {
-                "outside the project root, not packed"
+                "beside the project, packed separately"
             };
             println!("  {}  ({state})", w.name);
+            if !w.included {
+                println!("    was at {}", w.source_path);
+            }
         }
+    }
+
+    if let Some(origin) = &m.worktree_of {
+        println!("\nthis pack is a worktree named '{}'", origin.name);
+        println!("  of the repository at {}", origin.parent_root);
+        println!("  restore that beside this one and the pair wires itself up");
     }
 }
 
@@ -479,9 +488,15 @@ fn print_restore_attention(report: &RestoreReport) {
 
     if !report.missing_worktrees.is_empty() {
         println!(
-            "  worktrees registered outside the project root, not in this pack: {}",
+            "  worktrees registered outside the project root, not found here: {}",
             report.missing_worktrees.join(", ")
         );
+        println!("    restore their own packs beside this one and the wiring completes");
+    }
+
+    if let Some(parent) = &report.missing_worktree_parent {
+        println!("  this pack is a worktree; its repository is not beside it here");
+        println!("    it was at {parent}; restore that pack and the wiring completes");
     }
 
     if !report.secrets_not_carried.is_empty() {

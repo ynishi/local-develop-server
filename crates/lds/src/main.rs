@@ -2495,6 +2495,7 @@ Returns JSON {out_path, dry_run, stats, skipped_secret, skipped_cache, symlinks,
             "skipped_cache": m.skipped_cache,
             "symlinks": m.symlinks,
             "worktrees": m.worktrees,
+            "worktree_of": m.worktree_of,
             "claude": m.claude,
         }))
     }
@@ -2502,12 +2503,18 @@ Returns JSON {out_path, dry_run, stats, skipped_secret, skipped_cache, symlinks,
     #[tool(
         description = "Restore a pack into a directory, rewriting each registered worktree's absolute \
 gitdir wiring for the new location (a plain extract would leave both halves aimed at the source \
-machine). Refuses an existing destination unless `force`; `force` overwrites and never deletes \
+machine). A worktree living beside the project rather than inside it — what `git worktree add \
+../name` produces — travels in its own pack, so restore the two beside each other and whichever \
+lands second wires the pair up; order does not matter, and re-restoring with `force` repairs a pair \
+that was left half-attached. A counterpart that is not on this machine is reported \
+(`missing_worktrees`, or `missing_worktree_parent` when the pack is itself a worktree) rather than \
+guessed at. Refuses an existing destination unless `force`; `force` overwrites and never deletes \
 files the pack does not carry. Set `dry_run` to predict instead: how many entries would be written, \
 which existing files would be replaced, which would remain untouched, which symlinks would dangle \
 here, and which worktree pointers would be rewritten — an existing destination is not an error \
 during a dry run. Returns JSON {dest, dry_run, entries_written, destination_exists, would_overwrite, \
-would_remain, rewritten_worktrees, missing_worktrees, dangling_symlinks, secrets_not_carried}."
+would_remain, rewritten_worktrees, missing_worktrees, missing_worktree_parent, dangling_symlinks, \
+secrets_not_carried}."
     )]
     async fn pack_restore(
         &self,
@@ -2534,6 +2541,7 @@ would_remain, rewritten_worktrees, missing_worktrees, dangling_symlinks, secrets
             "would_remain": report.would_remain,
             "rewritten_worktrees": report.rewritten_worktrees,
             "missing_worktrees": report.missing_worktrees,
+            "missing_worktree_parent": report.missing_worktree_parent,
             "dangling_symlinks": report.dangling_symlinks,
             "missing_claude_link_roots": report.missing_claude_link_roots,
             "regenerable_caches": report.regenerable_caches,
@@ -2547,7 +2555,9 @@ would_remain, rewritten_worktrees, missing_worktrees, dangling_symlinks, secrets
 entry, so this costs one small read rather than a full decompression. Reports provenance \
 (source_root, created_at, lds_version), payload stats, and everything the pack deliberately left \
 behind (secrets, caches) plus what needs attention on restore (symlinks, worktrees). \
-Set `files` to also list every packed path, which does read the whole archive."
+`worktree_of` is set when the pack is itself a worktree checkout, and names the repository whose \
+pack has to be restored beside it. Set `files` to also list every packed path, which does read the \
+whole archive."
     )]
     async fn pack_inspect(
         &self,
@@ -2580,6 +2590,7 @@ Set `files` to also list every packed path, which does read the whole archive."
             "skipped_cache": manifest.skipped_cache,
             "symlinks": manifest.symlinks,
             "worktrees": manifest.worktrees,
+            "worktree_of": manifest.worktree_of,
             "claude": manifest.claude,
         });
         if let Some(files) = files {

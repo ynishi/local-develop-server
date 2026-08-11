@@ -56,6 +56,15 @@ pub struct Manifest {
     /// Registered git worktrees whose pointer files need rewriting on restore.
     #[serde(default)]
     pub worktrees: Vec<WorktreeRecord>,
+    /// Set when the packed root is *itself* a worktree of a repository that
+    /// lives elsewhere.
+    ///
+    /// Such a root has no `.git/worktrees/` of its own — its `.git` is a file
+    /// naming the parent's admin directory — so without this the pack carries
+    /// no trace of the other half of the wiring. Absent in packs written before
+    /// this field existed, which read back as `None`.
+    #[serde(default)]
+    pub worktree_of: Option<WorktreeOrigin>,
 }
 
 /// Aggregate payload counts, filled in as the archive is written.
@@ -139,6 +148,23 @@ pub struct WorktreeRecord {
     pub included: bool,
 }
 
+/// The repository a packed worktree checkout belongs to.
+///
+/// This is the mirror image of [`WorktreeRecord`]: that one is written by the
+/// repository about its worktrees, this one by a worktree about its repository.
+/// Both halves of the wiring are absolute, so both packs need to know about the
+/// other end to be restorable somewhere new.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorktreeOrigin {
+    /// This worktree's name under the parent's `.git/worktrees/`.
+    pub name: String,
+    /// Original absolute path of the parent's admin directory
+    /// (`<parent_root>/.git/worktrees/<name>`), as recorded at pack time.
+    pub admin_path: String,
+    /// Original absolute path of the parent repository root.
+    pub parent_root: String,
+}
+
 impl Manifest {
     /// Serialize to TOML for embedding as the archive's first entry.
     ///
@@ -200,6 +226,7 @@ mod tests {
                 source_path: "/tmp/proj/.worktrees/wt".to_string(),
                 included: true,
             }],
+            worktree_of: None,
         }
     }
 

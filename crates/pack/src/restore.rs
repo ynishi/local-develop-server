@@ -6,7 +6,10 @@
 //! - **worktree pointers.** A registered worktree is wired with two absolute
 //!   paths — `.git/worktrees/<name>/gitdir` names the worktree's `.git` file,
 //!   and that file names the admin directory back. Both still point at the
-//!   machine the pack came from, so they are rewritten here.
+//!   machine the pack came from, so they are rewritten here. When the worktree
+//!   lives *beside* the project rather than inside it, those two paths are in
+//!   two different packs; the pair is wired up once both have been restored,
+//!   in whichever order that happens.
 //! - **symlinks leaving the project.** They are restored verbatim; the ones
 //!   whose targets do not exist on this machine are reported rather than
 //!   silently left broken.
@@ -91,10 +94,22 @@ pub struct RestoreReport {
     /// run only.
     pub would_remain: Vec<String>,
     /// Worktrees whose pointer files were rewritten for the new location.
+    ///
+    /// Includes worktrees that live *beside* the root rather than inside it:
+    /// their contents travel in their own pack, but the wiring is repaired here
+    /// as soon as both halves are on this machine.
     pub rewritten_worktrees: Vec<String>,
-    /// Worktrees that were registered at pack time but live outside the root,
-    /// so their contents are not in the pack.
+    /// Worktrees registered at pack time whose checkout is not on this machine.
+    ///
+    /// Their contents are not in this pack — restore the pack that holds them
+    /// and the wiring completes itself, in either order.
     pub missing_worktrees: Vec<String>,
+    /// Set when this pack is a worktree checkout and its repository was not
+    /// found beside the restored root, leaving the checkout with no repository.
+    ///
+    /// Holds the repository's path as of pack time, as a hint for where its
+    /// pack belongs.
+    pub missing_worktree_parent: Option<String>,
     /// Restored symlinks whose targets do not exist on this machine.
     pub dangling_symlinks: Vec<SymlinkRecord>,
     /// `.claude/` link roots that are absent here, if any.
@@ -115,6 +130,7 @@ impl RestoreReport {
         !self.dangling_symlinks.is_empty()
             || !self.missing_claude_link_roots.is_empty()
             || !self.missing_worktrees.is_empty()
+            || self.missing_worktree_parent.is_some()
             || !self.secrets_not_carried.is_empty()
             || !self.would_overwrite.is_empty()
             || !self.would_remain.is_empty()
@@ -153,14 +169,8 @@ pub fn restore(opts: &RestoreOptions) -> Result<RestoreReport, PackError> {
     let dest = std::fs::canonicalize(&opts.dest).unwrap_or_else(|_| opts.dest.clone());
 
     let entries_written = unpack_payload(&opts.archive, &dest)?;
-    let rewritten_worktrees = rewrite_worktree_pointers(&dest, &manifest)?;
-
-    let missing_worktrees = manifest
-        .worktrees
-        .iter()
-        .filter(|w| !w.included)
-        .map(|w| w.name.clone())
-        .collect();
+    let plan = plan_worktree_pointers(&dest, &manifest, true);
+    let rewritten_worktrees = apply_worktree_plan(&plan)?;
 
     let dangling_symlinks = manifest
         .symlinks
@@ -185,7 +195,8 @@ pub fn restore(opts: &RestoreOptions) -> Result<RestoreReport, PackError> {
         would_overwrite: Vec::new(),
         would_remain: Vec::new(),
         rewritten_worktrees,
-        missing_worktrees,
+        missing_worktrees: plan.missing,
+        missing_worktree_parent: plan.missing_parent,
         dangling_symlinks,
         missing_claude_link_roots,
         regenerable_caches: manifest.skipped_cache.clone(),
@@ -215,19 +226,8 @@ fn predict(
         (Vec::new(), Vec::new())
     };
 
-    let rewritten_worktrees = manifest
-        .worktrees
-        .iter()
-        .filter(|w| w.included)
-        .map(|w| w.name.clone())
-        .collect();
-
-    let missing_worktrees = manifest
-        .worktrees
-        .iter()
-        .filter(|w| !w.included)
-        .map(|w| w.name.clone())
-        .collect();
+    let plan = plan_worktree_pointers(&dest, &manifest, false);
+    let rewritten_worktrees = plan.pairs.iter().map(|p| p.name.clone()).collect();
 
     let dangling_symlinks = manifest
         .symlinks
@@ -252,7 +252,8 @@ fn predict(
         would_overwrite,
         would_remain,
         rewritten_worktrees,
-        missing_worktrees,
+        missing_worktrees: plan.missing,
+        missing_worktree_parent: plan.missing_parent,
         dangling_symlinks,
         missing_claude_link_roots,
         regenerable_caches: manifest.skipped_cache.clone(),
@@ -375,30 +376,143 @@ fn unpack_payload(archive: &Path, dest: &Path) -> Result<u64, PackError> {
     Ok(written)
 }
 
-/// Point every included worktree at its new location.
+/// One worktree's wiring, named on both sides.
 ///
-/// Returns the names of the worktrees whose pointers were rewritten.
-fn rewrite_worktree_pointers(dest: &Path, manifest: &Manifest) -> Result<Vec<String>, PackError> {
-    let mut rewritten = Vec::new();
+/// The two paths are always written as a pair: writing one without the other
+/// leaves the worktree half-attached, which git reports as a broken worktree
+/// rather than as no worktree at all.
+#[derive(Debug, Clone)]
+struct PointerPair {
+    /// Worktree name under `.git/worktrees/`.
+    name: String,
+    /// The repository's admin directory for this worktree.
+    admin: PathBuf,
+    /// The worktree checkout's own `.git` file.
+    dot_git: PathBuf,
+}
+
+/// What the restore intends to do about worktree wiring.
+#[derive(Debug, Default)]
+struct WorktreePlan {
+    /// Pairs that can be wired up, in report order.
+    pairs: Vec<PointerPair>,
+    /// Registered worktrees whose checkout could not be found here.
+    missing: Vec<String>,
+    /// Set when this pack is a worktree whose repository is not here.
+    missing_parent: Option<String>,
+}
+
+/// Decide what worktree wiring this restore can repair, writing nothing.
+///
+/// Three layouts occur, and all three are decided from the manifest plus what
+/// is on disk *outside* the destination — never from the payload, which is why
+/// a dry run can answer the same question as the real restore:
+///
+/// 1. **worktree inside the root** (`.worktrees/<name>`). Both halves travel in
+///    this one pack, so the pair is always wireable.
+/// 2. **worktree beside the root** — what `git worktree add ../<name>` makes.
+///    The halves live in two packs, so this one can only be wired once the
+///    other has been restored. The counterpart is looked for at the same offset
+///    from the new root that it had from the old one, which is where restoring
+///    a set of sibling projects puts it.
+/// 3. **the root is itself a worktree**, and its repository is the counterpart.
+///    Same lookup, mirrored.
+///
+/// Cases 2 and 3 make the operation order-independent: whichever pack is
+/// restored second finds the first and completes the wiring, and re-restoring
+/// with `force` repairs a pair that was incomplete at the time.
+fn plan_worktree_pointers(dest: &Path, manifest: &Manifest, unpacked: bool) -> WorktreePlan {
+    let mut plan = WorktreePlan::default();
 
     for record in &manifest.worktrees {
-        let Some(rel) = record.path.as_deref() else {
-            continue;
-        };
         let admin = dest.join(".git").join("worktrees").join(&record.name);
-        let worktree_root = dest.join(rel);
-        if !admin.is_dir() || !worktree_root.is_dir() {
-            // The admin directory or the worktree itself did not make it into
-            // the payload; nothing to repair.
+
+        if let Some(rel) = record.path.as_deref() {
+            // Case 1: both halves are in this pack.
+            let worktree_root = dest.join(rel);
+            if unpacked && (!admin.is_dir() || !worktree_root.is_dir()) {
+                // Neither made it into the payload after all; nothing to repair.
+                continue;
+            }
+            plan.pairs.push(PointerPair {
+                name: record.name.clone(),
+                admin,
+                dot_git: worktree_root.join(".git"),
+            });
             continue;
         }
 
-        let dot_git = worktree_root.join(".git");
-        std::fs::write(admin.join("gitdir"), format!("{}\n", dot_git.display()))?;
-        std::fs::write(&dot_git, format!("gitdir: {}\n", admin.display()))?;
-        rewritten.push(record.name.clone());
+        // Case 2: the checkout is not in this pack. It may still be on this
+        // machine — restored from its own pack, or never moved at all.
+        let Some(candidate) = relocate_beside(&manifest.source_root, dest, &record.source_path)
+        else {
+            plan.missing.push(record.name.clone());
+            continue;
+        };
+        let dot_git = candidate.join(".git");
+        // `.git` must be a *file*: that is what marks a worktree checkout. A
+        // directory there means an independent repository happens to sit at
+        // that path, and overwriting it would destroy it.
+        if !dot_git.is_file() || (unpacked && !admin.is_dir()) {
+            plan.missing.push(record.name.clone());
+            continue;
+        }
+        plan.pairs.push(PointerPair {
+            name: record.name.clone(),
+            admin,
+            dot_git,
+        });
     }
 
+    // Case 3: this pack *is* a worktree; its repository is the other half.
+    if let Some(origin) = &manifest.worktree_of {
+        let dot_git = dest.join(".git");
+        let admin = relocate_beside(&manifest.source_root, dest, &origin.parent_root)
+            .map(|root| root.join(".git").join("worktrees").join(&origin.name))
+            .filter(|admin| admin.is_dir());
+
+        match admin {
+            Some(admin) if !unpacked || dot_git.is_file() => plan.pairs.push(PointerPair {
+                name: origin.name.clone(),
+                admin,
+                dot_git,
+            }),
+            _ => plan.missing_parent = Some(origin.parent_root.clone()),
+        }
+    }
+
+    plan
+}
+
+/// Re-aim an absolute path that sat beside the source root at the restored root.
+///
+/// `~/projects/proj` restored to `/backup/proj` puts its sibling
+/// `~/projects/proj-feature` at `/backup/proj-feature`. Restoring in place is
+/// the same computation with a zero delta, so no special case is needed for it.
+///
+/// Yields `None` for a path that was not under the source root's parent: a
+/// worktree kept somewhere unrelated moves independently of the project, and
+/// this has no way to know where it went.
+fn relocate_beside(source_root: &str, dest: &Path, original: &str) -> Option<PathBuf> {
+    let source_parent = Path::new(source_root).parent()?;
+    let rel = Path::new(original).strip_prefix(source_parent).ok()?;
+    Some(dest.parent()?.join(rel))
+}
+
+/// Write both halves of every planned pair.
+///
+/// Returns the names wired up, which is every pair: a pair that could not be
+/// wired was already excluded during planning.
+fn apply_worktree_plan(plan: &WorktreePlan) -> Result<Vec<String>, PackError> {
+    let mut rewritten = Vec::new();
+    for pair in &plan.pairs {
+        std::fs::write(
+            pair.admin.join("gitdir"),
+            format!("{}\n", pair.dot_git.display()),
+        )?;
+        std::fs::write(&pair.dot_git, format!("gitdir: {}\n", pair.admin.display()))?;
+        rewritten.push(pair.name.clone());
+    }
     Ok(rewritten)
 }
 
@@ -532,6 +646,296 @@ mod tests {
             !new_admin_gitdir.contains("/proj/"),
             "stale source path must not survive: {new_admin_gitdir}"
         );
+    }
+
+    // ------------------------------------------------------------------
+    // worktrees living beside the root
+    //
+    // `git worktree add ../name` is the layout in the field, and it splits a
+    // project across two packs. Neither pack can be restored into a working
+    // state alone; the pair has to find each other.
+    // ------------------------------------------------------------------
+
+    /// Build `<base>/proj` with a worktree registered at `<base>/proj-feature`,
+    /// wired the way git wires it: two absolute paths pointing at each other.
+    fn sibling_worktree(base: &Path) -> (PathBuf, PathBuf) {
+        let root = base.join("proj");
+        let wt = base.join("proj-feature");
+        let admin = root.join(".git/worktrees/feature");
+
+        touch(&root.join(".git/HEAD"), "ref: refs/heads/main\n");
+        fs::create_dir_all(&admin).expect("mkdir");
+        fs::write(admin.join("commondir"), "../..\n").expect("write");
+        touch(&wt.join("work.txt"), "w");
+
+        // Both halves name absolute paths on this machine.
+        fs::write(
+            admin.join("gitdir"),
+            format!("{}\n", wt.join(".git").display()),
+        )
+        .expect("write");
+        fs::write(wt.join(".git"), format!("gitdir: {}\n", admin.display())).expect("write");
+
+        (root, wt)
+    }
+
+    fn pack(root: &Path, out: &Path) {
+        create(&CreateOptions::new(root, out, "0.14.0")).expect("create");
+    }
+
+    /// Reading a pointer file back with its trailing newline removed.
+    fn pointer(path: &Path) -> String {
+        fs::read_to_string(path).expect("read").trim().to_string()
+    }
+
+    /// The headline case: a project and its sibling worktree are packed
+    /// separately, restored side by side somewhere new, and end up wired to
+    /// each other there — not to the machine they came from.
+    #[test]
+    fn test_restore_wires_sibling_worktree_into_new_location() {
+        let dir = TempDir::new().expect("tempdir");
+        let src = dir.path().join("projects");
+        let (root, wt) = sibling_worktree(&src);
+
+        let root_pack = dir.path().join("proj.pack");
+        let wt_pack = dir.path().join("proj-feature.pack");
+        pack(&root, &root_pack);
+        pack(&wt, &wt_pack);
+
+        // Somewhere entirely new, worktree first.
+        let moved = dir.path().join("moved");
+        let new_wt = moved.join("proj-feature");
+        let new_root = moved.join("proj");
+
+        let wt_report = restore(&RestoreOptions::new(&wt_pack, &new_wt)).expect("restore worktree");
+        // Its repository is not here yet, and saying so is the point.
+        assert!(wt_report.rewritten_worktrees.is_empty());
+        let source_root = fs::canonicalize(&root)
+            .expect("canonicalize")
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(
+            wt_report.missing_worktree_parent.as_deref(),
+            Some(source_root.as_str()),
+            "the report must name the repository this checkout belongs to"
+        );
+        assert!(wt_report.needs_attention());
+
+        // The repository lands beside it, and the pair is wired up.
+        let root_report =
+            restore(&RestoreOptions::new(&root_pack, &new_root)).expect("restore root");
+        assert_eq!(root_report.rewritten_worktrees, vec!["feature".to_string()]);
+        assert!(root_report.missing_worktrees.is_empty());
+
+        let real_root = fs::canonicalize(&new_root).expect("canonicalize");
+        let real_wt = fs::canonicalize(&new_wt).expect("canonicalize");
+        assert_eq!(
+            pointer(&real_root.join(".git/worktrees/feature/gitdir")),
+            real_wt.join(".git").display().to_string(),
+            "the repository must name the worktree where it now is"
+        );
+        assert_eq!(
+            pointer(&real_wt.join(".git")),
+            format!(
+                "gitdir: {}",
+                real_root.join(".git/worktrees/feature").display()
+            ),
+            "and the worktree must name the repository where it now is"
+        );
+    }
+
+    /// The same pair, restored repository-first. Whichever pack lands second
+    /// completes the wiring, so the operator does not have to know an order.
+    #[test]
+    fn test_restore_wiring_is_order_independent() {
+        let dir = TempDir::new().expect("tempdir");
+        let src = dir.path().join("projects");
+        let (root, wt) = sibling_worktree(&src);
+
+        let root_pack = dir.path().join("proj.pack");
+        let wt_pack = dir.path().join("proj-feature.pack");
+        pack(&root, &root_pack);
+        pack(&wt, &wt_pack);
+
+        let moved = dir.path().join("moved");
+        let new_root = moved.join("proj");
+        let new_wt = moved.join("proj-feature");
+
+        // Repository first: the checkout is not here, so it is reported.
+        let first = restore(&RestoreOptions::new(&root_pack, &new_root)).expect("restore root");
+        assert!(first.rewritten_worktrees.is_empty());
+        assert_eq!(first.missing_worktrees, vec!["feature".to_string()]);
+
+        // Checkout second: it finds the repository beside it.
+        let second = restore(&RestoreOptions::new(&wt_pack, &new_wt)).expect("restore worktree");
+        assert_eq!(second.rewritten_worktrees, vec!["feature".to_string()]);
+        assert!(second.missing_worktree_parent.is_none());
+
+        let real_root = fs::canonicalize(&new_root).expect("canonicalize");
+        let real_wt = fs::canonicalize(&new_wt).expect("canonicalize");
+        assert_eq!(
+            pointer(&real_root.join(".git/worktrees/feature/gitdir")),
+            real_wt.join(".git").display().to_string()
+        );
+        assert_eq!(
+            pointer(&real_wt.join(".git")),
+            format!(
+                "gitdir: {}",
+                real_root.join(".git/worktrees/feature").display()
+            )
+        );
+    }
+
+    /// Re-restoring the repository over itself once the checkout is in place
+    /// repairs the wiring — the operator's way out of having restored in an
+    /// order that left it half-attached.
+    #[test]
+    fn test_forced_re_restore_repairs_existing_sibling() {
+        let dir = TempDir::new().expect("tempdir");
+        let src = dir.path().join("projects");
+        let (root, wt) = sibling_worktree(&src);
+
+        let root_pack = dir.path().join("proj.pack");
+        let wt_pack = dir.path().join("proj-feature.pack");
+        pack(&root, &root_pack);
+        pack(&wt, &wt_pack);
+
+        let moved = dir.path().join("moved");
+        let new_root = moved.join("proj");
+        restore(&RestoreOptions::new(&root_pack, &new_root)).expect("restore root");
+        restore(&RestoreOptions::new(&wt_pack, moved.join("proj-feature")))
+            .expect("restore worktree");
+
+        // The repository's own pointer is now stale — it was written before the
+        // checkout existed. A forced re-restore is what fixes it.
+        let again = restore(&RestoreOptions {
+            force: true,
+            ..RestoreOptions::new(&root_pack, &new_root)
+        })
+        .expect("re-restore");
+
+        assert_eq!(again.rewritten_worktrees, vec!["feature".to_string()]);
+        assert!(
+            again.missing_worktrees.is_empty(),
+            "a checkout that is right there must not be reported missing"
+        );
+
+        let real_root = fs::canonicalize(&new_root).expect("canonicalize");
+        let gitdir = pointer(&real_root.join(".git/worktrees/feature/gitdir"));
+        assert!(
+            !gitdir.contains("/projects/"),
+            "the source machine's path must not survive: {gitdir}"
+        );
+    }
+
+    /// A checkout that is nowhere on this machine stays reported, not silently
+    /// counted as repaired.
+    #[test]
+    fn test_restore_reports_sibling_worktree_that_is_absent() {
+        let dir = TempDir::new().expect("tempdir");
+        let src = dir.path().join("projects");
+        let (root, _wt) = sibling_worktree(&src);
+
+        let root_pack = dir.path().join("proj.pack");
+        pack(&root, &root_pack);
+
+        let report = restore(&RestoreOptions::new(
+            &root_pack,
+            dir.path().join("elsewhere/proj"),
+        ))
+        .expect("restore");
+
+        assert_eq!(report.missing_worktrees, vec!["feature".to_string()]);
+        assert!(report.rewritten_worktrees.is_empty());
+        assert!(report.needs_attention());
+    }
+
+    /// An unrelated repository sitting at the path the worktree would occupy is
+    /// left alone. Its `.git` is a directory, and overwriting it with a pointer
+    /// file would destroy a repository to repair a different one.
+    #[test]
+    fn test_restore_will_not_clobber_a_repository_at_the_sibling_path() {
+        let dir = TempDir::new().expect("tempdir");
+        let src = dir.path().join("projects");
+        let (root, _wt) = sibling_worktree(&src);
+
+        let root_pack = dir.path().join("proj.pack");
+        pack(&root, &root_pack);
+
+        // A real repository, not a worktree, where the worktree used to be.
+        let moved = dir.path().join("moved");
+        let squatter = moved.join("proj-feature");
+        touch(&squatter.join(".git/HEAD"), "ref: refs/heads/main\n");
+
+        let report =
+            restore(&RestoreOptions::new(&root_pack, moved.join("proj"))).expect("restore");
+
+        assert_eq!(report.missing_worktrees, vec!["feature".to_string()]);
+        assert!(report.rewritten_worktrees.is_empty());
+        assert!(
+            squatter.join(".git").is_dir(),
+            "the unrelated repository must survive untouched"
+        );
+    }
+
+    /// A worktree kept somewhere unrelated to the project moves independently,
+    /// and this has no way to know where. It is reported, never guessed at.
+    #[test]
+    fn test_restore_does_not_guess_at_a_distant_worktree() {
+        let dir = TempDir::new().expect("tempdir");
+        let root = dir.path().join("projects/proj");
+        let far = dir.path().join("somewhere/else/wt");
+        let admin = root.join(".git/worktrees/far");
+
+        touch(&root.join(".git/HEAD"), "ref: refs/heads/main\n");
+        fs::create_dir_all(&admin).expect("mkdir");
+        touch(&far.join(".keep"), "");
+        fs::write(
+            admin.join("gitdir"),
+            format!("{}\n", far.join(".git").display()),
+        )
+        .expect("write");
+        fs::write(far.join(".git"), format!("gitdir: {}\n", admin.display())).expect("write");
+
+        let out = dir.path().join("proj.pack");
+        pack(&root, &out);
+
+        let report =
+            restore(&RestoreOptions::new(&out, dir.path().join("moved/proj"))).expect("restore");
+
+        assert_eq!(report.missing_worktrees, vec!["far".to_string()]);
+        assert!(report.rewritten_worktrees.is_empty());
+    }
+
+    /// The dry run predicts the sibling wiring, and the real restore agrees.
+    #[test]
+    fn test_dry_run_predicts_sibling_wiring() {
+        let dir = TempDir::new().expect("tempdir");
+        let src = dir.path().join("projects");
+        let (root, wt) = sibling_worktree(&src);
+
+        let root_pack = dir.path().join("proj.pack");
+        let wt_pack = dir.path().join("proj-feature.pack");
+        pack(&root, &root_pack);
+        pack(&wt, &wt_pack);
+
+        let moved = dir.path().join("moved");
+        restore(&RestoreOptions::new(&wt_pack, moved.join("proj-feature")))
+            .expect("restore worktree");
+
+        let new_root = moved.join("proj");
+        let predicted = restore(&RestoreOptions {
+            dry_run: true,
+            ..RestoreOptions::new(&root_pack, &new_root)
+        })
+        .expect("dry run");
+
+        assert_eq!(predicted.rewritten_worktrees, vec!["feature".to_string()]);
+        assert!(!new_root.exists(), "still nothing written");
+
+        let actual = restore(&RestoreOptions::new(&root_pack, &new_root)).expect("restore");
+        assert_eq!(predicted.rewritten_worktrees, actual.rewritten_worktrees);
+        assert_eq!(predicted.missing_worktrees, actual.missing_worktrees);
     }
 
     /// A symlink whose target is gone is restored and reported, not hidden.
