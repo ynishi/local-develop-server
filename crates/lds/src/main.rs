@@ -2747,6 +2747,8 @@ impl ServerHandler for LdsServer {
     //   lds://sessions/{key}        — single session description (id or alias)
     //   lds://sessions/{key}/doctor — doctor report for one session
     //   lds://docs/multi-session    — design / usage doc for the model
+    //   lds://docs/routing          — MCP routing + export design / usage
+    //   lds://docs/pack             — what a pack carries, and what restore repairs
     async fn list_resources(
         &self,
         request: Option<PaginatedRequestParams>,
@@ -2776,6 +2778,15 @@ impl ServerHandler for LdsServer {
                 RawResource::new("lds://docs/routing", "docs/routing")
                     .with_description(
                         "MCP routing + export: config.toml shape, tool contracts, usage examples",
+                    )
+                    .with_mime_type("text/markdown"),
+                None,
+            ),
+            Annotated::new(
+                RawResource::new("lds://docs/pack", "docs/pack")
+                    .with_description(
+                        "pack: what travels, what is deliberately left behind, and what restore \
+                         repairs — including worktrees split across two packs",
                     )
                     .with_mime_type("text/markdown"),
                 None,
@@ -2913,6 +2924,15 @@ fn read_lds_resource(uri: &str, ledger: &LdsState) -> Result<ResourceContents, M
         });
     }
 
+    if path == "docs/pack" {
+        return Ok(ResourceContents::TextResourceContents {
+            uri: uri.to_string(),
+            mime_type: Some("text/markdown".into()),
+            text: PACK_DOC.into(),
+            meta: None,
+        });
+    }
+
     if path == "sessions" {
         let entries: Vec<serde_json::Value> = ledger
             .list_sessions()
@@ -3037,6 +3057,7 @@ Pass either to `session_describe` / `session_doctor` / `session_close` /
 - `lds://sessions/{key}/doctor` — doctor report for one session
 - `lds://docs/multi-session`    — this doc
 - `lds://docs/routing`          — MCP routing + export design + usage
+- `lds://docs/pack`             — what a pack carries and what restore repairs
 
 ## Doctor checks (3-valued verdict: ok / warn / fail)
 
@@ -3221,6 +3242,90 @@ mcp_export_list                    # confirm the new tool surface
   builds on top of.
 "#;
 
+const PACK_DOC: &str = r#"# lds pack
+
+`pack_create` / `pack_restore` / `pack_inspect` move a project **as it exists
+on this machine** — not as it exists in the remote. The distinction is the
+whole point: a clone gets you the tracked history, a pack gets you the working
+copy you were actually in the middle of.
+
+## What travels
+
+- **`.git` wholesale.** Copied as a directory, not converted to a `git bundle`.
+  A bundle is assembled from an enumerated set of refs, so stashes, the reflog,
+  local-only branches and unreferenced objects would be dropped. Those are
+  usually the parts that exist nowhere else.
+- **Untracked local state** — `workspace/`, `.mcp.json`, `.claude/`, sandbox
+  snapshots, journal databases. The scan deliberately ignores `.gitignore`:
+  consulting it would drop exactly the material the pack exists to preserve.
+- **Symlinks, as links.** Never followed — following one would drag an
+  unrelated tree, and whatever it contains, into the archive.
+
+## What does not
+
+- **Secrets** (`.env`, `*.pem`, `credentials.toml`, ...) are reported in
+  `skipped_secret` and never packed. Moving credentials is the operator's own
+  business, and a pack is a file that gets copied around.
+- **Caches** (`target/`, `node_modules/`, ...) are dropped and listed in
+  `skipped_cache`; they are regenerable by definition.
+
+Both lists are extensible via `[pack]` in `~/.config/lds/config.toml`.
+
+## Restoring
+
+`force` means **overwrite, not wipe**: entries in the pack replace their
+counterparts in the destination, and files already there that the pack does not
+carry are left alone. Nothing is deleted on the operator's behalf. `dry_run`
+answers what a restore would do — which files would be replaced, which would
+survive, which symlinks would land dangling *here* — before the first byte is
+written, and does not require `force` even over an existing destination.
+
+## Worktrees
+
+A registered worktree is wired with two absolute paths: the repository's
+`.git/worktrees/<name>/gitdir` names the checkout's `.git` file, and that file
+names the admin directory back. A plain `tar` extract leaves both aimed at the
+machine the pack came from, so restore rewrites them.
+
+Where the checkout lives decides how much one pack can fix:
+
+- **Inside the root** (`.worktrees/<name>`, `.claude/worktrees/<name>`, ...) —
+  both halves travel in the same pack, and restore wires them up on its own.
+- **Beside the root** — what `git worktree add ../name` produces. The two
+  halves belong to two different projects, so they travel in two packs and
+  neither can complete the wiring alone.
+
+For the second shape, pack each side, restore them beside each other, and
+whichever lands second wires the pair up. Order does not matter, and
+re-restoring either side with `force` repairs a pair left half-attached. The
+counterpart is looked for at the same offset from the new root that it had from
+the old one — restore a set of sibling projects together and it is found.
+
+Nothing is guessed at. A counterpart that is not on this machine is reported,
+and a candidate path whose `.git` is a *directory* is left untouched: that is an
+independent repository, not a worktree, and overwriting it would destroy one
+repository to repair another.
+
+## Fields worth acting on
+
+| field | on | meaning |
+|---|---|---|
+| `worktrees[]` | inspect / create | registered worktrees; `included: false` means the checkout is packed separately, and `source_path` says where it was |
+| `worktree_of` | inspect / create | this pack *is* a worktree checkout; names the repository whose pack has to land beside it |
+| `rewritten_worktrees` | restore | pairs wired up for the new location |
+| `missing_worktrees` | restore | registered checkouts not on this machine — restore their packs and the wiring completes |
+| `missing_worktree_parent` | restore | this pack is a worktree and its repository is not beside it, so the restored tree has no repository at all |
+| `dangling_symlinks` | restore | restored links whose targets do not exist here |
+| `secrets_not_carried` | restore | move these out of band |
+
+`needs_attention` is true when any of the above needs follow-up.
+
+## See also
+
+- Resource: `lds://docs/multi-session` — session model; `pack_create` defaults
+  its `root` to the active session root.
+"#;
+
 fn plugin_to_tool(plugin: lds_recipe::PluginRecipe) -> Tool {
     let mut properties = serde_json::Map::new();
     let mut required = Vec::new();
@@ -3296,6 +3401,60 @@ async fn main() -> Result<()> {
 mod tests {
     use super::*;
     use lds_core::config::{Config, Paths, Recipes};
+
+    /// Pull the text out of a resource body, failing loudly on a blob.
+    fn resource_text(body: ResourceContents) -> String {
+        match body {
+            ResourceContents::TextResourceContents { text, .. } => text,
+            other => panic!("expected a text resource, got {other:?}"),
+        }
+    }
+
+    /// Every static doc resource resolves, and resolves to its own content.
+    ///
+    /// A doc listed in `list_resources` but absent from `read_lds_resource`
+    /// shows up in a client's resource list and then fails to open, which is
+    /// worse than not offering it at all.
+    #[test]
+    fn test_doc_resources_resolve() {
+        let ledger = LdsState::new();
+
+        for (uri, expected) in [
+            ("lds://docs/multi-session", MULTI_SESSION_DOC),
+            ("lds://docs/routing", ROUTING_DOC),
+            ("lds://docs/pack", PACK_DOC),
+        ] {
+            let body = read_lds_resource(uri, &ledger)
+                .unwrap_or_else(|e| panic!("{uri} must resolve, got {e}"));
+            assert_eq!(resource_text(body), expected, "{uri} served the wrong doc");
+        }
+    }
+
+    /// The pack doc names the fields a caller has to act on. These are the
+    /// report keys whose absence previously left an operator with a restored
+    /// tree they could not tell was broken.
+    #[test]
+    fn test_pack_doc_covers_the_worktree_report_fields() {
+        for field in [
+            "worktree_of",
+            "rewritten_worktrees",
+            "missing_worktrees",
+            "missing_worktree_parent",
+        ] {
+            assert!(
+                PACK_DOC.contains(field),
+                "pack doc must explain `{field}`; a caller cannot act on a field it never sees"
+            );
+        }
+    }
+
+    /// An unknown path under a known scheme is an error, not an empty body.
+    #[test]
+    fn test_unknown_resource_is_rejected() {
+        let ledger = LdsState::new();
+        assert!(read_lds_resource("lds://docs/nope", &ledger).is_err());
+        assert!(read_lds_resource("https://example.com", &ledger).is_err());
+    }
 
     /// Verify that `resolve_startup_global_dirs` merges sources in the correct
     /// priority order: global_justfile → config.recipes.dirs → env_dirs.

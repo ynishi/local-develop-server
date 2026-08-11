@@ -6,6 +6,21 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **`lds://docs/pack` MCP resource** — what a pack carries, what it
+  deliberately leaves behind, and what restore repairs, as `text/markdown`
+  alongside `lds://docs/multi-session` and `lds://docs/routing`. `pack` shipped
+  in 0.14.0 with its behaviour explained only in tool descriptions and the
+  README, so the two other subsystems had a doc resource and it did not. The
+  doc covers the parts a caller has to act on rather than restating the tool
+  schema: why `.git` is copied wholesale instead of bundled, why the scan
+  ignores `.gitignore`, that `force` overwrites without wiping, the two
+  worktree layouts and why a worktree beside the project needs both packs, and
+  a table of the report fields worth branching on.
+
+  Backed by tests that every listed doc resource actually resolves — a doc
+  offered in `list_resources` but missing from `read_lds_resource` appears in a
+  client's list and then fails to open, which is worse than not offering it.
+
 ### Changed
 
 ### Deprecated
