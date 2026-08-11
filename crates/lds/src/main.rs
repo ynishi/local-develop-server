@@ -2522,14 +2522,20 @@ gitdir wiring for the new location (a plain extract would leave both halves aime
 machine). A worktree living beside the project rather than inside it — what `git worktree add \
 ../name` produces — travels in its own pack, so restore the two beside each other and whichever \
 lands second wires the pair up; order does not matter, and re-restoring with `force` repairs a pair \
-that was left half-attached. A counterpart that is not on this machine is reported \
-(`missing_worktrees`, or `missing_worktree_parent` when the pack is itself a worktree) rather than \
-guessed at. Refuses an existing destination unless `force`; `force` overwrites and never deletes \
-files the pack does not carry. Set `dry_run` to predict instead: how many entries would be written, \
-which existing files would be replaced, which would remain untouched, which symlinks would dangle \
-here, and which worktree pointers would be rewritten — an existing destination is not an error \
-during a dry run. Returns JSON {dest, dry_run, entries_written, destination_exists, would_overwrite, \
-would_remain, rewritten_worktrees, missing_worktrees, missing_worktree_parent, dangling_symlinks, \
+that was left half-attached. Wiring writes both pointer files, so the counterpart is verified to be \
+this worktree's other half before anything is written: a counterpart that is not on this machine is \
+reported (`missing_worktrees`, or `missing_worktree_parent` when the pack is itself a worktree) \
+rather than guessed at, and a counterpart path occupied by something else — an unrelated repository, \
+or a same-named worktree of a different one — is reported in `conflicting_worktrees` and left \
+untouched. Refuses an existing destination unless `force`; `force` overwrites and never deletes \
+files the pack does not carry. A crafted archive is refused outright: an entry that names a path \
+outside the destination, or routes a write through a symlink the archive planted, aborts the \
+restore with an error instead of being written. Set `dry_run` to predict instead: how many entries \
+would be written, which existing files would be replaced, which would remain untouched, which \
+symlinks would dangle here, and which worktree pointers would be rewritten — an existing \
+destination is not an error during a dry run. Returns JSON {dest, dry_run, entries_written, \
+destination_exists, would_overwrite, would_remain, rewritten_worktrees, missing_worktrees, \
+conflicting_worktrees, missing_worktree_parent, dangling_symlinks, \
 link_reports_suppressed, regenerable_caches, secrets_not_carried, needs_attention} — \
 `needs_attention` is the single flag to branch on, true when any of the report's follow-up lists is \
 non-empty. `link_reports_suppressed` is informational and does not set it: it names the \
@@ -2561,6 +2567,7 @@ misread as \"every link here is fine\" when it means \"every link I was shown is
             "would_remain": report.would_remain,
             "rewritten_worktrees": report.rewritten_worktrees,
             "missing_worktrees": report.missing_worktrees,
+            "conflicting_worktrees": report.conflicting_worktrees,
             "missing_worktree_parent": report.missing_worktree_parent,
             "dangling_symlinks": report.dangling_symlinks,
             "link_reports_suppressed": report.link_reports_suppressed,
@@ -3360,10 +3367,13 @@ re-restoring either side with `force` repairs a pair left half-attached. The
 counterpart is looked for at the same offset from the new root that it had from
 the old one — restore a set of sibling projects together and it is found.
 
-Nothing is guessed at. A counterpart that is not on this machine is reported,
-and a candidate path whose `.git` is a *directory* is left untouched: that is an
-independent repository, not a worktree, and overwriting it would destroy one
-repository to repair another.
+Nothing is guessed at, and nothing that is not this worktree's other half is
+written to. A counterpart that is not on this machine is reported. A candidate
+path occupied by something else — an independent repository (its `.git` is a
+directory), or a same-named worktree whose pointer names a *different*
+repository — is reported in `conflicting_worktrees` and left untouched:
+wiring writes both pointer files, and one of them would overwrite the
+occupant's, destroying one project to repair another.
 
 ## Fields worth acting on
 
@@ -3373,6 +3383,7 @@ repository to repair another.
 | `worktree_of` | inspect / create | this pack *is* a worktree checkout; names the repository whose pack has to land beside it |
 | `rewritten_worktrees` | restore | pairs wired up for the new location |
 | `missing_worktrees` | restore | registered checkouts not on this machine — restore their packs and the wiring completes |
+| `conflicting_worktrees` | restore | the counterpart's place is occupied by something that is not this worktree's other half; nothing was written there |
 | `missing_worktree_parent` | restore | this pack is a worktree and its repository is not beside it, so the restored tree has no repository at all |
 | `no_link_report_applied` | inspect / create | `no_link_report` rules that actually kept links out of `symlinks`; absent means nothing was filtered |
 | `kept_over_secret` | inspect / create | files a `keep` glob carried past a secret rule — the only way a secret-matching file is inside the archive |

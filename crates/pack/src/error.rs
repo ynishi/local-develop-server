@@ -55,4 +55,27 @@ pub enum PackError {
     /// The restore destination already exists and would be overwritten.
     #[error("destination already exists: {0}")]
     DestinationExists(PathBuf),
+
+    /// An archive entry names a path that would land outside the restore
+    /// destination (`..` or an absolute component).
+    ///
+    /// A pack produced by this crate never contains such an entry, so one that
+    /// does is not a pack with a blemish — it is not trustworthy at all, and
+    /// the restore stops rather than extracting the rest of it.
+    #[error("archive entry '{0}' escapes the restore destination; refusing the archive")]
+    EscapingArchivePath(String),
+
+    /// An archive entry would be written through a symlink, which would land
+    /// it outside the restore destination.
+    ///
+    /// The scan never descends into a symlinked directory, so a legitimate
+    /// pack has no file entries underneath a link. An archive that routes a
+    /// write through one is crafted, and the restore stops.
+    #[error("archive entry '{path}' would write through symlink '{via}'; refusing the archive")]
+    WriteThroughSymlink {
+        /// The entry that would have been written.
+        path: String,
+        /// The symlink it would have been written through.
+        via: PathBuf,
+    },
 }

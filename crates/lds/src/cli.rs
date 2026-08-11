@@ -518,6 +518,14 @@ fn print_restore_attention(report: &RestoreReport) {
         println!("    restore their own packs beside this one and the wiring completes");
     }
 
+    if !report.conflicting_worktrees.is_empty() {
+        println!("  worktree wiring stopped — the counterpart's place is occupied:");
+        for c in &report.conflicting_worktrees {
+            println!("    {} at {}: {}", c.name, c.path, c.found);
+        }
+        println!("    nothing was written there; move the occupant or restore elsewhere");
+    }
+
     if let Some(parent) = &report.missing_worktree_parent {
         println!("  this pack is a worktree; its repository is not beside it here");
         println!("    it was at {parent}; restore that pack and the wiring completes");

@@ -18,13 +18,16 @@
 //! *overwrite*, not *wipe*: files already present that the pack does not carry
 //! survive the restore. Nothing is deleted on the operator's behalf.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 use std::fs::File;
 use std::path::{Component, Path, PathBuf};
+
+use serde::Serialize;
 
 use crate::create::PAYLOAD_PREFIX;
 use crate::error::PackError;
 use crate::manifest::{CacheRecord, Manifest, SkipRecord, SymlinkRecord};
+use crate::scan::canonicalize_or;
 
 /// Inputs for [`restore`].
 #[derive(Debug, Clone)]
@@ -104,6 +107,15 @@ pub struct RestoreReport {
     /// Their contents are not in this pack — restore the pack that holds them
     /// and the wiring completes itself, in either order.
     pub missing_worktrees: Vec<String>,
+    /// Worktree pairings left unwired because the counterpart's place is
+    /// occupied by something that is not this worktree's other half.
+    ///
+    /// Nothing was written: wiring writes both pointer files, and one of them
+    /// belongs to whatever is sitting there — an unrelated repository, or a
+    /// worktree of a different one. Overwriting it would break that project to
+    /// repair this one, so the collision is reported and the decision is the
+    /// operator's.
+    pub conflicting_worktrees: Vec<WorktreeConflict>,
     /// Set when this pack is a worktree checkout and its repository was not
     /// found beside the restored root, leaving the checkout with no repository.
     ///
@@ -134,6 +146,24 @@ pub struct RestoreReport {
     pub secrets_not_carried: Vec<SkipRecord>,
 }
 
+/// A worktree pairing that was found occupied by something other than this
+/// worktree's counterpart.
+///
+/// Wiring is a write to both halves, and one of the two files belongs to
+/// whatever sits at the counterpart's place. When that occupant cannot be
+/// confirmed as this worktree's other half — its pointer names a different
+/// repository, or it is an independent repository outright — nothing is
+/// written and the collision is reported instead.
+#[derive(Debug, Clone, Serialize)]
+pub struct WorktreeConflict {
+    /// Worktree name under `.git/worktrees/`.
+    pub name: String,
+    /// The occupied path the wiring stopped at.
+    pub path: String,
+    /// What was found there.
+    pub found: String,
+}
+
 impl RestoreReport {
     /// Whether anything needs operator attention after the restore.
     ///
@@ -143,6 +173,7 @@ impl RestoreReport {
     pub fn needs_attention(&self) -> bool {
         !self.dangling_symlinks.is_empty()
             || !self.missing_worktrees.is_empty()
+            || !self.conflicting_worktrees.is_empty()
             || self.missing_worktree_parent.is_some()
             || !self.secrets_not_carried.is_empty()
             || !self.would_overwrite.is_empty()
@@ -203,6 +234,7 @@ pub fn restore(opts: &RestoreOptions) -> Result<RestoreReport, PackError> {
         would_remain: Vec::new(),
         rewritten_worktrees,
         missing_worktrees: plan.missing,
+        conflicting_worktrees: plan.conflicted,
         missing_worktree_parent: plan.missing_parent,
         dangling_symlinks,
         link_reports_suppressed,
@@ -254,6 +286,7 @@ fn predict(
         would_remain,
         rewritten_worktrees,
         missing_worktrees: plan.missing,
+        conflicting_worktrees: plan.conflicted,
         missing_worktree_parent: plan.missing_parent,
         dangling_symlinks,
         link_reports_suppressed,
@@ -340,6 +373,10 @@ fn unpack_payload(archive: &Path, dest: &Path) -> Result<u64, PackError> {
     let decoder = zstd::stream::Decoder::new(file)?;
     let mut tar = tar::Archive::new(decoder);
 
+    // Directories confirmed to be real (not symlinks), so each ancestor is
+    // checked once rather than once per entry underneath it.
+    let mut real_dirs: HashSet<PathBuf> = HashSet::new();
+
     let mut written = 0u64;
     for entry in tar.entries()? {
         let mut entry = entry?;
@@ -351,16 +388,22 @@ fn unpack_payload(archive: &Path, dest: &Path) -> Result<u64, PackError> {
         if rel.as_os_str().is_empty() {
             continue;
         }
-        // Refuse anything that would escape the destination. A pack is normally
-        // produced by this same crate, but an archive is an untrusted input the
-        // moment it arrives from elsewhere.
+        // Refuse anything that would escape the destination, and stop: a pack
+        // is normally produced by this same crate, but an archive is an
+        // untrusted input the moment it arrives from elsewhere, and one that
+        // carries such an entry is not trustworthy in what remains either.
         if rel
             .components()
             .any(|c| matches!(c, Component::ParentDir | Component::RootDir))
         {
-            tracing::warn!("skipping unsafe archive path: {}", rel.display());
-            continue;
+            return Err(PackError::EscapingArchivePath(rel.display().to_string()));
         }
+        // The same escape, routed indirectly: an earlier entry plants a
+        // symlink and a later one names a path through it, which would land
+        // the write wherever the link points. Legitimate packs cannot produce
+        // this shape — the scan never descends into a symlinked directory —
+        // so it too refuses the archive.
+        ensure_real_ancestors(dest, rel, &mut real_dirs)?;
 
         let out = dest.join(rel);
         if let Some(parent) = out.parent() {
@@ -375,6 +418,52 @@ fn unpack_payload(archive: &Path, dest: &Path) -> Result<u64, PackError> {
     }
 
     Ok(written)
+}
+
+/// Refuse an entry whose ancestors include a symlink.
+///
+/// Writing `a/b/x` when `a/b` is a link puts `x` wherever the link points —
+/// outside the destination, if the archive planted the link there first. Every
+/// existing ancestor must therefore be a real directory before the entry is
+/// written; a missing one is fine, since `create_dir_all` will create it as a
+/// real directory.
+///
+/// Only ancestors confirmed to exist as non-links are cached: a path that did
+/// not exist at check time may be a symlink planted by a later entry, so it is
+/// re-examined when next seen.
+///
+/// # Errors
+///
+/// [`PackError::WriteThroughSymlink`] naming the entry and the link.
+fn ensure_real_ancestors(
+    dest: &Path,
+    rel: &Path,
+    real_dirs: &mut HashSet<PathBuf>,
+) -> Result<(), PackError> {
+    let Some(parent) = rel.parent() else {
+        return Ok(());
+    };
+    let mut cur = dest.to_path_buf();
+    for component in parent.components() {
+        cur.push(component);
+        if real_dirs.contains(&cur) {
+            continue;
+        }
+        match std::fs::symlink_metadata(&cur) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                return Err(PackError::WriteThroughSymlink {
+                    path: rel.display().to_string(),
+                    via: cur,
+                });
+            }
+            Ok(_) => {
+                real_dirs.insert(cur.clone());
+            }
+            // Not there yet; created as a real directory just below.
+            Err(_) => {}
+        }
+    }
+    Ok(())
 }
 
 /// One worktree's wiring, named on both sides.
@@ -399,6 +488,9 @@ struct WorktreePlan {
     pairs: Vec<PointerPair>,
     /// Registered worktrees whose checkout could not be found here.
     missing: Vec<String>,
+    /// Pairings stopped because the counterpart's place is occupied by
+    /// something that is not this worktree's other half.
+    conflicted: Vec<WorktreeConflict>,
     /// Set when this pack is a worktree whose repository is not here.
     missing_parent: Option<String>,
 }
@@ -451,38 +543,127 @@ fn plan_worktree_pointers(dest: &Path, manifest: &Manifest, unpacked: bool) -> W
             continue;
         };
         let dot_git = candidate.join(".git");
-        // `.git` must be a *file*: that is what marks a worktree checkout. A
-        // directory there means an independent repository happens to sit at
-        // that path, and overwriting it would destroy it.
-        if !dot_git.is_file() || (unpacked && !admin.is_dir()) {
+        if !dot_git.exists() || (unpacked && !admin.is_dir()) {
             plan.missing.push(record.name.clone());
             continue;
         }
-        plan.pairs.push(PointerPair {
-            name: record.name.clone(),
-            admin,
-            dot_git,
-        });
+        // Occupancy alone is not identity: whatever sits at the candidate path
+        // has to be confirmed as *this* worktree's checkout before either
+        // pointer is written, or the wiring would break someone else's project
+        // to repair this one.
+        //
+        // A `.git` *directory* there is an independent repository. A `.git`
+        // file is a worktree checkout of *some* repository — ours only if its
+        // pointer names this worktree's admin directory, at the old location
+        // (not yet wired) or the new one (already wired; re-wiring is
+        // idempotent).
+        if dot_git.is_dir() {
+            plan.conflicted.push(WorktreeConflict {
+                name: record.name.clone(),
+                path: candidate.display().to_string(),
+                found: "an independent repository — its `.git` is a directory".to_string(),
+            });
+            continue;
+        }
+        let old_admin = Path::new(&manifest.source_root)
+            .join(".git")
+            .join("worktrees")
+            .join(&record.name);
+        match pointer_target(&dot_git) {
+            Some(claimed) if same_place(&claimed, &old_admin) || same_place(&claimed, &admin) => {
+                plan.pairs.push(PointerPair {
+                    name: record.name.clone(),
+                    admin,
+                    dot_git,
+                });
+            }
+            Some(claimed) => plan.conflicted.push(WorktreeConflict {
+                name: record.name.clone(),
+                path: candidate.display().to_string(),
+                found: format!(
+                    "a worktree of a different repository — its `.git` names {}",
+                    claimed.display()
+                ),
+            }),
+            None => plan.conflicted.push(WorktreeConflict {
+                name: record.name.clone(),
+                path: candidate.display().to_string(),
+                found: "an unreadable or unrecognized `.git` file".to_string(),
+            }),
+        }
     }
 
     // Case 3: this pack *is* a worktree; its repository is the other half.
+    // The same identity rule, mirrored: the admin directory found beside the
+    // restored root is ours only if its `gitdir` names this checkout, at the
+    // old location or the new one.
     if let Some(origin) = &manifest.worktree_of {
         let dot_git = dest.join(".git");
+        let old_dot_git = Path::new(&manifest.source_root).join(".git");
         let admin = relocate_beside(&manifest.source_root, dest, &origin.parent_root)
             .map(|root| root.join(".git").join("worktrees").join(&origin.name))
             .filter(|admin| admin.is_dir());
 
         match admin {
-            Some(admin) if !unpacked || dot_git.is_file() => plan.pairs.push(PointerPair {
-                name: origin.name.clone(),
-                admin,
-                dot_git,
-            }),
-            _ => plan.missing_parent = Some(origin.parent_root.clone()),
+            Some(admin) => match pointer_target(&admin.join("gitdir")) {
+                Some(claimed)
+                    if same_place(&claimed, &old_dot_git) || same_place(&claimed, &dot_git) =>
+                {
+                    if !unpacked || dot_git.is_file() {
+                        plan.pairs.push(PointerPair {
+                            name: origin.name.clone(),
+                            admin,
+                            dot_git,
+                        });
+                    } else {
+                        plan.missing_parent = Some(origin.parent_root.clone());
+                    }
+                }
+                claimed => plan.conflicted.push(WorktreeConflict {
+                    name: origin.name.clone(),
+                    path: admin.display().to_string(),
+                    found: match claimed {
+                        Some(other) => format!(
+                            "a same-named worktree of a different checkout — its `gitdir` names {}",
+                            other.display()
+                        ),
+                        None => "an admin directory with no readable `gitdir`".to_string(),
+                    },
+                }),
+            },
+            None => plan.missing_parent = Some(origin.parent_root.clone()),
         }
     }
 
     plan
+}
+
+/// Read a worktree pointer file and return the path it names.
+///
+/// Handles both halves of the wiring: a checkout's `.git` file
+/// (`gitdir: <path>`) and an admin directory's `gitdir` file (the bare path).
+fn pointer_target(file: &Path) -> Option<PathBuf> {
+    let text = std::fs::read_to_string(file).ok()?;
+    let trimmed = text.trim();
+    let path = trimmed
+        .strip_prefix("gitdir:")
+        .map(str::trim)
+        .unwrap_or(trimmed);
+    if path.is_empty() {
+        None
+    } else {
+        Some(PathBuf::from(path))
+    }
+}
+
+/// Whether two recorded paths name the same place.
+///
+/// Resolved against the filesystem where possible, so a path git recorded
+/// through a symlinked prefix still matches the canonical form the manifest
+/// carries. A path that no longer exists falls back to lexical comparison,
+/// which is the best that can be done for a pointer aimed at another machine.
+fn same_place(claimed: &Path, expected: &Path) -> bool {
+    canonicalize_or(claimed) == canonicalize_or(expected)
 }
 
 /// Re-aim an absolute path that sat beside the source root at the restored root.
@@ -852,8 +1033,10 @@ mod tests {
     }
 
     /// An unrelated repository sitting at the path the worktree would occupy is
-    /// left alone. Its `.git` is a directory, and overwriting it with a pointer
-    /// file would destroy a repository to repair a different one.
+    /// left alone and reported as a conflict — not as missing, which would
+    /// advise restoring a pack on top of it. Its `.git` is a directory, and
+    /// overwriting it with a pointer file would destroy a repository to repair
+    /// a different one.
     #[test]
     fn test_restore_will_not_clobber_a_repository_at_the_sibling_path() {
         let dir = TempDir::new().expect("tempdir");
@@ -871,11 +1054,101 @@ mod tests {
         let report =
             restore(&RestoreOptions::new(&root_pack, moved.join("proj"))).expect("restore");
 
-        assert_eq!(report.missing_worktrees, vec!["feature".to_string()]);
         assert!(report.rewritten_worktrees.is_empty());
+        assert!(report.missing_worktrees.is_empty());
+        assert_eq!(report.conflicting_worktrees.len(), 1);
+        let conflict = &report.conflicting_worktrees[0];
+        assert_eq!(conflict.name, "feature");
+        assert!(
+            conflict.found.contains("independent repository"),
+            "the report must say what is sitting there, got {:?}",
+            conflict.found
+        );
+        assert!(report.needs_attention());
         assert!(
             squatter.join(".git").is_dir(),
             "the unrelated repository must survive untouched"
+        );
+    }
+
+    /// A same-named worktree belonging to a *different* repository at the
+    /// counterpart path is not wired: its `.git` names someone else's admin
+    /// directory, and rewriting it would hijack that repository's worktree.
+    #[test]
+    fn test_restore_will_not_rewire_a_foreign_worktree_at_the_sibling_path() {
+        let dir = TempDir::new().expect("tempdir");
+        let src = dir.path().join("projects");
+        let (root, _wt) = sibling_worktree(&src);
+
+        let root_pack = dir.path().join("proj.pack");
+        pack(&root, &root_pack);
+
+        // A worktree checkout of another repository, where ours would be.
+        let other_admin = dir.path().join("other/.git/worktrees/feature");
+        fs::create_dir_all(&other_admin).expect("mkdir");
+        let moved = dir.path().join("moved");
+        let squatter = moved.join("proj-feature");
+        let original_pointer = format!("gitdir: {}\n", other_admin.display());
+        touch(&squatter.join(".git"), &original_pointer);
+
+        let report =
+            restore(&RestoreOptions::new(&root_pack, moved.join("proj"))).expect("restore");
+
+        assert!(report.rewritten_worktrees.is_empty());
+        assert_eq!(report.conflicting_worktrees.len(), 1);
+        assert!(
+            report.conflicting_worktrees[0]
+                .found
+                .contains("different repository"),
+            "got {:?}",
+            report.conflicting_worktrees[0].found
+        );
+        assert_eq!(
+            fs::read_to_string(squatter.join(".git")).expect("read"),
+            original_pointer,
+            "the foreign worktree's pointer must survive untouched"
+        );
+    }
+
+    /// The mirrored collision: this pack is a worktree, and the repository
+    /// found beside it has a same-named worktree that belongs to a different
+    /// checkout. Its admin `gitdir` is not overwritten.
+    #[test]
+    fn test_restore_will_not_claim_a_foreign_admin_directory() {
+        let dir = TempDir::new().expect("tempdir");
+        let src = dir.path().join("projects");
+        let (_root, wt) = sibling_worktree(&src);
+
+        let wt_pack = dir.path().join("proj-feature.pack");
+        pack(&wt, &wt_pack);
+
+        // At the destination, `proj` is a different repository that happens to
+        // have its own worktree named `feature`, checked out somewhere else.
+        let moved = dir.path().join("moved");
+        let foreign_admin = moved.join("proj/.git/worktrees/feature");
+        fs::create_dir_all(&foreign_admin).expect("mkdir");
+        let elsewhere = dir.path().join("elsewhere/checkout");
+        fs::create_dir_all(&elsewhere).expect("mkdir");
+        let original_gitdir = format!("{}\n", elsewhere.join(".git").display());
+        fs::write(foreign_admin.join("gitdir"), &original_gitdir).expect("write");
+
+        let report =
+            restore(&RestoreOptions::new(&wt_pack, moved.join("proj-feature"))).expect("restore");
+
+        assert!(report.rewritten_worktrees.is_empty());
+        assert_eq!(report.conflicting_worktrees.len(), 1);
+        assert!(
+            report.conflicting_worktrees[0]
+                .found
+                .contains("different checkout"),
+            "got {:?}",
+            report.conflicting_worktrees[0].found
+        );
+        assert!(report.missing_worktree_parent.is_none());
+        assert_eq!(
+            fs::read_to_string(foreign_admin.join("gitdir")).expect("read"),
+            original_gitdir,
+            "the foreign admin directory must survive untouched"
         );
     }
 
@@ -1170,6 +1443,91 @@ mod tests {
 
         assert_eq!(predicted.rewritten_worktrees, vec!["feature".to_string()]);
         assert!(!dest.exists());
+    }
+
+    // ------------------------------------------------------------------
+    // crafted archives
+    //
+    // A pack is normally produced by this crate, but an archive is an untrusted
+    // input the moment it arrives from elsewhere. These build the bytes by hand.
+    // ------------------------------------------------------------------
+
+    /// Write a hand-built archive: a v2 manifest followed by the given
+    /// `(builder)` entries, all under the payload prefix already.
+    fn craft_archive(path: &Path, add_entries: impl FnOnce(&mut tar::Builder<Vec<u8>>)) {
+        let manifest = "\
+format_version = 2
+created_at = \"2026-08-10T00:00:00Z\"
+source_root = \"/tmp/proj\"
+project_name = \"proj\"
+lds_version = \"0.15.0\"
+
+[stats]
+file_count = 0
+symlink_count = 0
+total_bytes = 0
+";
+        let mut tar = tar::Builder::new(Vec::new());
+        let mut h = tar::Header::new_gnu();
+        h.set_size(manifest.len() as u64);
+        h.set_mode(0o644);
+        h.set_cksum();
+        tar.append_data(&mut h, "pack.toml", manifest.as_bytes())
+            .expect("manifest entry");
+        add_entries(&mut tar);
+        let uncompressed = tar.into_inner().expect("finish tar");
+
+        let file = File::create(path).expect("create archive");
+        let mut encoder = zstd::stream::Encoder::new(file, 3).expect("zstd");
+        std::io::Write::write_all(&mut encoder, &uncompressed).expect("write");
+        encoder.finish().expect("finish zstd");
+    }
+
+    // NB: a `..` entry cannot be produced here — `tar::Builder` refuses to
+    // write one — so the `PackError::EscapingArchivePath` guard is exercised
+    // only against archives from other producers. The guard itself is a plain
+    // component scan over `rel`; the symlink route below is the one a crafted
+    // archive can actually reach through this crate's own writer.
+
+    /// A file entry routed through an archive-planted symlink is refused, and
+    /// nothing is written outside the destination.
+    #[cfg(unix)]
+    #[test]
+    fn test_restore_refuses_write_through_planted_symlink() {
+        let dir = TempDir::new().expect("tempdir");
+        let outside = dir.path().join("outside");
+        fs::create_dir_all(&outside).expect("mkdir");
+
+        let archive = dir.path().join("evil.pack");
+        let outside_for_closure = outside.clone();
+        craft_archive(&archive, |tar| {
+            // payload/link -> <outside>
+            let mut h = tar::Header::new_gnu();
+            h.set_entry_type(tar::EntryType::Symlink);
+            h.set_size(0);
+            h.set_mode(0o777);
+            h.set_cksum();
+            tar.append_link(&mut h, "payload/link", &outside_for_closure)
+                .expect("symlink entry");
+            // payload/link/evil.txt — through the link
+            let mut h = tar::Header::new_gnu();
+            h.set_size(4);
+            h.set_mode(0o644);
+            h.set_cksum();
+            tar.append_data(&mut h, "payload/link/evil.txt", &b"pwnd"[..])
+                .expect("file entry");
+        });
+
+        let dest = dir.path().join("dest");
+        let err = restore(&RestoreOptions::new(&archive, &dest)).expect_err("must refuse");
+        assert!(
+            matches!(err, PackError::WriteThroughSymlink { .. }),
+            "got {err:?}"
+        );
+        assert!(
+            !outside.join("evil.txt").exists(),
+            "the write must not have escaped through the link"
+        );
     }
 
     /// Skipped secrets and caches are carried into the report so the operator

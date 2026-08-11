@@ -406,7 +406,7 @@ fn resolves_outside(root: &Path, link_path: &Path, target: &Path) -> bool {
 
 /// Resolve a path against the filesystem, falling back to lexical
 /// normalization when it does not exist.
-fn canonicalize_or(path: &Path) -> PathBuf {
+pub(crate) fn canonicalize_or(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| normalize(path))
 }
 
