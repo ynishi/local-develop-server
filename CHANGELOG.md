@@ -6,6 +6,60 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+### Changed
+
+### Deprecated
+
+### Removed
+
+### Fixed
+
+### Security
+
+## [0.15.0] - 2026-08-11
+
+### Added
+
+- **`[pack] no_link_report`** — names paths whose symlinks are packed without
+  being reported. A link is reported because it is a problem: it breaks when the
+  project lands on another machine. The exception is a directory that is *meant*
+  to be links — a `.zsh/` tree shared across an operator's machines — where the
+  operator already knows, and the entries only bury the links that do need
+  attention. Joins `secret_globs` / `cache_dirs` / `keep` as operator-declared
+  classification, and unlike them ships **no built-in default**: only the
+  operator knows which of their directories are links by design.
+
+  The reports exist to be acted on and scripted against, so nothing about this
+  option shortens or summarizes them. `symlinks` stays complete and one record
+  per link — redirect it to a file and process it. What a rule suppressed is
+  simply absent, and every rule that suppressed something is named in
+  `no_link_report_applied`, so an empty list is never ambiguous between "no
+  links here" and "links hidden here". A rule that matched nothing is not
+  listed: the manifest records what the scan did, not what the config said.
+
+- **`kept_over_secret` in the manifest** — names every file a `keep` glob
+  carried past a secret rule, with both globs.
+
+  `keep` is the only subtractive list, and the only way a file the secret rules
+  named ends up inside the archive. Until now it did so with no trace: `keep`
+  short-circuited the secret check, so a rescued file was indistinguishable from
+  one no rule ever matched. That is a legitimate thing to ask for —
+  `.env.example` matches `.env.*` and holds placeholders — but it is also how a
+  real credential gets carried by accident, when a glob written for one file
+  turns out to match another. The override still applies; it is no longer
+  silent.
+
+  `PackRules::secret_reason` is replaced by `PackRules::classify`, returning a
+  three-case `FileVerdict` (`Ordinary` / `Secret` / `KeptOverSecret`) so the
+  rescued case cannot collapse back into "nothing matched".
+
+- **`skipped_noise` in the manifest** — `.DS_Store` and `Thumbs.db` were dropped
+  in silence; the constant naming them said so in as many words. Nothing about
+  them needs acting on, which is exactly why they went unrecorded, but "dropped
+  without a trace" is not a property worth having anywhere in this format. A
+  path that is in the source tree and absent from the payload can now always be
+  accounted for by one of `skipped_secret` / `skipped_cache` / `skipped_noise`.
+
 - **`lds://docs/pack` MCP resource** — what a pack carries, what it
   deliberately leaves behind, and what restore repairs, as `text/markdown`
   alongside `lds://docs/multi-session` and `lds://docs/routing`. `pack` shipped
@@ -22,6 +76,102 @@ All notable changes to this project will be documented in this file.
   client's list and then fails to open, which is worse than not offering it.
 
 ### Changed
+
+- **`lds-pack` no longer treats any directory name as special.** `.claude/` was
+  hard-coded as its own layer — a `CLAUDE_DIR` constant, a dedicated
+  `ClaudeInfo` type in the manifest, a `claude` field in the `pack_create` /
+  `pack_inspect` payloads, `missing_claude_link_roots` on `RestoreReport`, and
+  a line of CLI output — all so that one directory's symlinks would be counted
+  rather than listed.
+
+  Nothing about that behaviour is a property of `.claude`. The condition it
+  actually encoded was "the operator expects links here and does not want them
+  reported", which is true of `.claude/` only under a profile-managed deployment
+  and false of the ordinary case where it holds real files. Meanwhile the links
+  under it were replaced by a count and a list of shared roots — a summary of
+  the kind that cannot be scripted against and quietly drops the per-link
+  `outside_root` flag, which is the part worth acting on. A vendor's name was
+  baked into a published crate's types, manifest schema, CLI output and MCP tool
+  contracts to encode an observation about one machine.
+
+  Suppression is now declared with `no_link_report` (above) and nothing is
+  summarized at all. `ClaudeInfo` and `Manifest.claude` are gone, replaced by
+  `Manifest.no_link_report_applied` (the rules that fired, not a digest of what
+  they hid); `RestoreReport.missing_claude_link_roots` becomes
+  `link_reports_suppressed`, which reports the same rules on the restore side so
+  an empty `dangling_symlinks` is not misread as "every link here is fine" when
+  it means "every link I was shown is fine". It does not set `needs_attention`:
+  the author declared those links expected, so there is nothing to do. The
+  `claude` key is gone from both MCP payloads.
+
+  This also deletes `summarize_link_roots` and with it three ways the old path
+  lost information without saying so: a silent `MAX_ROOTS = 10` truncation, link
+  targets that are relative dropped from the root computation entirely, and the
+  `outside_root` flag lost for every summarized link.
+
+  Breaking for anyone who read those fields in 0.14.0. There is no per-link
+  successor to the summary, by design — the links are either reported in full or
+  declared expected and left out.
+
+- **`[pack]` globs can be scoped to a path.** A glob containing `/`
+  (`docs/samples/*.pem`, `frontend/dist`) is now matched against the path
+  relative to the project root; one without (`*.pem`, `.env`) still matches the
+  file name at any depth. This is the convention `.gitignore` already
+  established, so it is not a second one to learn, and every built-in is a bare
+  name, so all of them keep reaching the whole tree exactly as before.
+
+  Matching on the name alone left the operator's own rules with no way to say
+  *where*. Reaching the whole tree is right when naming a kind of file and is
+  the hazard when naming one particular file: `keep = ["*.pem"]`, written to
+  carry one sample key, carries every private key in the project — and `keep` is
+  the one list that can put a secret-matching file into the archive.
+  `cache_dirs = ["dist"]` has the same shape, dropping any hand-written `dist/`
+  that happens to share the name with a build output.
+
+  `cache_dirs` entries are now compiled as globs rather than compared as literal
+  directory names, so `frontend/dist` and `*.cache` both work. `PackRules`
+  methods take the path alongside the name: `classify(name, rel)`,
+  `is_cache_dir(name, rel)`, `no_link_report_match(name, rel)`.
+
+- **A dropped cache now reports the size of what it dropped.**
+  `Manifest.skipped_cache` moves from `SkipRecord` to a new `CacheRecord`
+  carrying `file_count` and `total_bytes`.
+
+  One record standing in for a whole subtree is the right granularity for
+  something regenerable — nobody acts on the individual files inside `target/`.
+  But it also meant a `cache_dirs` entry aimed at the wrong directory erased a
+  tree of hand-written source behind a single line reading `dist`, which is
+  indistinguishable from the line a correct rule produces. The figures are what
+  make the record checkable: `dist → 412 files, 2.1 MB` does not look like
+  `target → 38104 files, 4.2 GB`.
+
+  Measuring costs one stat per file in a tree that is being pruned anyway, and
+  no reads. Entries that cannot be read contribute nothing rather than failing
+  the pack — the number is there to be eyeballed, and a cache is regenerable, so
+  aborting over a permission error inside one would trade a real capability for
+  a rounding error.
+
+- **Credentials inside a dropped cache are now named.** `CacheRecord.secrets`
+  lists any file below the cache that matched a secret rule.
+
+  Pruning happens before the classification pass, so a `node_modules/.npmrc` was
+  neither packed nor reported. Safe — nothing leaked — but the operator never
+  learned a token was sitting there, and "safe because nobody looked" is the
+  same shape as the other silent paths this release removed. The scan rides
+  along on the walk that already measures the tree, so it costs nothing extra.
+  Files a `keep` rule already calls safe are not re-flagged. Nothing about what
+  travels changes: these are dropped with the rest of the cache either way.
+
+- **Pack format version 1 → 2.** The manifest change above is the first that an
+  older reader cannot interpret: 0.14.0 declares `claude` as a required field,
+  so handed a manifest without one it fails on a missing key rather than saying
+  what is actually wrong. Version 2 makes 0.14.0 refuse the archive with its
+  "pack format is newer than this build supports" error instead, which is the
+  message the version field exists to produce.
+
+  This release still reads version 1 packs. Their `[claude]` section is ignored,
+  so they restore with no summary and an empty `missing_link_roots` — the link
+  roots such a pack recorded are not carried over into the new shape.
 
 ### Deprecated
 
@@ -235,9 +385,9 @@ All notable changes to this project will be documented in this file.
   `SessionConfig::worktrees_dir` for the effective path.
 - **`crates/session/src/lib.rs` `SessionConfig::worktrees_dir` doc
   comment — remove internal Agent name reference from public API doc**
-  — the doc comment previously mentioned an agent-profiles-internal
-  pipeline gate name when explaining why the target directory has to be
-  gitignored. Reworded to describe the invariant generically ("a
+  — the doc comment previously named an internal pipeline gate when
+  explaining why the target directory has to be gitignored. Reworded to
+  describe the invariant generically ("a
   top-level `.worktrees` entry in the parent repo's `.gitignore` is
   the recommended coverage") so the public docs.rs surface does not
   leak orchestration-side terminology.
@@ -553,13 +703,38 @@ All notable changes to this project will be documented in this file.
 ### Deprecated
 
 - **`[[export]] route = "outline"` in lds config** — deprecated in favor
-  of the in-process `lds-outline` SDK integration added in v0.7.0. If
-  both are configured, the export block silently shadows the SDK path
-  for the exported tools (subprocess and in-process `OutlineMcpServer`
-  hold separate `selected` state, so `outline_snapshot_*` returns
-  `No book selected` even after `outline_select_book`). See README
-  "Migrating from legacy `[[export]] route = \"outline\"`" section for
-  the migration path.
+  of the in-process `lds-outline` SDK integration added in v0.7.0.
+
+  Before v0.7.0 the way to reach outline-mcp through lds was to declare a
+  `[[route]] name = "outline"` and re-expose its snapshot / history tools
+  via `[[export]]`. The SDK integration replaces that, and leaving the
+  export block in place silently **shadows** it for the exported names:
+  `call_tool` dispatch checks `[[export]]` before the direct-embed
+  delegation, so a config like
+
+  ```toml
+  [[route]]
+  name = "outline"
+  command = "outline-mcp"
+
+  [[export]]
+  route = "outline"
+  tools = ["snapshot_create", "snapshot_list", "snapshot_dump",
+           "snapshot_dump_all", "snapshot_tag", "snapshot_diff",
+           "book_history"]
+  ```
+
+  routes `outline_snapshot_*` and `outline_book_history` to a subprocess
+  while `outline_shelf` / `outline_select_book` / `outline_toc` /
+  `outline_dump` / `outline_node_*` go through the SDK. The two hold
+  separate `selected` state, so `outline_select_book` from the SDK path
+  never reaches the subprocess and the exported snapshot tools return
+  `-32602: No book selected` right after a successful select.
+
+  **Migration**: remove the `[[export]] route = "outline"` block (and the
+  `[[route]] name = "outline"` block, if nothing else needed it) from the
+  lds config, then restart the MCP client. All `outline_*` tools then flow
+  through the SDK and share one `selected` state.
 
 ### Removed
 

@@ -270,6 +270,7 @@ fn pack_rules_from_config() -> Result<PackRules> {
         secret_globs: cfg.pack.secret_globs.clone(),
         cache_dirs: cfg.pack.cache_dirs.clone(),
         keep: cfg.pack.keep.clone(),
+        no_link_report: cfg.pack.no_link_report.clone(),
     };
     PackRules::new(&overrides).context("invalid [pack] configuration in config.toml")
 }
@@ -378,7 +379,23 @@ fn print_manifest_notes(m: &Manifest) {
 
     if !m.skipped_cache.is_empty() {
         println!("\nnot packed — caches (regenerable):");
-        for s in &m.skipped_cache {
+        for c in &m.skipped_cache {
+            println!(
+                "  {}  ({} files, {})  ({})",
+                c.path,
+                c.file_count,
+                human_bytes(c.total_bytes),
+                c.reason
+            );
+            for s in &c.secrets {
+                println!("      credential inside, dropped with it: {}", s.path);
+            }
+        }
+    }
+
+    if !m.skipped_noise.is_empty() {
+        println!("\nnot packed — OS debris ({}):", m.skipped_noise.len());
+        for s in &m.skipped_noise {
             println!("  {}", s.path);
         }
     }
@@ -394,13 +411,20 @@ fn print_manifest_notes(m: &Manifest) {
         }
     }
 
-    if m.claude.present {
-        println!(
-            "\n.claude/: packed as-is, {} symlinks",
-            m.claude.symlink_count
-        );
-        for root in &m.claude.link_roots {
-            println!("  links into {root}");
+    if !m.no_link_report_applied.is_empty() {
+        println!("\nlink reports suppressed by [pack] no_link_report:");
+        for glob in &m.no_link_report_applied {
+            println!("  {glob}");
+        }
+    }
+
+    if !m.kept_over_secret.is_empty() {
+        println!("\npacked despite a secret rule, on a keep rule's say-so:");
+        for k in &m.kept_over_secret {
+            println!(
+                "  {} (keep `{}` over secret `{}`)",
+                k.path, k.keep_pattern, k.secret_pattern
+            );
         }
     }
 
@@ -479,11 +503,11 @@ fn print_restore_attention(report: &RestoreReport) {
         }
     }
 
-    if !report.missing_claude_link_roots.is_empty() {
-        println!("  .claude/ links point at roots that are absent here:");
-        for root in &report.missing_claude_link_roots {
-            println!("    {root}");
-        }
+    if !report.link_reports_suppressed.is_empty() {
+        println!(
+            "  note: this pack suppressed link reporting under {} — links there were restored but never checked",
+            report.link_reports_suppressed.join(", ")
+        );
     }
 
     if !report.missing_worktrees.is_empty() {

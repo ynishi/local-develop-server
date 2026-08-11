@@ -109,9 +109,8 @@ impl GitModule {
     /// other path; anything not in `only` is never touched.
     ///
     /// **Dotfile / dot-dir safeguard.** Any candidate whose path contains a
-    /// `.`-prefixed component (`.env`, `.claude/CLAUDE.md`,
-    /// `.github/workflows/ci.yml`, `foo/.hidden`) is classified before
-    /// staging:
+    /// `.`-prefixed component (`.env`, `.github/workflows/ci.yml`,
+    /// `foo/.hidden`) is classified before staging:
     ///
     /// * *tracked* → committed as usual, but recorded in
     ///   [`CommitOutput::dotfile_warnings`] so pre-publish review can catch
@@ -376,7 +375,8 @@ async fn classify_paths(
 
 /// `true` when any `/`-separated component of `p` starts with `.` (excluding
 /// `.` / `..` which aren't dotfiles). Matches `.env` at root, nested
-/// `foo/.env`, `.claude/CLAUDE.md`, `.github/workflows/ci.yml`.
+/// `foo/.env`, and `.github/workflows/ci.yml` where the dot component is not
+/// the basename.
 fn is_dotfile_path(p: &str) -> bool {
     p.split('/')
         .any(|c| c.starts_with('.') && c != "." && c != "..")

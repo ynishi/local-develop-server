@@ -823,6 +823,7 @@ fn pack_rules() -> Result<lds_pack::PackRules, McpError> {
         secret_globs: cfg.pack.secret_globs.clone(),
         cache_dirs: cfg.pack.cache_dirs.clone(),
         keep: cfg.pack.keep.clone(),
+        no_link_report: cfg.pack.no_link_report.clone(),
     })
     .map_err(|e| McpError::invalid_params(e.to_string(), None))
 }
@@ -1238,7 +1239,7 @@ staged paths, `other_staged` decides — `stop` (default) fails leaving \
 state unchanged, `restage` unstages the intruders, commits `paths`, then \
 re-stages them so pre-existing staged work survives. Dotfile / dot-dir \
 safeguard is on by default: untracked-and-not-in-`.gitignore` entries \
-(`.env`, freshly-dropped `.claude/*`, `foo/.hidden`, etc.) are skipped \
+(`.env`, the contents of a freshly-dropped dot-directory, `foo/.hidden`, etc.) are skipped \
 from staging and reported in the response `dotfile_warnings` / \
 `dotfile_skipped`; tracked dotfile changes are still committed but \
 reported the same way so pre-publish review can catch unintended edits \
@@ -2447,13 +2448,26 @@ when the sha is not stash-shaped (>= 2 parents) or is already in the stash list.
 
     #[tool(
         description = "Pack a whole project — the `.git` directory itself plus untracked local state \
-(workspace/, .mcp.json, .claude/, sandbox snapshots) — into one zstd-compressed archive. \
+(workspace/, agent and editor dotfiles, sandbox snapshots) — into one zstd-compressed archive. \
 `.git` is copied wholesale, so stashes, the reflog, local-only branches and unreferenced objects \
 all travel (a `git bundle` would drop them). Secrets (.env, *.pem, credentials.toml, …) are \
-reported but never packed; caches (target/, node_modules/, …) are dropped; symlinks are stored \
-as links, never followed. Extend the secret/cache lists via `[pack]` in ~/.config/lds/config.toml. \
-Set `dry_run` to classify and report without writing anything. \
-Returns JSON {out_path, dry_run, stats, skipped_secret, skipped_cache, symlinks, worktrees, claude}."
+reported but never packed; caches (target/, node_modules/, …) are dropped, each recorded with the \
+file count and byte size that went with it so a `cache_dirs` entry aimed at the wrong directory is \
+visible rather than a single indistinguishable line; symlinks are stored \
+as links, never followed, and every one is reported — a link breaks when the project lands \
+elsewhere, so it is something to act on. Extend the secret/cache lists via `[pack]` in \
+~/.config/lds/config.toml, where a glob is scoped the way `.gitignore` scopes one — no `/` matches \
+the file name at any depth, a `/` anchors it to that path, so `keep = [\"docs/samples/*.pem\"]` \
+carries the sample without carrying every private key. `no_link_report` there names paths whose \
+links are expected by design \
+(a shared dotfile tree), packing them without reporting them. Nothing is suppressed unless \
+configured, and every rule that suppressed something is echoed back in `no_link_report_applied`, so \
+an empty `symlinks` list is never ambiguous. `kept_over_secret` names any file a `keep` glob carried \
+past the secret rules. Set `dry_run` to classify and report without writing anything. \
+Returns JSON {out_path, dry_run, stats, skipped_secret, skipped_cache, skipped_noise, symlinks, \
+worktrees, worktree_of, no_link_report_applied, kept_over_secret}. Nothing is dropped without a \
+record: `skipped_noise` accounts even for `.DS_Store`, so a path present in the source tree and \
+absent from the payload can always be explained by one of these lists."
     )]
     async fn pack_create(
         &self,
@@ -2493,10 +2507,12 @@ Returns JSON {out_path, dry_run, stats, skipped_secret, skipped_cache, symlinks,
             "stats": m.stats,
             "skipped_secret": m.skipped_secret,
             "skipped_cache": m.skipped_cache,
+            "skipped_noise": m.skipped_noise,
             "symlinks": m.symlinks,
             "worktrees": m.worktrees,
             "worktree_of": m.worktree_of,
-            "claude": m.claude,
+            "no_link_report_applied": m.no_link_report_applied,
+            "kept_over_secret": m.kept_over_secret,
         }))
     }
 
@@ -2514,7 +2530,11 @@ which existing files would be replaced, which would remain untouched, which syml
 here, and which worktree pointers would be rewritten — an existing destination is not an error \
 during a dry run. Returns JSON {dest, dry_run, entries_written, destination_exists, would_overwrite, \
 would_remain, rewritten_worktrees, missing_worktrees, missing_worktree_parent, dangling_symlinks, \
-secrets_not_carried}."
+link_reports_suppressed, regenerable_caches, secrets_not_carried, needs_attention} — \
+`needs_attention` is the single flag to branch on, true when any of the report's follow-up lists is \
+non-empty. `link_reports_suppressed` is informational and does not set it: it names the \
+`no_link_report` rules in force when the pack was written, so an empty `dangling_symlinks` is not \
+misread as \"every link here is fine\" when it means \"every link I was shown is fine\"."
     )]
     async fn pack_restore(
         &self,
@@ -2543,7 +2563,7 @@ secrets_not_carried}."
             "missing_worktrees": report.missing_worktrees,
             "missing_worktree_parent": report.missing_worktree_parent,
             "dangling_symlinks": report.dangling_symlinks,
-            "missing_claude_link_roots": report.missing_claude_link_roots,
+            "link_reports_suppressed": report.link_reports_suppressed,
             "regenerable_caches": report.regenerable_caches,
             "secrets_not_carried": report.secrets_not_carried,
             "needs_attention": report.needs_attention(),
@@ -2556,8 +2576,9 @@ entry, so this costs one small read rather than a full decompression. Reports pr
 (source_root, created_at, lds_version), payload stats, and everything the pack deliberately left \
 behind (secrets, caches) plus what needs attention on restore (symlinks, worktrees). \
 `worktree_of` is set when the pack is itself a worktree checkout, and names the repository whose \
-pack has to be restored beside it. Set `files` to also list every packed path, which does read the \
-whole archive."
+pack has to be restored beside it. `no_link_report_applied` names the rules that kept some of the \
+project's links out of `symlinks`, and `kept_over_secret` any file a `keep` glob carried past the \
+secret rules. Set `files` to also list every packed path, which does read the whole archive."
     )]
     async fn pack_inspect(
         &self,
@@ -2588,10 +2609,12 @@ whole archive."
             "stats": manifest.stats,
             "skipped_secret": manifest.skipped_secret,
             "skipped_cache": manifest.skipped_cache,
+            "skipped_noise": manifest.skipped_noise,
             "symlinks": manifest.symlinks,
             "worktrees": manifest.worktrees,
             "worktree_of": manifest.worktree_of,
-            "claude": manifest.claude,
+            "no_link_report_applied": manifest.no_link_report_applied,
+            "kept_over_secret": manifest.kept_over_secret,
         });
         if let Some(files) = files {
             out["files"] = serde_json::json!(files);
@@ -3255,11 +3278,36 @@ copy you were actually in the middle of.
   A bundle is assembled from an enumerated set of refs, so stashes, the reflog,
   local-only branches and unreferenced objects would be dropped. Those are
   usually the parts that exist nowhere else.
-- **Untracked local state** — `workspace/`, `.mcp.json`, `.claude/`, sandbox
+- **Untracked local state** — `workspace/`, agent and editor dotfiles, sandbox
   snapshots, journal databases. The scan deliberately ignores `.gitignore`:
   consulting it would drop exactly the material the pack exists to preserve.
 - **Symlinks, as links.** Never followed — following one would drag an
   unrelated tree, and whatever it contains, into the archive.
+
+Every symlink is reported, because a link is something to act on: it breaks when
+the project lands somewhere else. The exception is a directory that is *meant*
+to be links — a shared dotfile tree deployed the same way on every machine you
+use — where you already know and the entries only hide the links that do need
+attention. Name such a path in `[pack] no_link_report` and its links are packed
+without being reported.
+
+There is no default, and the suppression is never silent: every rule that
+actually left something out comes back in `no_link_report_applied`, so an empty
+`symlinks` list can always be told apart from a filtered one. The list itself
+stays complete and one record per link — redirect it to a file and process it.
+
+## Scoping a `[pack]` rule
+
+Globs in `[pack]` are scoped the way `.gitignore` scopes them: one with no `/`
+matches the file name at any depth, one containing `/` is anchored to that path
+relative to the project root.
+
+Reaching the whole tree is right when naming a *kind* of file and is the hazard
+when naming *one* file. `keep = ["*.pem"]`, written to carry a sample key,
+carries every private key in the project — and `keep` is the one list that can
+put a secret-matching file into the archive. `keep = ["docs/samples/*.pem"]`
+carries the sample. The same applies to `cache_dirs`: `dist` drops every `dist/`
+including a hand-written one, `frontend/dist` drops the build output you meant.
 
 ## What does not
 
@@ -3267,7 +3315,18 @@ copy you were actually in the middle of.
   `skipped_secret` and never packed. Moving credentials is the operator's own
   business, and a pack is a file that gets copied around.
 - **Caches** (`target/`, `node_modules/`, ...) are dropped and listed in
-  `skipped_cache`; they are regenerable by definition.
+  `skipped_cache`; they are regenerable by definition. One record stands in for
+  a whole subtree, so each carries the file count and byte size that went with
+  it — a `cache_dirs` entry pointed at hand-written source reads as `dist → 412
+  files, 2.1 MB` next to `target → 38104 files, 4.2 GB`, where the path alone
+  would have read the same either way. Each also lists any credential-looking
+  file found inside: pruning happens before the secret pass, so a
+  `node_modules/.npmrc` is neither packed nor otherwise reported, and you would
+  never learn a token was sitting there.
+- **OS debris** (`.DS_Store`, `Thumbs.db`) is dropped and listed in
+  `skipped_noise`. There is nothing to do about it; it is recorded because a
+  path that is in the source tree and not in the payload should always be
+  explainable by one of these lists.
 
 Both lists are extensible via `[pack]` in `~/.config/lds/config.toml`.
 
@@ -3289,7 +3348,7 @@ machine the pack came from, so restore rewrites them.
 
 Where the checkout lives decides how much one pack can fix:
 
-- **Inside the root** (`.worktrees/<name>`, `.claude/worktrees/<name>`, ...) —
+- **Inside the root** (`.worktrees/<name>`, or anywhere else under it) —
   both halves travel in the same pack, and restore wires them up on its own.
 - **Beside the root** — what `git worktree add ../name` produces. The two
   halves belong to two different projects, so they travel in two packs and
@@ -3315,7 +3374,12 @@ repository to repair another.
 | `rewritten_worktrees` | restore | pairs wired up for the new location |
 | `missing_worktrees` | restore | registered checkouts not on this machine — restore their packs and the wiring completes |
 | `missing_worktree_parent` | restore | this pack is a worktree and its repository is not beside it, so the restored tree has no repository at all |
+| `no_link_report_applied` | inspect / create | `no_link_report` rules that actually kept links out of `symlinks`; absent means nothing was filtered |
+| `kept_over_secret` | inspect / create | files a `keep` glob carried past a secret rule — the only way a secret-matching file is inside the archive |
+| `skipped_cache[]` | inspect / create / restore | dropped caches with `file_count` / `total_bytes`; figures that do not look like a build tree's mean the rule caught the wrong directory |
+| `skipped_cache[].secrets` | inspect / create / restore | credential-looking files that were inside a dropped cache — not packed, but worth knowing are on your disk |
 | `dangling_symlinks` | restore | restored links whose targets do not exist here |
+| `link_reports_suppressed` | restore | the pack's `no_link_report` rules; links there were restored but never checked for dangling |
 | `secrets_not_carried` | restore | move these out of band |
 
 `needs_attention` is true when any of the above needs follow-up.

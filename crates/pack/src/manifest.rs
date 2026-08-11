@@ -21,7 +21,14 @@ pub const MANIFEST_NAME: &str = "pack.toml";
 ///
 /// Bumped when the on-disk layout changes in a way older readers cannot
 /// interpret. [`crate::restore`] refuses archives newer than this.
-pub const PACK_FORMAT_VERSION: u32 = 1;
+///
+/// Version 2 dropped the `[claude]` section, which described one hard-coded
+/// directory. Readers at version 1 declared `claude` as a required field, so
+/// they cannot decode a version 2 manifest; the bump makes them say so instead
+/// of failing on a missing key. Version 1 archives are still readable here —
+/// their `[claude]` section is ignored, since nothing on it has a counterpart
+/// in this shape.
+pub const PACK_FORMAT_VERSION: u32 = 2;
 
 /// Top-level manifest written to `pack.toml`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -42,15 +49,39 @@ pub struct Manifest {
     pub lds_version: String,
     /// Aggregate counts for the payload.
     pub stats: Stats,
-    /// The `.claude/` directory, tracked separately from ordinary content.
-    pub claude: ClaudeInfo,
-    /// Cache directories that were skipped because they can be regenerated.
+    /// `no_link_report` globs that actually suppressed at least one link here.
+    ///
+    /// Without this a reader cannot tell a project with no symlinks from one
+    /// whose links were deliberately left out of the report, and would act on
+    /// the wrong assumption. A rule that matched nothing is absent, so this
+    /// names the processing that happened rather than the configuration that
+    /// existed.
     #[serde(default)]
-    pub skipped_cache: Vec<SkipRecord>,
+    pub no_link_report_applied: Vec<String>,
+    /// Files a `keep` rule carried past a secret rule.
+    #[serde(default)]
+    pub kept_over_secret: Vec<KeptOverSecret>,
+    /// Cache directories that were skipped because they can be regenerated,
+    /// each with the size of what it dropped.
+    #[serde(default)]
+    pub skipped_cache: Vec<CacheRecord>,
     /// Secret-looking files that were skipped and reported instead of packed.
     #[serde(default)]
     pub skipped_secret: Vec<SkipRecord>,
-    /// Symlinks found outside `.claude/`, recorded verbatim for the report.
+    /// OS debris (`.DS_Store`, `Thumbs.db`) that was dropped.
+    ///
+    /// Nothing here needs acting on, which is why it used to be dropped in
+    /// silence. It is listed because "dropped without a record" is not a
+    /// property worth having anywhere in this format: a reader comparing the
+    /// source tree against the payload should never find a file that the
+    /// manifest cannot account for.
+    #[serde(default)]
+    pub skipped_noise: Vec<SkipRecord>,
+    /// Symlinks recorded verbatim, one entry each — the complete list, so it
+    /// can be redirected to a file and processed.
+    ///
+    /// Excludes only links covered by a `no_link_report` glob, and every such
+    /// glob is named in [`Self::no_link_report_applied`].
     #[serde(default)]
     pub symlinks: Vec<SymlinkRecord>,
     /// Registered git worktrees whose pointer files need rewriting on restore.
@@ -78,25 +109,23 @@ pub struct Stats {
     pub total_bytes: u64,
 }
 
-/// State of the `.claude/` directory.
+/// A file that matched a secret rule but was packed anyway, because a `keep`
+/// rule outranked it.
 ///
-/// `.claude/` is handled as its own layer: it is packed verbatim, symlinks and
-/// all, and its links are *not* enumerated individually. In a profile-managed
-/// setup it is commonly a tree of a hundred-plus links into a profiles
-/// repository, and listing each one would bury the rest of the manifest while
-/// telling the reader nothing they can act on per entry.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct ClaudeInfo {
-    /// Whether a `.claude/` directory was present at the source root.
-    pub present: bool,
-    /// How many symlinks live under `.claude/` (aggregate only).
-    pub symlink_count: u64,
-    /// Distinct roots those symlinks point into, deduplicated.
-    ///
-    /// Enough for a restore-side reader to see "these links want
-    /// `<profiles-root>` to exist" without a per-file list.
-    #[serde(default)]
-    pub link_roots: Vec<String>,
+/// `keep` is the only subtractive list, and the only way a file the secret
+/// rules named can end up inside the archive. That is a legitimate thing to
+/// ask for — `.env.example` matches `.env.*` and holds placeholders — but it
+/// is also how a real credential gets carried by accident, when a glob written
+/// for one file turns out to match another. Recording each one keeps the
+/// override reviewable instead of silent.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KeptOverSecret {
+    /// Path relative to the project root.
+    pub path: String,
+    /// The `keep` glob that rescued it.
+    pub keep_pattern: String,
+    /// The secret glob that would otherwise have excluded it.
+    pub secret_pattern: String,
 }
 
 /// A path that was left out of the pack, with the reason why.
@@ -108,7 +137,36 @@ pub struct SkipRecord {
     pub reason: String,
 }
 
-/// A symlink encountered outside `.claude/`.
+/// A cache directory that was dropped, and the size of what went with it.
+///
+/// One record stands in for a whole subtree, which is the right granularity
+/// for something regenerable — nobody acts on the individual files inside
+/// `target/`. The size is what makes the record checkable: a `cache_dirs` entry
+/// aimed at the wrong directory drops hand-written source, and `dist → 412
+/// files, 2.1 MB` reads nothing like `target → 38104 files, 4.2 GB`. Without
+/// it, a misconfiguration is one indistinguishable line.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CacheRecord {
+    /// Path relative to the project root.
+    pub path: String,
+    /// Which rule named it a cache.
+    pub reason: String,
+    /// Regular files below it that were not packed.
+    pub file_count: u64,
+    /// Sum of those files' sizes in bytes.
+    pub total_bytes: u64,
+    /// Credential-looking files found inside it, attributed to the rule that
+    /// swallowed them.
+    ///
+    /// A cache is pruned before the classification pass, so these were
+    /// previously neither packed nor reported: safe, but the operator never
+    /// learned that `node_modules/.npmrc` was holding a token. They are still
+    /// dropped with the rest of the cache — this only says they were there.
+    #[serde(default)]
+    pub secrets: Vec<SkipRecord>,
+}
+
+/// A symlink recorded individually.
 ///
 /// Symlinks are packed as links, never dereferenced — following them would
 /// drag unrelated trees (and whatever they contain) into the archive. The
@@ -202,18 +260,29 @@ mod tests {
                 symlink_count: 1,
                 total_bytes: 42,
             },
-            claude: ClaudeInfo {
-                present: true,
-                symlink_count: 154,
-                link_roots: vec!["/home/u/.config/profiles".to_string()],
-            },
-            skipped_cache: vec![SkipRecord {
+            no_link_report_applied: vec![".zsh/**".to_string()],
+            kept_over_secret: vec![KeptOverSecret {
+                path: ".env.example".to_string(),
+                keep_pattern: ".env.example".to_string(),
+                secret_pattern: ".env.*".to_string(),
+            }],
+            skipped_cache: vec![CacheRecord {
                 path: "target".to_string(),
-                reason: "cache directory".to_string(),
+                reason: "cache directory: target".to_string(),
+                file_count: 38104,
+                total_bytes: 4_200_000_000,
+                secrets: vec![SkipRecord {
+                    path: "target/tmp/.npmrc".to_string(),
+                    reason: "secret pattern: .npmrc".to_string(),
+                }],
             }],
             skipped_secret: vec![SkipRecord {
                 path: ".env".to_string(),
                 reason: "secret pattern: .env".to_string(),
+            }],
+            skipped_noise: vec![SkipRecord {
+                path: "sub/.DS_Store".to_string(),
+                reason: "os debris: .DS_Store".to_string(),
             }],
             symlinks: vec![SymlinkRecord {
                 path: "link".to_string(),
@@ -240,7 +309,13 @@ mod tests {
         assert_eq!(parsed.format_version, original.format_version);
         assert_eq!(parsed.source_root, original.source_root);
         assert_eq!(parsed.stats.file_count, 3);
-        assert_eq!(parsed.claude.symlink_count, 154);
+        assert_eq!(parsed.no_link_report_applied, vec![".zsh/**".to_string()]);
+        assert_eq!(parsed.kept_over_secret[0].path, ".env.example");
+        assert_eq!(parsed.kept_over_secret[0].secret_pattern, ".env.*");
+        assert_eq!(parsed.skipped_cache[0].file_count, 38104);
+        assert_eq!(parsed.skipped_cache[0].total_bytes, 4_200_000_000);
+        assert_eq!(parsed.skipped_cache[0].secrets[0].path, "target/tmp/.npmrc");
+        assert_eq!(parsed.skipped_noise[0].path, "sub/.DS_Store");
         assert_eq!(parsed.skipped_secret.len(), 1);
         assert_eq!(parsed.symlinks[0].target, "/elsewhere");
         assert_eq!(parsed.worktrees[0].name, "wt");
@@ -260,17 +335,51 @@ lds_version = "0.13.3"
 file_count = 0
 symlink_count = 0
 total_bytes = 0
-
-[claude]
-present = false
-symlink_count = 0
 "#;
         let parsed = Manifest::from_toml(text).expect("minimal manifest should parse");
         assert!(parsed.skipped_cache.is_empty());
+        assert!(parsed.skipped_noise.is_empty());
         assert!(parsed.skipped_secret.is_empty());
         assert!(parsed.symlinks.is_empty());
         assert!(parsed.worktrees.is_empty());
-        assert!(parsed.claude.link_roots.is_empty());
+        assert!(
+            parsed.no_link_report_applied.is_empty(),
+            "an operator who suppressed nothing gets no suppression record"
+        );
+        assert!(parsed.kept_over_secret.is_empty());
+    }
+
+    /// A version 1 manifest still decodes here, `[claude]` section and all.
+    ///
+    /// That section described one hard-coded directory and has no successor, so
+    /// it is ignored rather than translated — but it must not make the archive
+    /// unreadable, since packs written by 0.14.0 are still out there.
+    #[test]
+    fn test_manifest_reads_legacy_v1_claude_section() {
+        let text = r#"
+format_version = 1
+created_at = "2026-08-10T00:00:00Z"
+source_root = "/tmp/proj"
+project_name = "proj"
+lds_version = "0.14.0"
+
+[stats]
+file_count = 0
+symlink_count = 0
+total_bytes = 0
+
+[claude]
+present = true
+symlink_count = 154
+link_roots = ["/mnt/links/shared"]
+"#;
+        let parsed = Manifest::from_toml(text).expect("a v1 manifest must still parse");
+
+        assert_eq!(parsed.format_version, 1);
+        assert!(
+            parsed.no_link_report_applied.is_empty(),
+            "the legacy section is dropped, not translated into a suppression"
+        );
     }
 
     /// A worktree living outside the root carries no relative path.

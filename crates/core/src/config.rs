@@ -87,17 +87,47 @@ pub struct Recipes {
 /// hatch that subtracts: it names files the built-ins would classify as secret
 /// or cache but that this operator wants carried anyway.
 ///
-/// Patterns are globs matched against the **file name** (not the full path),
-/// e.g. `*.vault`, `secret*.toml`, `my-app-keys.json`.
+/// Every list here scopes its globs the way `.gitignore` does: one with no `/`
+/// (`*.vault`, `my-app-keys.json`) matches the **file name** at any depth, one
+/// with a `/` (`docs/samples/*.pem`, `frontend/dist`) is anchored to that
+/// **path relative to the project root**.
+///
+/// Reaching the whole tree is the right default for naming a kind of file, and
+/// the hazard when naming one particular file: `keep = ["*.pem"]` written to
+/// carry one sample key carries every private key in the project. Anchor such a
+/// rule to a path and it stays where it was meant to apply.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(default)]
 pub struct Pack {
-    /// Extra file-name globs to treat as secrets (never packed, only reported).
+    /// Extra globs to treat as secrets (never packed, only reported).
     pub secret_globs: Vec<String>,
-    /// Extra directory names to treat as regenerable caches (never packed).
+    /// Extra directories to treat as regenerable caches (never packed).
     pub cache_dirs: Vec<String>,
-    /// File-name globs that must be packed even if a built-in rule excludes them.
+    /// Globs that must be packed even if a built-in rule excludes them.
+    ///
+    /// The only subtractive list, and so the only way a file the secret rules
+    /// named ends up in the archive. Anything it rescues is recorded in the
+    /// manifest's `kept_over_secret`.
     pub keep: Vec<String>,
+    /// Path globs whose symlinks are packed but left out of the link report.
+    ///
+    /// A symlink is a problem by default: it breaks when the project is carried
+    /// somewhere else, so every one is reported for the operator to deal with.
+    /// The exception is a directory that is *meant* to be links — a shared
+    /// dotfile tree such as `.zsh/`, deployed the same way on every machine the
+    /// operator uses. Those are already known, so reporting them is noise that
+    /// hides the links that do need attention.
+    ///
+    /// Scoped like the lists above, and in practice always with a `/` — what
+    /// makes links expected is where they sit.
+    ///
+    /// No built-in default: only the operator knows which of their directories
+    /// are link-by-design. Left unset, every symlink is reported.
+    ///
+    /// Suppression affects the report alone — the links are packed either way,
+    /// and every rule that suppressed something is named in the manifest, so a
+    /// silent report can always be told apart from an empty one.
+    pub no_link_report: Vec<String>,
 }
 
 /// Path overrides for well-known lds locations.

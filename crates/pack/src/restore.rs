@@ -24,7 +24,7 @@ use std::path::{Component, Path, PathBuf};
 
 use crate::create::PAYLOAD_PREFIX;
 use crate::error::PackError;
-use crate::manifest::{Manifest, SkipRecord, SymlinkRecord};
+use crate::manifest::{CacheRecord, Manifest, SkipRecord, SymlinkRecord};
 
 /// Inputs for [`restore`].
 #[derive(Debug, Clone)]
@@ -111,11 +111,25 @@ pub struct RestoreReport {
     /// pack belongs.
     pub missing_worktree_parent: Option<String>,
     /// Restored symlinks whose targets do not exist on this machine.
+    ///
+    /// Covers every link the pack reported. Links the pack's author declared
+    /// under `no_link_report` are restored but never checked here, which is
+    /// what [`Self::link_reports_suppressed`] exists to say.
     pub dangling_symlinks: Vec<SymlinkRecord>,
-    /// `.claude/` link roots that are absent here, if any.
-    pub missing_claude_link_roots: Vec<String>,
+    /// `no_link_report` rules that were in force when this pack was written.
+    ///
+    /// Informational, and deliberately not part of [`Self::needs_attention`]:
+    /// the author declared those links expected, so there is nothing to act on.
+    /// It is reported anyway because otherwise an empty `dangling_symlinks`
+    /// reads as "every link here is fine" when it means "every link I was
+    /// allowed to look at is fine".
+    pub link_reports_suppressed: Vec<String>,
     /// Cache directories the pack deliberately dropped; regenerate as needed.
-    pub regenerable_caches: Vec<SkipRecord>,
+    ///
+    /// Each carries the file count and size that went with it, so a directory
+    /// that was named a cache by mistake is visible as one whose figures do not
+    /// look like a build tree's.
+    pub regenerable_caches: Vec<CacheRecord>,
     /// Secrets the pack deliberately did not carry; move them out of band.
     pub secrets_not_carried: Vec<SkipRecord>,
 }
@@ -128,7 +142,6 @@ impl RestoreReport {
     /// `--force`, and whatever the pack does not carry stays behind.
     pub fn needs_attention(&self) -> bool {
         !self.dangling_symlinks.is_empty()
-            || !self.missing_claude_link_roots.is_empty()
             || !self.missing_worktrees.is_empty()
             || self.missing_worktree_parent.is_some()
             || !self.secrets_not_carried.is_empty()
@@ -179,13 +192,7 @@ pub fn restore(opts: &RestoreOptions) -> Result<RestoreReport, PackError> {
         .cloned()
         .collect();
 
-    let missing_claude_link_roots = manifest
-        .claude
-        .link_roots
-        .iter()
-        .filter(|r| !Path::new(r).exists())
-        .cloned()
-        .collect();
+    let link_reports_suppressed = manifest.no_link_report_applied.clone();
 
     Ok(RestoreReport {
         dest,
@@ -198,7 +205,7 @@ pub fn restore(opts: &RestoreOptions) -> Result<RestoreReport, PackError> {
         missing_worktrees: plan.missing,
         missing_worktree_parent: plan.missing_parent,
         dangling_symlinks,
-        missing_claude_link_roots,
+        link_reports_suppressed,
         regenerable_caches: manifest.skipped_cache.clone(),
         secrets_not_carried: manifest.skipped_secret.clone(),
         manifest,
@@ -236,13 +243,7 @@ fn predict(
         .cloned()
         .collect();
 
-    let missing_claude_link_roots = manifest
-        .claude
-        .link_roots
-        .iter()
-        .filter(|r| !Path::new(r).exists())
-        .cloned()
-        .collect();
+    let link_reports_suppressed = manifest.no_link_report_applied.clone();
 
     Ok(RestoreReport {
         dest,
@@ -255,7 +256,7 @@ fn predict(
         missing_worktrees: plan.missing,
         missing_worktree_parent: plan.missing_parent,
         dangling_symlinks,
-        missing_claude_link_roots,
+        link_reports_suppressed,
         regenerable_caches: manifest.skipped_cache.clone(),
         secrets_not_carried: manifest.skipped_secret.clone(),
         manifest,

@@ -1,97 +1,28 @@
 # lds — local-develop-server
 
 Unified MCP server for AI-driven coding agents. Bundles git read/write,
-`just`-based recipe execution, and file-sandbox operations into one process
-backed by a shared `Session` state — so an agent can open a repository once
-with `session_start` and then run git, recipe, and sandbox tools against the
-same project root without re-establishing context per tool call.
+`just`-based recipe execution, file-sandbox operations, journal and outline
+forwarding, and whole-project archives into one process behind a shared
+`Session` — so an agent opens a repository once with `session_start` and then
+runs every tool against the same project root.
 
-## Architecture
+## Install
 
-```
-Claude Code / Agent
-       │
-       │ stdio (MCP JSON-RPC)
-       ▼
-┌─────────────────────────────────┐
-│         LdsServer               │
-│    Arc<RwLock<Inner>>           │
-│    #[tool_router] + stdio       │
-└──────────┬──────────────────────┘
-           │
-     ┌─────┼──────────┐
-     ▼     ▼          ▼
-  GitModule  RecipeModule  SandboxModule
-  git2-rs    just CLI      fs + snapshot
-     │         │             │
-     └─────────┴─────────────┘
-                 │
-                 ▼
-        Session (core)
-        root / session_id / timeout / max_output / global_recipe_dirs
+```sh
+cargo install --path crates/lds
 ```
 
-### Session — Smart Inject Env
-
-`session_start(root)` injects the project root into every module in one call.
-Each module reads `root` / `timeout` / `max_output` from the shared `Session`.
-The git module additionally tracks write scope (`owned_worktrees`) internally,
-separately from `Session`.
-
-**Auto session-start**: when the server is launched inside a ProjectRoot
-(a directory containing `.git` or `justfile`), the first tool call
-automatically starts a session using the startup CWD — `session_start` is
-optional in that case. It remains available for switching to a different
-project root explicitly. Auto-started calls include an `auto_session_start`
-field in their response.
-
-**No-session error**: when a tool is called without an active session, every
-handler returns JSON-RPC error code `-32603` with the message `"no session"`.
-
-**Session root gone error**: when the session root is removed after
-`session_start` (e.g. a worktree was deleted while the session was still
-active), recipe-family tools (`recipe_run` / `recipe_list` /
-`recipe_list_plugins`) return
-`"session root path no longer exists, please call session_start again: <path>"`.
-Re-invoking `session_start` with a valid root recovers the state.
-
-### Resolve Chain (recipe)
-
-Dotenv-style hierarchical resolution. Justfiles are scanned in the priority
-order below (low → high) and merged per recipe; later sources win on name
-collision (Project has highest priority).
-
-| Priority | Source | Notes |
-|---|---|---|
-| lowest | `~/.config/lds/justfile` (default global) | always scanned |
-| ↑ | `config.toml` `recipes.dirs` | additional directories declared in `~/.config/lds/config.toml` |
-| ↑ | `LDS_RECIPE_GLOBAL_DIRS` env var | colon-separated dirs; legacy / CI |
-| highest | Project (`{root}/justfile`) | project justfile at the session root |
-
-Each recipe carries `ResolveInfo { level, source_path }` so its source layer
-is traceable. Adding a new layer (e.g. Worktree) only requires extending the
-`ResolveLevel` enum with a new variant.
-
-### Output Safety
-
-- **timeout**: `tokio::time::timeout` is applied to recipe / sandbox execution (default 60s)
-- **truncation**: when stdout / stderr exceeds `max_output` (default 100KB) it
-  is truncated to a head + tail pair, respecting UTF-8 character boundaries
-
-## Crate Structure
-
+```json
+{
+  "mcpServers": {
+    "lds": { "command": "lds", "args": [] }
+  }
+}
 ```
-crates/
-├── core/    lds-core     Session, SessionConfig, LdsState, truncate_output
-├── git/     lds-git      GitModule (git2-rs, write scope tracking)
-├── gh/      lds-gh       GhModule (gh CLI subprocess wrapper, read-only API, auth fail-fast)
-├── recipe/  lds-recipe   RecipeModule (just CLI, resolve chain, content args)
-├── sandbox/ lds-sandbox  SandboxModule (file-scoped read/append, snapshot/rollback)
-├── journal/ lds-journal  JournalModule (journal-mcp-rmcp SDK consumer, `journal_*` tools forwarded)
-├── outline/ lds-outline  OutlineModule (outline-mcp-rmcp SDK consumer, prefixed `outline_*` tools)
-├── pack/    lds-pack     Whole-project archives (`pack_*` MCP tools + `lds pack` CLI)
-└── lds/     lds          MCP binary (rmcp v1.7, stdio transport)
-```
+
+Launched inside a directory containing `.git` or a `justfile`, the first tool
+call starts a session on its own; `session_start` is only needed to switch to a
+different root.
 
 ## Tools
 
@@ -99,7 +30,7 @@ crates/
 
 | Tool | Description |
 |---|---|
-| `session_start` | Initialize session with project root. Optional when the server was launched inside a ProjectRoot (directory containing `.git` or `justfile`) — the first tool call auto-starts the session using the startup CWD. Call `session_start` explicitly to use a different root. |
+| `session_start` | Initialize session with project root |
 
 ### Git (read)
 
@@ -109,53 +40,42 @@ crates/
 | `git_log` | Commit log (configurable max_count) |
 | `git_diff` | Diff working tree vs HEAD |
 
-### Gh (read)
-
-GitHub CLI (`gh`) wrapper. Requires `gh auth login` before use; every tool
-invocation checks `gh auth status` and returns a typed error if unauthenticated.
-
-| Tool | Description |
-|---|---|
-| `gh_auth_status` | Check gh CLI authentication status |
-| `gh_pr_list` | List PRs as JSON (number/title/state/author). `limit` optional (default 30). |
-| `gh_pr_view` | View a single PR as JSON. Requires `number`. |
-| `gh_pr_diff` | Show diff of a PR. Requires `number`. |
-| `gh_issue_list` | List issues as JSON (number/title/state). `limit` optional (default 30). |
-| `gh_issue_view` | View a single issue as JSON. Requires `number`. |
-| `gh_repo_view` | Repository metadata as JSON (name/owner/defaultBranchRef). |
-| `gh_run_list` | List Actions workflow runs as JSON. `limit` optional (default 30). |
-| `gh_run_view` | View a single workflow run as JSON (status/conclusion/jobs/...). Requires `run_id`. |
-| `gh_run_log_failed` | View failed-step logs of a workflow run, parsed into `{failed_steps: [{job_name, step_name, log_tail}]}`. |
-| `gh_run_jobs` | List jobs of a workflow run as JSON. Requires `run_id`. |
-| `gh_release_view` | View a single release (tag, assets, body) as JSON. Requires `tag`. |
-| `gh_release_list` | List releases as JSON. `limit` optional (default 30). |
-| `gh_workflow_list` | List workflows as JSON (name/state/id). |
-| `gh_workflow_view` | View a single workflow (path/state/latest_run) as JSON. Requires `name_or_id`. |
-| `gh_pr_checks` | List CI check results of a PR as JSON. Requires `number`. |
-
-**Write operations not exposed**: `gh pr create` / `gh issue create` /
-`gh release create` / `gh pr merge` are deliberately not exposed as MCP tools.
-`gh run cancel` (write op) and `gh run watch` (long-polling, incompatible with
-MCP request-response semantics — use `gh_run_view` + polling instead) are also
-absent. `gh search repos` is out of scope for this release.
-Users invoke write operations via shell directly.
-
 ### Git (write)
 
-Session-scoped write operations: `worktree_add` registers the created worktree in
-the session's `owned_worktrees` set, and subsequent write tools (`commit`,
-`merge`, `worktree_remove`, `branch_delete`) refuse to operate on paths /
-branches that are not session-owned. This prevents one agent from destroying
-another's work.
+`worktree_add` registers the worktree it creates in the session's
+`owned_worktrees` set, and `commit` / `merge` / `worktree_remove` /
+`branch_delete` refuse paths and branches that are not session-owned — one agent
+cannot destroy another's work.
 
 | Tool | Description |
 |---|---|
 | `git_commit` | Stage and commit changes in a session-owned working directory |
-| `git_worktree_add` | Create a worktree on a new branch (session-owned). Placed under `SessionConfig::worktrees_dir` → env `LDS_WORKTREES_DIR` → `<root>/.worktrees` (default; parent repo must gitignore this path) |
+| `git_worktree_add` | Create a worktree on a new branch (session-owned). Placed under `SessionConfig::worktrees_dir` → env `LDS_WORKTREES_DIR` → `<root>/.worktrees` (default; the parent repo must gitignore this path) |
 | `git_worktree_remove` | Remove a session-owned worktree |
 | `git_worktree_list` | List worktrees with session-ownership annotation |
 | `git_merge` | Merge a branch into another in a session-owned working directory |
 | `git_branch_delete` | Delete a session-owned branch |
+
+### Gh (read)
+
+GitHub CLI wrapper. Requires `gh auth login`; every invocation checks
+`gh auth status` and returns a typed error if unauthenticated.
+
+| Tool | Description |
+|---|---|
+| `gh_auth_status` | Check gh CLI authentication status |
+| `gh_pr_list` / `gh_pr_view` / `gh_pr_diff` / `gh_pr_checks` | PRs as JSON; `limit` defaults to 30 |
+| `gh_issue_list` / `gh_issue_view` | Issues as JSON |
+| `gh_repo_view` | Repository metadata (name/owner/defaultBranchRef) |
+| `gh_run_list` / `gh_run_view` / `gh_run_jobs` | Actions workflow runs as JSON |
+| `gh_run_log_failed` | Failed-step logs, parsed into `{failed_steps: [{job_name, step_name, log_tail}]}` |
+| `gh_release_list` / `gh_release_view` | Releases as JSON |
+| `gh_workflow_list` / `gh_workflow_view` | Workflows as JSON |
+
+**Write operations are not exposed**: `gh pr create` / `gh issue create` /
+`gh release create` / `gh pr merge` are deliberately absent, as are
+`gh run cancel` (a write op) and `gh run watch` (long-polling, incompatible with
+MCP request-response — poll `gh_run_view` instead). Invoke those from a shell.
 
 ### Recipe
 
@@ -164,130 +84,34 @@ another's work.
 | `recipe_list` | List allow-agent recipes (with ResolveInfo source tracking) |
 | `recipe_run` | Run recipe with args + content env vars, timeout + truncation |
 
-### Outline
-
-Forwarded from the upstream `outline-mcp-rmcp` server. Each tool is exposed
-under the `outline_` prefix (e.g. `mcp__lds__outline_shelf`). Shelf root
-defaults to `$HOME/.config/outline-mcp/books`, overridable via
-`LDS_OUTLINE_SHELF_DIR`. See the upstream [outline-mcp README][outline-mcp]
-for full tool semantics; the surface below lists the wire names.
-
-| Tool | Description |
-|---|---|
-| `outline_shelf` | List available books on the shelf |
-| `outline_select_book` | Select a book (by slug or number) to operate on |
-| `outline_init` | Create a new book |
-| `outline_toc` | Table of contents (numbered IDs) for the selected book |
-| `outline_checklist` | Export a section as a Markdown checklist |
-| `outline_dump` | Full JSON dump of a book |
-| `outline_node_create` | Add a node under a parent (or root) |
-| `outline_node_update` | Edit a node's title/body/type/placeholder |
-| `outline_node_move` | Move a node under a new parent |
-| `outline_node_batch_move` | Bulk move (UUID required) |
-| `outline_node_batch_update` | Bulk update (UUID required) |
-| `outline_node_history` | Change history for a single node |
-| `outline_book_history` | Change history for the whole book |
-| `outline_snapshot_create` | Snapshot the current book state |
-| `outline_snapshot_list` | List snapshots |
-| `outline_snapshot_restore` | Restore a snapshot |
-| `outline_snapshot_tag` | Tag a snapshot with a label |
-| `outline_snapshot_diff` | Diff two snapshots |
-| `outline_snapshot_dump` | Dump one snapshot |
-| `outline_snapshot_dump_all` | Dump every snapshot |
-| `outline_import` | Import a book from JSON |
-| `outline_gen_routing` | Generate routing metadata |
-
-Bundled guide resources are surfaced verbatim under the `outline://guides/*`
-URI scheme via `list_resources` / `read_resource`.
-
-[outline-mcp]: https://github.com/ynishi/outline-mcp
-
-#### Migrating from legacy `[[export]] route = "outline"` (pre-v0.7.0 users)
-
-Before v0.7.0 the recommended way to reach outline-mcp through lds was to
-declare a `[[route]] name = "outline"` and re-expose its snapshot / history
-tools via `[[export]]` in `~/.config/lds/config.toml` (or the project-local
-equivalent). Since v0.7.0 the outline surface is provided by the in-process
-`lds-outline` SDK integration, so the export block is no longer needed —
-and, if left in place, it silently **shadows** the SDK path for exported
-tool names.
-
-Concretely: lds's `call_tool` dispatch checks `[[export]]` before the
-direct-embed outline delegation, so a config like
-
-```toml
-[[route]]
-name = "outline"
-command = "outline-mcp"
-
-[[export]]
-route = "outline"
-tools = ["snapshot_create", "snapshot_list", "snapshot_dump",
-         "snapshot_dump_all", "snapshot_tag", "snapshot_diff",
-         "book_history"]
-```
-
-routes `outline_snapshot_*` and `outline_book_history` to a subprocess
-`outline-mcp` binary while `outline_shelf` / `outline_select_book` /
-`outline_toc` / `outline_dump` / `outline_node_*` go through the direct
-SDK. The subprocess and the in-process `OutlineMcpServer` hold separate
-`selected` state, so `outline_select_book` from the SDK path never reaches
-the subprocess and the exported snapshot tools return
-`-32602: No book selected` even right after a successful `outline_select_book`.
-
-**Migration**: remove the `[[export]] route = "outline"` block (and, if you
-had no other reason to keep it, the `[[route]] name = "outline"` block as
-well) from your lds config, then restart your MCP client. All `outline_*`
-tools will flow through the in-process SDK and share a single `selected`
-state.
-
-## Roadmap
-
-| Stage | Scope | Status |
-|---|---|---|
-| S1 | Git write ops (`commit` / `merge` / `worktree_{add,remove,list}` / `branch_delete`) with session-scoped write safety | ✅ done |
-| S2 | Recipe schema validation (typed content-key contract for `recipe_run`) | planned |
-| S3 | Sandbox extensions — optional container / subprocess isolation backends for the sandbox module | planned |
-
-## Why one process?
-
-Each MCP server an agent has to talk to is one more process to install, one
-more `session_start` call to make, and one more reference to thread through
-prompts. Folding git, recipe, and sandbox into a single binary backed by a
-shared `Session` collapses the install surface to one target, the per-task
-session call to one invocation, and lets every module read the same project
-root / timeout / output limits without duplicate configuration.
-
-## Usage
-
-```sh
-cargo install --path crates/lds
-
-# .mcp.json
-{
-  "mcpServers": {
-    "lds": { "command": "lds", "args": [] }
-  }
-}
-```
-
 ### Pack
 
 | Tool | Description |
 |---|---|
 | `pack_create` | Pack a whole project (`.git` + untracked local state) into one archive. `root` defaults to the session root; `dry_run` classifies without writing |
-| `pack_restore` | Restore a pack, rewriting worktree gitdir wiring for the new location — including worktrees living beside the project, wired up as soon as both packs are restored side by side. `dry_run` predicts (what gets replaced / what remains / what dangles) without writing |
+| `pack_restore` | Restore a pack, rewriting worktree gitdir wiring for the new location — including worktrees beside the project, wired up once both packs are restored side by side. `dry_run` predicts without writing |
 | `pack_inspect` | Read a pack's manifest without unpacking; `files` also lists every packed path |
 
-Each runs on a blocking thread (`spawn_blocking`), so packing a large tree
-never occupies a tokio worker. The same operations are also available as CLI
-subcommands — see below.
+### Outline
 
-### `lds pack` — moving a whole project
+The upstream [outline-mcp][outline-mcp] surface, forwarded in-process under the
+`outline_` prefix (`outline_shelf`, `outline_select_book`, `outline_toc`,
+`outline_node_*`, `outline_snapshot_*`, `outline_book_history`, `outline_dump`,
+`outline_import`, `outline_checklist`, `outline_init`, `outline_gen_routing`).
+Shelf root defaults to `$HOME/.config/outline-mcp/books`, overridable via
+`LDS_OUTLINE_SHELF_DIR`. Tool semantics are the upstream ones; bundled guides
+are surfaced verbatim under `outline://guides/*`.
+
+[outline-mcp]: https://github.com/ynishi/outline-mcp
+
+## `lds pack` — moving a whole project
 
 A pack carries a project *as it exists on this machine*: the `.git` directory
 itself, plus the untracked local state that normally never leaves — a
-`workspace/` tree, journal databases, `.mcp.json`, sandbox snapshots.
+`workspace/` tree, journal databases, `.mcp.json`, sandbox snapshots. `.git` is
+copied rather than bundled, because a bundle is built from an enumerated set of
+refs and everything outside it (stashes, the reflog, local-only branches,
+unreferenced objects) would not make the trip.
 
 ```sh
 lds pack create                        # -> <project>-<timestamp>.pack, here
@@ -295,81 +119,61 @@ lds pack create --root ~/proj -o p.pack
 lds pack create --dry-run              # classify only; write nothing
 lds pack inspect p.pack                # manifest only; no decompression
 lds pack restore p.pack --into ~/dest
-lds pack restore p.pack --into ~/proj --dry-run # predict the restore; write nothing
+lds pack restore p.pack --into ~/proj --dry-run # predict the restore
 lds pack restore p.pack --into ~/proj --force   # restore over a working copy
 ```
 
-Both halves have a dry run, and they answer different questions. `create
---dry-run` asks *what would travel*; `restore --dry-run` asks *what would
-happen here* — which existing files get replaced, which survive, which symlinks
-land dangling on this machine, which worktree pointers get rewritten. An
-existing destination is not an error during a preview, since reporting the
-collision is the whole point:
+`create --dry-run` reports what would travel; `restore --dry-run` reports what
+would happen at the destination — which files get replaced, which survive, which
+symlinks land dangling, which worktree pointers get rewritten.
 
-```sh
-$ lds pack restore proj.pack --into ~/proj --dry-run
-dry run: restore proj.pack -> /home/u/proj (nothing written)
-  would write 2014 entries
-  destination exists: 1515 file(s) would be replaced, 1 would remain untouched (needs --force)
+`restore` refuses an existing destination unless `--force`, and `--force`
+**overwrites without wiping**: pack entries replace their counterparts, and files
+already there that the pack does not carry are left alone. A restored backup can
+therefore end up dirtier than the machine the pack came from.
 
-would need attention:
-  1 existing file(s) the pack does not carry would REMAIN (restore overwrites, it does not wipe):
-    LOCAL-ONLY.txt
-```
-
-`restore` refuses a destination that already exists unless `--force` is given.
-`--force` **overwrites, it does not wipe**: entries in the pack replace their
-counterparts, and files already in the destination that the pack does not carry
-are left alone. Restoring a backup over a damaged working copy therefore brings
-back everything the pack holds without deleting anything it never knew about —
-so unrelated leftovers stay behind, and the destination can end up dirtier than
-the machine the pack came from.
-
-The destination path is otherwise unconstrained: deeply nested, containing
-spaces, non-ASCII, or given relative to the current directory all work, and the
-worktree pointers are rewritten to match wherever it lands.
-
-**Why the `.git` directory and not `git bundle`.** A bundle is built from an
-enumerated set of refs, so anything outside that set does not make the trip:
-stashes, the reflog, local-only branches, objects no ref points at. Copying the
-directory removes the question — whatever git had, the pack has. On this
-repository, a round trip preserves the dangling commit `git fsck` reports, all
-local-only branches, the reflog, and uncommitted work in progress.
-
-Three classes are handled deliberately:
+### What is not packed
 
 | class | treatment |
 |---|---|
 | secrets (`.env`, `*.pem`, `id_rsa`, …) | **not packed**, reported — moving credentials stays yours to do |
-| caches (`target/`, `node_modules/`, `.venv/`, …) | **not packed**, recorded — regenerable by definition |
+| caches (`target/`, `node_modules/`, …) | **not packed**, recorded with the file count, size, and any credentials inside them |
+| OS debris (`.DS_Store`, `Thumbs.db`) | **not packed**, recorded |
 | symlinks | packed as links, never followed; recorded so a restore elsewhere names what dangles |
 
-`.claude/` is packed verbatim as its own layer, with its links counted and their
-shared root summarized rather than listed one by one. State outside the project
-root (`~/.config/...`) is not collected.
+State outside the project root (`~/.config/...`) is not collected.
 
-#### Teaching it your own secret names
+Nothing is dropped without a record: a path in your tree and not in the payload
+can always be pointed at one of those lists. That matters most for caches, where
+one line stands in for a whole subtree — a `cache_dirs` entry aimed at
+hand-written source reads as `dist (412 files, 2.1 MB)` next to
+`target (38104 files, 4.2 GB)`.
 
-Secret file names are open-ended — every ecosystem invents its own
-(`credentials.toml`, `terraform.tfvars`, `service-account.json`), and a project
-can always have one nobody has heard of. The built-in list covers the common
-ones; extend it in `~/.config/lds/config.toml`:
+### Configuring the rules
 
 ```toml
 [pack]
-secret_globs = ["my-app-keys.json", "*.vault"]  # also treat these as secrets
-cache_dirs   = ["dist"]                         # also treat these as caches
-keep         = [".npmrc"]                       # pack these despite a built-in rule
+secret_globs   = ["my-app-keys.json", "*.vault"]  # also treat these as secrets
+cache_dirs     = ["frontend/dist"]                # also treat these as caches
+keep           = ["docs/samples/*.pem"]           # pack these despite a built-in rule
+no_link_report = [".zsh/**"]                      # links here are expected; do not report them
 ```
 
-Globs match the **file name**, not the path. `secret_globs` and `cache_dirs`
-**add to** the built-ins rather than replacing them, so declaring one
-project-specific name cannot silently disable the rest of the protection.
-`keep` is the only subtractive list, for when a built-in rule is wrong for this
-project. A malformed glob is a hard error naming itself — a typo must not
-silently match nothing.
+Globs are scoped the way `.gitignore` scopes them: one with no `/` matches the
+**file name at any depth**, one containing `/` is anchored to that **path
+relative to the project root**. `keep = ["*.pem"]` carries every private key you
+own; `keep = ["docs/samples/*.pem"]` carries the sample.
 
-Use `--dry-run` to see the effect before writing an archive:
+`secret_globs` and `cache_dirs` add to the built-ins rather than replacing them.
+`keep` is the only subtractive list, and the only way a file the secret rules
+named gets into the archive — whatever it rescues is named in the manifest's
+`kept_over_secret`. A malformed glob is a hard error naming itself.
+
+Every symlink is reported by default, because a link breaks when the project
+lands elsewhere. `no_link_report` names the exception — a `.zsh/` tree shared
+across your machines, a vendored link tree — and its links are packed without
+being listed. Rules that actually suppressed something come back in
+`no_link_report_applied`, so an empty `symlinks` list is never ambiguous.
 
 ```sh
 $ lds pack create --dry-run
@@ -380,18 +184,22 @@ dry run: /home/u/proj -> proj-20260811-004500.pack (nothing written)
 not packed — secrets (move these yourself):
   .env              (secret pattern: .env)
   my-app-keys.json  (secret pattern: my-app-keys.json)
-  prod.vault        (secret pattern: *.vault)
+
+not packed — caches (regenerable):
+  target        (38104 files, 4.2 GB)  (cache directory: target)
+  node_modules  (21877 files, 412 MB)  (cache directory: node_modules)
+      credential inside, dropped with it: node_modules/.npmrc
 ```
 
-Registered worktrees travel too. Both halves of a worktree's wiring —
-`.git/worktrees/<name>/gitdir` and the worktree's own `.git` file — are absolute
-paths, so `restore` rewrites them for the new location; a plain `tar` extract
-would leave both aimed at the machine the pack came from.
+### Worktrees
 
-A worktree made with `git worktree add ../name` sits *beside* the project rather
-than inside it, so the two halves belong to two different projects and travel in
-two different packs. Pack each, restore them beside each other, and whichever
-lands second wires the pair up:
+Both halves of a worktree's wiring — `.git/worktrees/<name>/gitdir` and the
+worktree's own `.git` file — are absolute paths, so `restore` rewrites them; a
+plain `tar` extract would leave both aimed at the source machine.
+
+A worktree made with `git worktree add ../name` sits *beside* the project, so the
+two halves belong to two projects and travel in two packs. Restore them beside
+each other and whichever lands second wires the pair up:
 
 ```sh
 lds pack create --root ~/projects/proj         --out proj.pack
@@ -404,40 +212,27 @@ lds pack restore proj-feature.pack --into /backup/proj-feature
 ```
 
 Order does not matter, and `--force` re-restoring one side repairs a pair left
-half-attached. The counterpart is looked for at the same offset from the new
-root it had from the old one — restore the set together and it is found. One
-that is not on this machine is reported (`missing_worktrees`, or
-`missing_worktree_parent` when the pack is itself a worktree) rather than
-guessed at.
+half-attached. A counterpart that is genuinely not on this machine is reported
+(`missing_worktrees`, or `missing_worktree_parent` when the pack is itself a
+worktree) rather than guessed at.
 
-### Plugin Recipes
+Full field reference: the `lds://docs/pack` MCP resource.
 
-Justfile recipes tagged with `[group('lds-plugin')]` are auto-registered
-as MCP tools at startup. Drop a `justfile` at `~/.config/lds/justfile`
-(global) or in your project root (project-scoped) and each plugin
-recipe becomes `mcp__lds__<name>`.
+## Plugin recipes
 
-Quick bootstrap:
+Justfile recipes tagged `[group('lds-plugin')]` are registered as MCP tools at
+startup. Drop a `justfile` at `~/.config/lds/justfile` (global) or in your
+project root, and each plugin recipe becomes `mcp__lds__<name>`.
 
 ```sh
 cp examples/global-justfile.skeleton ~/.config/lds/justfile
-# restart Claude Code so the MCP server re-reads the global plugin set
+# restart the MCP client so the server re-reads the global plugin set
 ```
 
-The skeleton ships with `complexity` / `search-excluding` /
-`remote-url` / `text-stats` / `greet`. See
-[docs/plugin-recipe-authoring.md](docs/plugin-recipe-authoring.md) for
-the full IF contract, parameter mapping, shebang recipes, and the
-macOS-awk / CWD pitfalls. The same doc carries the
-[Plugin vs AllowAgent decision flowchart](docs/plugin-recipe-authoring.md#11-decision-flowchart)
-and the
-[naming-collision guide](docs/plugin-recipe-authoring.md#12-plugin-naming-collision-guide)
-for picking the right group.
+The skeleton ships `complexity` / `search-excluding` / `remote-url` /
+`text-stats` / `greet`.
 
-#### config.toml (Recommended)
-
-The preferred way to configure persistent global recipe directories is
-`~/.config/lds/config.toml`:
+Persistent global recipe directories go in `~/.config/lds/config.toml`:
 
 ```toml
 [recipes]
@@ -447,104 +242,27 @@ dirs = ["/opt/shared-recipes", "~/team-recipes"]
 global_justfile = "~/.config/lds/justfile"
 ```
 
-Use the `lds recipe-dir` CLI to manage `recipes.dirs` without hand-editing:
-
 ```sh
 lds recipe-dir add ~/team-recipes
 lds recipe-dir list
 lds recipe-dir remove ~/team-recipes
 ```
 
-> **Tilde expansion**: `lds recipe-dir add ~/team-recipes` expands the path
-> to an absolute path before writing it to `config.toml`. Existing comments
-> and other sections in `config.toml` are preserved (patch-safe write).
+`recipe-dir add` expands `~` before writing, and preserves existing comments and
+sections. `config.toml` is read once at startup, so changes need a restart.
 
-**Resolution priority** (low → high):
-`~/.config/lds/justfile` (default) → `config.toml` `recipes.dirs` →
-`LDS_RECIPE_GLOBAL_DIRS` env → project `justfile`
+Resolution priority (low → high): `~/.config/lds/justfile` → `config.toml`
+`recipes.dirs` → `LDS_RECIPE_GLOBAL_DIRS` → project `justfile`.
 
-**Restart required**: `config.toml` is read once at process startup.
-Changes to `config.toml` require restarting the lds process to take effect.
-SIGHUP-based reload is not implemented (tracked as a separate issue).
+## Further reading
 
-#### Additional Global Recipe Directories — Legacy (`LDS_RECIPE_GLOBAL_DIRS`)
-
-> **Legacy**: prefer `config.toml` + `lds recipe-dir add` (above) for new
-> setups. `LDS_RECIPE_GLOBAL_DIRS` continues to work and is useful for CI /
-> ephemeral environments where a config file is inconvenient.
-
-Set `LDS_RECIPE_GLOBAL_DIRS` to a colon-separated list of directories
-(PATH-style) to load additional global justfiles beyond `~/.config/lds/`:
-
-```sh
-# .mcp.json
-{
-  "mcpServers": {
-    "lds": {
-      "command": "lds",
-      "args": [],
-      "env": {
-        "LDS_RECIPE_GLOBAL_DIRS": "/opt/shared-recipes:/home/user/team-recipes"
-      }
-    }
-  }
-}
-```
-
-When both `config.toml` and `LDS_RECIPE_GLOBAL_DIRS` are set, directories
-from `LDS_RECIPE_GLOBAL_DIRS` take precedence over `config.toml` on name
-collision — env is loaded after config in the resolution chain, following
-the standard CLI convention (cargo, git, gh: env overrides file config).
-Same-name recipes in later entries override earlier ones; the project
-justfile always wins.
-
-#### Alternative: `import '<abs>/justfile'`
-
-Add an `import` statement to `~/.config/lds/justfile` to pull in another
-justfile directly:
-
-```just
-import '/opt/shared/shared-recipes.just'
-```
-
-This approach requires editing `~/.config/lds/justfile` by hand and does
-not appear in `lds recipe-dir list`. It is provided for compatibility with
-existing setups.
-
-### Global Recipe Contract
-
-Consumer-facing IF for serving recipes via lds. The five points below are
-the contract; they are not optional behaviors.
-
-1. **Discovery paths**: lds reads `~/.config/lds/justfile` (default global),
-   every directory listed in `config.toml` `recipes.dirs`, and every
-   directory listed in `LDS_RECIPE_GLOBAL_DIRS`. Recipes brought in by
-   just's native `import '<path>'` from any of those justfiles are also
-   served — there is no separate registration step for imported recipes.
-
-2. **Group filter** (mutually exclusive routing):
-
-   | Tag | Routing |
-   |---|---|
-   | `[group('lds-plugin')]` | Registered as a dedicated MCP tool at startup (`mcp__lds__<name>`) **and** listed by `recipe_list` / runnable via `recipe_run`. Intended for global utilities. |
-   | `[group('allow-agent')]` | Listed by `recipe_list` and runnable via `recipe_run` only. Not exposed as an individual MCP tool. Intended for project/task recipes invoked through `recipe_run`. |
-   | no group | **Excluded.** Not served at all (legacy `# [allow-agent]` doc comment is still honored for backward compatibility). |
-
-3. **Dedup**: When the same recipe arrives through two paths (e.g. env
-   injection + root `import`), `just --dump` dedupes by recipe name; lds
-   does not error and serves a single entry.
-
-4. **Restart required**: lds resolves the global justfile set at **process
-   startup** using `config.toml` and `LDS_RECIPE_GLOBAL_DIRS`. `recipe_list`
-   / `recipe_run` re-parse justfiles live, but changes to `config.toml`,
-   env vars, or newly added global directories require a Claude Code restart
-   to take effect. SIGHUP reload is not implemented.
-
-5. **Three coexisting routes for adding global recipes**: (a) declare in
-   `config.toml` `recipes.dirs` via `lds recipe-dir add` (recommended), (b)
-   inject via `LDS_RECIPE_GLOBAL_DIRS` env (legacy / CI), or (c) add
-   `import '<abs>/justfile'` to `~/.config/lds/justfile` (manual). All three
-   are supported simultaneously.
+| Document | Contents |
+|---|---|
+| [docs/recipes.md](docs/recipes.md) | Full recipe contract, `LDS_RECIPE_GLOBAL_DIRS`, `import` |
+| [docs/plugin-recipe-authoring.md](docs/plugin-recipe-authoring.md) | Writing plugin recipes: IF contract, parameter mapping, pitfalls |
+| [docs/architecture.md](docs/architecture.md) | Internal layout, session model, resolve chain |
+| `lds://docs/pack` | Pack field reference (MCP resource) |
+| `lds://docs/multi-session`, `lds://docs/routing` | Session and routing guides (MCP resources) |
 
 ## License
 

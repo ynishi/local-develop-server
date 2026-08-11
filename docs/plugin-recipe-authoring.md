@@ -119,7 +119,7 @@ lds recipe-dir remove ~/team-recipes
 ```
 
 For CI or one-off environments, set `LDS_RECIPE_GLOBAL_DIRS` instead
-(see [Additional Global Recipe Directories — Legacy](../README.md#additional-global-recipe-directories--legacy-lds_recipe_global_dirs)).
+(see [`LDS_RECIPE_GLOBAL_DIRS`](recipes.md#lds_recipe_global_dirs)).
 
 **Loading order**: global plugins are loaded eagerly at server startup, before
 the first `session_start` call. The MCP client (Claude Code) sees them in the

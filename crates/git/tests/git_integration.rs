@@ -1008,15 +1008,15 @@ async fn commit_detects_dotfile_under_untracked_nondot_dir() {
 
 #[tokio::test]
 async fn commit_detects_nested_dotdir_component() {
-    // `.claude/CLAUDE.md`: dot component is not the basename but a
+    // `.config/tool.toml`: dot component is not the basename but a
     // path segment. is_dotfile_path must still catch it.
     let tmp = tempfile::tempdir().unwrap();
     init_temp_repo(tmp.path());
     let session = make_session(tmp.path());
     let git = GitModule::new(session);
 
-    std::fs::create_dir_all(tmp.path().join(".claude")).unwrap();
-    std::fs::write(tmp.path().join(".claude/CLAUDE.md"), "hi\n").unwrap();
+    std::fs::create_dir_all(tmp.path().join(".config")).unwrap();
+    std::fs::write(tmp.path().join(".config/tool.toml"), "hi\n").unwrap();
     std::fs::write(tmp.path().join("safe.txt"), "safe\n").unwrap();
 
     let commit = git
@@ -1035,8 +1035,8 @@ async fn commit_detects_nested_dotdir_component() {
         commit
             .dotfile_skipped
             .iter()
-            .any(|p| p.starts_with(".claude/")),
-        "expected .claude/... in skipped, got {:?}",
+            .any(|p| p.starts_with(".config/")),
+        "expected .config/... in skipped, got {:?}",
         commit.dotfile_skipped
     );
 }

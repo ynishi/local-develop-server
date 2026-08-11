@@ -204,7 +204,7 @@ pub struct CommitOutput {
     pub message: String,
     pub files_changed: usize,
     /// Dotfile / dot-dir paths that surfaced during this commit call. Every
-    /// change with a `.`-prefixed path component (`.env`, `.claude/CLAUDE.md`,
+    /// change with a `.`-prefixed path component (`.env`,
     /// `.github/workflows/ci.yml`, `foo/.hidden`) lands here so pre-publish
     /// eyeballing can catch unintended edits. Tracked entries were still
     /// committed; untracked-not-in-gitignore entries were skipped (see
