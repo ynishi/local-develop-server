@@ -12,6 +12,20 @@ use crate::create::PAYLOAD_PREFIX;
 use crate::error::PackError;
 use crate::manifest::{MANIFEST_NAME, Manifest, PACK_FORMAT_VERSION};
 
+/// How much manifest this build will read into memory.
+///
+/// The manifest is decompressed before it can be parsed, and an archive decides
+/// both how much it declares and how much it actually carries. Compressible
+/// filler expands enormously — a few megabytes of zeroes become gigabytes — so
+/// reading "the whole first entry" hands the archive control of how much memory
+/// the process allocates, and one small file can end it.
+///
+/// The manifest records what was left behind rather than every packed file:
+/// skipped secrets and caches, symlinks, worktrees. Sixty-four mebibytes is far
+/// past what a real project produces — a hundred thousand records is a few tens
+/// of megabytes — and still a bound.
+const MAX_MANIFEST_BYTES: u64 = 64 * 1024 * 1024;
+
 /// Read the manifest from a pack.
 ///
 /// # Arguments
@@ -26,6 +40,9 @@ use crate::manifest::{MANIFEST_NAME, Manifest, PACK_FORMAT_VERSION};
 ///
 /// - [`PackError::Io`] if the file cannot be read or is not a valid zstd/tar stream.
 /// - [`PackError::MissingManifest`] if the archive contains no `pack.toml`.
+/// - [`PackError::ManifestTooLarge`] if the manifest exceeds
+///   [`MAX_MANIFEST_BYTES`] — the archive is read before it is trusted, so how
+///   much of it reaches memory cannot be the archive's decision.
 /// - [`PackError::ManifestParse`] if the manifest is malformed.
 pub fn inspect(archive: &Path) -> Result<Manifest, PackError> {
     let file = File::open(archive)?;
@@ -40,7 +57,17 @@ pub fn inspect(archive: &Path) -> Result<Manifest, PackError> {
         let path = entry.path()?.to_path_buf();
         if path.as_os_str() == MANIFEST_NAME {
             let mut text = String::new();
-            entry.read_to_string(&mut text)?;
+            // One byte past the limit, so an over-long manifest is detected by
+            // having read it rather than by believing the declared size.
+            let read = entry
+                .by_ref()
+                .take(MAX_MANIFEST_BYTES + 1)
+                .read_to_string(&mut text)? as u64;
+            if read > MAX_MANIFEST_BYTES {
+                return Err(PackError::ManifestTooLarge {
+                    limit: MAX_MANIFEST_BYTES,
+                });
+            }
             return Ok(Manifest::from_toml(&text)?);
         }
     }
@@ -73,25 +100,76 @@ pub fn verify(archive: &Path) -> Result<Manifest, PackError> {
 ///
 /// # Errors
 ///
-/// [`PackError::Io`] if the archive cannot be read.
+/// - [`PackError::UnusableArchiveEntry`] if the archive carries an entry a
+///   restore would refuse; listing a pack that cannot be restored would
+///   describe an operation that is not going to happen.
+/// - [`PackError::Io`] if the archive cannot be read.
 pub fn list_payload_paths(archive: &Path) -> Result<Vec<String>, PackError> {
+    Ok(scan_payload(archive)?.paths)
+}
+
+/// What one decompression pass over the payload found.
+pub(crate) struct Payload {
+    /// Every payload path, relative to the project root.
+    pub(crate) paths: Vec<String>,
+    /// Hard links the archive carries, as `(path, target)` pairs. Restore does
+    /// not create these, so a prediction has to name them too.
+    pub(crate) hard_links: Vec<(String, String)>,
+}
+
+/// Walk the payload once, applying the same entry-type policy the restore uses.
+///
+/// The policy lives in [`crate::restore::entry_plan`] so that a prediction and
+/// the restore it predicts cannot drift apart: an entry type the restore would
+/// refuse fails here as well, and one it would decline to create is collected
+/// rather than counted as a file that is going to appear.
+///
+/// # Errors
+///
+/// - [`PackError::UnusableArchiveEntry`] for an entry the restore would refuse.
+/// - [`PackError::Io`] if the archive cannot be read.
+pub(crate) fn scan_payload(archive: &Path) -> Result<Payload, PackError> {
+    use crate::restore::EntryPlan;
+
     let file = File::open(archive)?;
     let decoder = zstd::stream::Decoder::new(file)?;
     let mut tar = tar::Archive::new(decoder);
 
     let prefix = format!("{PAYLOAD_PREFIX}/");
-    let mut out = Vec::new();
+    let mut payload = Payload {
+        paths: Vec::new(),
+        hard_links: Vec::new(),
+    };
     for entry in tar.entries()? {
         let entry = entry?;
         let path = entry.path()?;
         let s = path.to_string_lossy();
-        if let Some(rest) = s.strip_prefix(&prefix)
-            && !rest.is_empty()
-        {
-            out.push(rest.trim_end_matches('/').to_string());
+        let Some(rest) = s.strip_prefix(&prefix) else {
+            continue;
+        };
+        if rest.is_empty() {
+            continue;
+        }
+        let rel = rest.trim_end_matches('/').to_string();
+
+        match crate::restore::entry_plan(entry.header().entry_type()) {
+            EntryPlan::Extract => payload.paths.push(rel),
+            EntryPlan::HardLink => {
+                let target = entry
+                    .link_name()?
+                    .map(|t| t.display().to_string())
+                    .unwrap_or_default();
+                payload.hard_links.push((rel, target));
+            }
+            EntryPlan::Refuse(kind) => {
+                return Err(PackError::UnusableArchiveEntry {
+                    path: rel,
+                    kind: kind.to_string(),
+                });
+            }
         }
     }
-    Ok(out)
+    Ok(payload)
 }
 
 #[cfg(test)]

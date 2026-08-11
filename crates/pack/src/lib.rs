@@ -50,6 +50,7 @@
 //! # Ok::<(), lds_pack::PackError>(())
 //! ```
 
+mod contained;
 pub mod create;
 pub mod error;
 pub mod inspect;
@@ -65,6 +66,6 @@ pub use manifest::{
     CacheRecord, KeptOverSecret, MANIFEST_NAME, Manifest, PACK_FORMAT_VERSION, SkipRecord, Stats,
     SymlinkRecord, WorktreeOrigin, WorktreeRecord,
 };
-pub use restore::{RestoreOptions, RestoreReport, WorktreeConflict, restore};
+pub use restore::{HardLinkRecord, RestoreOptions, RestoreReport, WorktreeConflict, restore};
 pub use rules::{DEFAULT_CACHE_DIRS, DEFAULT_KEEP, DEFAULT_SECRET_GLOBS, PackRules, RuleOverrides};
 pub use scan::{Scan, scan, scan_with};

@@ -526,6 +526,25 @@ fn print_restore_attention(report: &RestoreReport) {
         println!("    nothing was written there; move the occupant or restore elsewhere");
     }
 
+    if !report.hard_links_not_created.is_empty() {
+        println!(
+            "  {} hard link(s) {} created — a hard link names a file rather than carrying one, so what it points at is decided here, not by the pack:",
+            report.hard_links_not_created.len(),
+            if report.dry_run {
+                "would not be"
+            } else {
+                "were not"
+            }
+        );
+        for h in &report.hard_links_not_created {
+            println!("    {} -> {}", h.path, h.target);
+            println!("      {}", h.command);
+        }
+        println!(
+            "    look at each target first; run the command yourself if it is what you expect"
+        );
+    }
+
     if let Some(parent) = &report.missing_worktree_parent {
         println!("  this pack is a worktree; its repository is not beside it here");
         println!("    it was at {parent}; restore that pack and the wiring completes");

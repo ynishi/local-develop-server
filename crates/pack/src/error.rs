@@ -39,6 +39,18 @@ pub enum PackError {
     #[error("manifest parse error: {0}")]
     ManifestParse(#[from] toml::de::Error),
 
+    /// The manifest is larger than this build will read into memory.
+    ///
+    /// Reading is what happens before the archive has been judged, so the
+    /// archive cannot be the one deciding how much memory that takes.
+    /// Compression makes the difference enormous: a small file expands into as
+    /// much filler as its author cares to write.
+    #[error("manifest is larger than the {limit} byte limit; refusing the archive")]
+    ManifestTooLarge {
+        /// The largest manifest this build reads, in bytes.
+        limit: u64,
+    },
+
     /// The archive did not begin with a `pack.toml` entry.
     #[error("archive has no {name} entry — not an lds pack?", name = crate::manifest::MANIFEST_NAME)]
     MissingManifest,
@@ -64,6 +76,41 @@ pub enum PackError {
     /// the restore stops rather than extracting the rest of it.
     #[error("archive entry '{0}' escapes the restore destination; refusing the archive")]
     EscapingArchivePath(String),
+
+    /// A manifest field names a path that would land outside the restore
+    /// destination.
+    ///
+    /// The manifest travels in the archive, so its paths are the archive's
+    /// claims about the project just as much as the entry names are — worktree
+    /// locations and symlink paths are all joined onto the destination. Checked
+    /// with the same rule and refused the same way; the field is named because
+    /// the value alone does not say which claim carried it.
+    #[error(
+        "manifest field '{field}' names '{value}', which escapes the restore destination; refusing the archive"
+    )]
+    EscapingManifestPath {
+        /// The manifest key that carried the path.
+        field: String,
+        /// The path as the manifest wrote it.
+        value: String,
+    },
+
+    /// An archive entry is of a type a restore will not materialize.
+    ///
+    /// This crate's writer produces directories, regular files and symlinks and
+    /// nothing else, so any other type came from another producer. Device
+    /// nodes and fifos are not project content, and a hard link names a file
+    /// the pack does not carry — see [`crate::restore::HardLinkRecord`] for why
+    /// that one is reported rather than followed.
+    #[error(
+        "archive entry '{path}' is a {kind}, which a pack never contains; refusing the archive"
+    )]
+    UnusableArchiveEntry {
+        /// The entry as the archive names it.
+        path: String,
+        /// What it is, in the words the report uses.
+        kind: String,
+    },
 
     /// An archive entry would be written through a symlink, which would land
     /// it outside the restore destination.

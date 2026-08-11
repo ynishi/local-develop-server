@@ -2528,15 +2528,21 @@ reported (`missing_worktrees`, or `missing_worktree_parent` when the pack is its
 rather than guessed at, and a counterpart path occupied by something else — an unrelated repository, \
 or a same-named worktree of a different one — is reported in `conflicting_worktrees` and left \
 untouched. Refuses an existing destination unless `force`; `force` overwrites and never deletes \
-files the pack does not carry. A crafted archive is refused outright: an entry that names a path \
-outside the destination, or routes a write through a symlink the archive planted, aborts the \
-restore with an error instead of being written. Set `dry_run` to predict instead: how many entries \
-would be written, which existing files would be replaced, which would remain untouched, which \
-symlinks would dangle here, and which worktree pointers would be rewritten — an existing \
-destination is not an error during a dry run. Returns JSON {dest, dry_run, entries_written, \
-destination_exists, would_overwrite, would_remain, rewritten_worktrees, missing_worktrees, \
-conflicting_worktrees, missing_worktree_parent, dangling_symlinks, \
-link_reports_suppressed, regenerable_caches, secrets_not_carried, needs_attention} — \
+files the pack does not carry. A crafted archive is refused outright, and refused before the first \
+byte is written: an entry or a manifest field that names a path outside the destination, a write \
+routed through a symlink the archive planted, or an entry of a type a pack never contains (a device \
+node, a fifo) aborts with an error instead of being written. A hard link entry is the one thing \
+neither written nor refused — its target is a file on this machine that the pack does not carry, so \
+it is listed in `hard_links_not_created` with the `ln` command that would create it, for the \
+operator to run once they have looked at what the target is. Set `dry_run` to predict instead: how \
+many entries would be written, which existing files would be replaced, which would remain \
+untouched, which symlinks would dangle here, which worktree pointers would be rewritten, and which \
+hard links would be left uncreated — an existing destination is not an error during a dry run, and \
+an archive a restore would refuse is refused here too. Returns JSON {dest, dry_run, \
+entries_written, destination_exists, would_overwrite, would_remain, rewritten_worktrees, \
+missing_worktrees, conflicting_worktrees, missing_worktree_parent, dangling_symlinks, \
+link_reports_suppressed, regenerable_caches, secrets_not_carried, hard_links_not_created, \
+needs_attention} — \
 `needs_attention` is the single flag to branch on, true when any of the report's follow-up lists is \
 non-empty. `link_reports_suppressed` is informational and does not set it: it names the \
 `no_link_report` rules in force when the pack was written, so an empty `dangling_symlinks` is not \
@@ -2573,6 +2579,7 @@ misread as \"every link here is fine\" when it means \"every link I was shown is
             "link_reports_suppressed": report.link_reports_suppressed,
             "regenerable_caches": report.regenerable_caches,
             "secrets_not_carried": report.secrets_not_carried,
+            "hard_links_not_created": report.hard_links_not_created,
             "needs_attention": report.needs_attention(),
         }))
     }
@@ -3375,6 +3382,24 @@ repository — is reported in `conflicting_worktrees` and left untouched:
 wiring writes both pointer files, and one of them would overwrite the
 occupant's, destroying one project to repair another.
 
+## What restore refuses, and the one thing it defers
+
+A pack is normally written by this crate, but an archive is an untrusted input
+the moment it arrives from elsewhere. Everything it says about where things go
+— entry names *and* manifest fields, which are the same claim made twice — is
+checked before the first byte is written, so an archive that names a path
+outside the destination is refused with the destination still empty. So is a
+write routed through a symlink the archive planted, and so is an entry of a type
+a pack never contains: a device node, a fifo, an unrecognized type that `tar`
+would otherwise write out as an ordinary file.
+
+A hard link is neither written nor refused. It names a file the pack does not
+carry, so the target is whatever happens to be at that path on the machine
+restoring it — creating the link would publish that file into the restored tree
+under a name the archive chose. It is listed in `hard_links_not_created`, with
+the `ln` command that would create it. Look at the target, then run the command
+if it is what you expect.
+
 ## Fields worth acting on
 
 | field | on | meaning |
@@ -3392,6 +3417,7 @@ occupant's, destroying one project to repair another.
 | `dangling_symlinks` | restore | restored links whose targets do not exist here |
 | `link_reports_suppressed` | restore | the pack's `no_link_report` rules; links there were restored but never checked for dangling |
 | `secrets_not_carried` | restore | move these out of band |
+| `hard_links_not_created` | restore | links the archive named and restore did not create; each carries the `ln` command that would, once you have looked at the target |
 
 `needs_attention` is true when any of the above needs follow-up.
 

@@ -17,16 +17,30 @@
 //! Restoring over an existing directory requires `force`, and that flag means
 //! *overwrite*, not *wipe*: files already present that the pack does not carry
 //! survive the restore. Nothing is deleted on the operator's behalf.
+//!
+//! One thing is deliberately *not* done: a hard link entry is reported and left
+//! uncreated, with the command that would create it. See [`HardLinkRecord`].
+//!
+//! Everything the archive says about where things go is checked before any of
+//! it is joined onto the destination. Entry names and manifest paths are the
+//! same kind of claim, and both go through `Contained`, which cannot hold a
+//! path that leaves the destination. What may be written is then decided by one
+//! exhaustive match per question — [`EntryPlan`] for an entry's type, `Wiring`
+//! for a worktree's layout — so a shape nobody has thought about yet is refused
+//! rather than falling through to a write.
 
 use std::collections::{BTreeSet, HashSet};
 use std::fs::File;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
+use crate::contained::Contained;
 use crate::create::PAYLOAD_PREFIX;
 use crate::error::PackError;
-use crate::manifest::{CacheRecord, Manifest, SkipRecord, SymlinkRecord};
+use crate::manifest::{
+    CacheRecord, Manifest, SkipRecord, SymlinkRecord, WorktreeOrigin, WorktreeRecord,
+};
 use crate::scan::canonicalize_or;
 
 /// Inputs for [`restore`].
@@ -144,6 +158,92 @@ pub struct RestoreReport {
     pub regenerable_caches: Vec<CacheRecord>,
     /// Secrets the pack deliberately did not carry; move them out of band.
     pub secrets_not_carried: Vec<SkipRecord>,
+    /// Hard links the archive carried, which this restore did not create.
+    ///
+    /// Each carries the command that would create it. Deciding whether to run
+    /// it is the operator's, which is the whole reason the entry is listed
+    /// here rather than acted on — see [`HardLinkRecord`].
+    pub hard_links_not_created: Vec<HardLinkRecord>,
+}
+
+/// A hard link the archive carried and the restore did not create.
+///
+/// A hard link is a second name for a file that already exists, and the archive
+/// says which one. That target is not carried in the pack and not checked
+/// against it — it names something on the machine the restore is landing on. A
+/// crafted archive can therefore name any file the operator can read, and
+/// creating the link would publish that file's contents into the restored tree
+/// under a name of the archive's choosing.
+///
+/// Nothing this crate writes produces one: the scan stores every file as its
+/// own regular entry, so two names for one inode come back as two files. A hard
+/// link entry is thus always from another producer, and there is no reading of
+/// it that makes creating it automatically the right thing to do.
+///
+/// It is also not passed over in silence. Skipping quietly would leave the
+/// restored tree missing a path the archive listed, with nothing to say why.
+/// The record names the link, the target as the archive wrote it, and a command
+/// that creates it — to be run once the operator has looked at what the target
+/// actually is.
+#[derive(Debug, Clone, Serialize)]
+pub struct HardLinkRecord {
+    /// Path of the link, relative to the restored root.
+    pub path: String,
+    /// The file the archive says the link should point at, exactly as written.
+    ///
+    /// Two shapes occur. A target inside the payload is a link to another file
+    /// in this same pack, which is what a tar writer produces for a project
+    /// that contains hard links; it reads as an archive-relative path like
+    /// `payload/b.txt`. Anything else names a file on the machine doing the
+    /// restore, and is absolute and pointing anywhere if the archive says so.
+    pub target: String,
+    /// A POSIX `ln` invocation that would create the link, both paths quoted.
+    ///
+    /// A target inside the payload is resolved to where that entry actually
+    /// landed, so the command works from any directory. One outside it is used
+    /// as written, because that is the only thing it can mean.
+    pub command: String,
+}
+
+impl HardLinkRecord {
+    /// Describe one hard link entry against the destination it would land in.
+    fn new(dest: &Path, rel: &Path, target: &str) -> Self {
+        let at = dest.join(rel);
+        Self {
+            path: rel.display().to_string(),
+            target: target.to_string(),
+            command: format!(
+                "ln {} {}",
+                shell_quote(&resolve_link_target(dest, target)),
+                shell_quote(&at.display().to_string())
+            ),
+        }
+    }
+}
+
+/// Where a hard link's target actually is, once the restore has run.
+///
+/// A target naming another payload entry is archive-relative, so quoting it
+/// into a command would aim it at whatever the operator's working directory
+/// happens to hold. It is resolved against the destination instead. A target
+/// that is not in the payload, or one that would leave the destination, is
+/// returned as written: it refers to something outside this pack, and rewriting
+/// it would be inventing a claim the archive did not make.
+fn resolve_link_target(dest: &Path, target: &str) -> String {
+    Path::new(target)
+        .strip_prefix(PAYLOAD_PREFIX)
+        .ok()
+        .and_then(|rel| Contained::entry(rel).ok())
+        .map_or_else(
+            || target.to_string(),
+            |rel| rel.join_onto(dest).display().to_string(),
+        )
+}
+
+/// Wrap a path for a POSIX shell, so a name with a space or a quote in it
+/// survives being pasted into one.
+fn shell_quote(raw: &str) -> String {
+    format!("'{}'", raw.replace('\'', r"'\''"))
 }
 
 /// A worktree pairing that was found occupied by something other than this
@@ -178,6 +278,7 @@ impl RestoreReport {
             || !self.secrets_not_carried.is_empty()
             || !self.would_overwrite.is_empty()
             || !self.would_remain.is_empty()
+            || !self.hard_links_not_created.is_empty()
     }
 }
 
@@ -197,23 +298,29 @@ impl RestoreReport {
 ///
 /// - [`PackError::DestinationExists`] if `dest` exists and `force` is unset.
 /// - [`PackError::UnsupportedFormat`] if the pack is newer than this build.
+/// - [`PackError::EscapingArchivePath`], [`PackError::EscapingManifestPath`],
+///   [`PackError::WriteThroughSymlink`] or [`PackError::UnusableArchiveEntry`]
+///   if the archive is crafted. The manifest is checked before the first byte
+///   is written, so an archive that lies about where its worktrees go is
+///   refused with the destination still empty.
 /// - [`PackError::Io`] on read or write failure.
 pub fn restore(opts: &RestoreOptions) -> Result<RestoreReport, PackError> {
     let manifest = crate::inspect::verify(&opts.archive)?;
+    let checked = check_archive_paths(&manifest)?;
     let destination_exists = opts.dest.exists();
 
     if opts.dry_run {
-        return predict(opts, manifest, destination_exists);
+        return predict(opts, &checked, &manifest, destination_exists);
     }
 
     if destination_exists && !opts.force {
         return Err(PackError::DestinationExists(opts.dest.clone()));
     }
     std::fs::create_dir_all(&opts.dest)?;
-    let dest = std::fs::canonicalize(&opts.dest).unwrap_or_else(|_| opts.dest.clone());
+    let dest = resolve_dest(&opts.dest);
 
-    let entries_written = unpack_payload(&opts.archive, &dest)?;
-    let plan = plan_worktree_pointers(&dest, &manifest, true);
+    let (entries_written, hard_links_not_created) = unpack_payload(&opts.archive, &dest)?;
+    let plan = plan_worktree_pointers(&dest, &checked, &manifest, true);
     let rewritten_worktrees = apply_worktree_plan(&plan)?;
 
     let dangling_symlinks = manifest
@@ -240,6 +347,7 @@ pub fn restore(opts: &RestoreOptions) -> Result<RestoreReport, PackError> {
         link_reports_suppressed,
         regenerable_caches: manifest.skipped_cache.clone(),
         secrets_not_carried: manifest.skipped_secret.clone(),
+        hard_links_not_created,
         manifest,
     })
 }
@@ -250,14 +358,24 @@ pub fn restore(opts: &RestoreOptions) -> Result<RestoreReport, PackError> {
 /// destination, so the prediction is about *this* machine — a symlink is
 /// reported as dangling because its target is absent here, not because it was
 /// absent where the pack was made.
+///
+/// The archive's paths were checked by the caller, before this and before a
+/// real restore alike, so a dry run refuses exactly the archives a restore
+/// would refuse rather than describing an operation that would abort.
 fn predict(
     opts: &RestoreOptions,
-    manifest: Manifest,
+    checked: &Checked<'_>,
+    manifest: &Manifest,
     destination_exists: bool,
 ) -> Result<RestoreReport, PackError> {
-    let dest = std::fs::canonicalize(&opts.dest).unwrap_or_else(|_| opts.dest.clone());
-    let payload = crate::inspect::list_payload_paths(&opts.archive)?;
-    let payload_set: BTreeSet<&str> = payload.iter().map(|s| s.as_str()).collect();
+    let dest = resolve_dest(&opts.dest);
+    let payload = crate::inspect::scan_payload(&opts.archive)?;
+    let payload_set: BTreeSet<&str> = payload.paths.iter().map(|s| s.as_str()).collect();
+    let hard_links_not_created = payload
+        .hard_links
+        .iter()
+        .map(|(rel, target)| HardLinkRecord::new(&dest, Path::new(rel), target))
+        .collect();
 
     let (would_overwrite, would_remain) = if destination_exists {
         compare_destination(&dest, &payload_set)
@@ -265,7 +383,7 @@ fn predict(
         (Vec::new(), Vec::new())
     };
 
-    let plan = plan_worktree_pointers(&dest, &manifest, false);
+    let plan = plan_worktree_pointers(&dest, checked, manifest, false);
     let rewritten_worktrees = plan.pairs.iter().map(|p| p.name.clone()).collect();
 
     let dangling_symlinks = manifest
@@ -280,7 +398,7 @@ fn predict(
     Ok(RestoreReport {
         dest,
         dry_run: true,
-        entries_written: payload.len() as u64,
+        entries_written: payload.paths.len() as u64,
         destination_exists,
         would_overwrite,
         would_remain,
@@ -292,8 +410,46 @@ fn predict(
         link_reports_suppressed,
         regenerable_caches: manifest.skipped_cache.clone(),
         secrets_not_carried: manifest.skipped_secret.clone(),
-        manifest,
+        hard_links_not_created,
+        manifest: manifest.clone(),
     })
+}
+
+/// Settle on the destination path, whether or not it exists yet.
+///
+/// A restore creates the directory and then canonicalizes it, which resolves
+/// every symlink on the way and makes the path absolute. A dry run must not
+/// create anything, so it used to canonicalize a directory that was not there,
+/// fail, and keep the path as the caller typed it. The two then answered
+/// different questions: a relative destination, or one under a symlinked
+/// parent, put the prediction's idea of "beside the root" somewhere the restore
+/// would never look, and the worktree wiring it forecast was not the wiring that
+/// would happen.
+///
+/// So resolve as far as the filesystem allows and no further: canonicalize the
+/// nearest ancestor that exists, then re-attach the part that does not. Those
+/// missing components can only become real directories, never symlinks, so this
+/// is the same path a restore arrives at after creating them — reached without
+/// creating anything.
+fn resolve_dest(dest: &Path) -> PathBuf {
+    let absolute = std::path::absolute(dest).unwrap_or_else(|_| dest.to_path_buf());
+
+    let mut missing = Vec::new();
+    let mut cursor = absolute.as_path();
+    loop {
+        if let Ok(existing) = std::fs::canonicalize(cursor) {
+            let mut resolved = existing;
+            resolved.extend(missing.iter().rev());
+            return resolved;
+        }
+        // Nothing exists all the way up, or the path ran out of names to
+        // strip: the lexically absolute form is the best answer available.
+        let (Some(parent), Some(name)) = (cursor.parent(), cursor.file_name()) else {
+            return absolute;
+        };
+        missing.push(name.to_os_string());
+        cursor = parent;
+    }
 }
 
 /// Split the destination's existing files into "would be replaced" and
@@ -367,8 +523,50 @@ fn would_dangle(dest: &Path, record: &SymlinkRecord, payload: &BTreeSet<&str>) -
     !dest.join(&resolved).exists()
 }
 
+/// What a restore does with an archive entry, decided by its type alone.
+///
+/// This crate's writer emits three shapes — directories, regular files,
+/// symlinks — so every other type in `tar::EntryType` came from another
+/// producer. Naming the decision as an enum puts it in one exhaustive match:
+/// the type is `#[non_exhaustive]`, and tar's own default for a type it does
+/// not recognize is to write it out as a regular file, which turns "I do not
+/// know what this is" into a write. Here an unrecognized type has to be given
+/// a case before it can reach the filesystem.
+pub(crate) enum EntryPlan {
+    /// Written out as it stands.
+    Extract,
+    /// Reported and not created — see [`HardLinkRecord`].
+    HardLink,
+    /// Refused, carrying the words the error and the report use for it.
+    Refuse(&'static str),
+}
+
+/// Classify one archive entry.
+pub(crate) fn entry_plan(kind: tar::EntryType) -> EntryPlan {
+    use tar::EntryType as T;
+
+    match kind {
+        // `Continuous` is a high-performance variant of a regular file, and
+        // every reader treats it as one.
+        T::Regular | T::Continuous | T::Directory | T::Symlink => EntryPlan::Extract,
+        T::Link => EntryPlan::HardLink,
+        T::Char => EntryPlan::Refuse("character device"),
+        T::Block => EntryPlan::Refuse("block device"),
+        T::Fifo => EntryPlan::Refuse("named pipe"),
+        T::GNUSparse => EntryPlan::Refuse("sparse file"),
+        // tar folds these into the entry they describe and never yields one on
+        // its own, so reaching here means a malformed header.
+        T::GNULongName | T::GNULongLink | T::XHeader | T::XGlobalHeader => {
+            EntryPlan::Refuse("stray extension header")
+        }
+        _ => EntryPlan::Refuse("entry of an unrecognized type"),
+    }
+}
+
 /// Extract every `payload/` entry into `dest`, stripping the prefix.
-fn unpack_payload(archive: &Path, dest: &Path) -> Result<u64, PackError> {
+///
+/// Returns the number of entries written and the hard links that were not.
+fn unpack_payload(archive: &Path, dest: &Path) -> Result<(u64, Vec<HardLinkRecord>), PackError> {
     let file = File::open(archive)?;
     let decoder = zstd::stream::Decoder::new(file)?;
     let mut tar = tar::Archive::new(decoder);
@@ -378,6 +576,7 @@ fn unpack_payload(archive: &Path, dest: &Path) -> Result<u64, PackError> {
     let mut real_dirs: HashSet<PathBuf> = HashSet::new();
 
     let mut written = 0u64;
+    let mut hard_links = Vec::new();
     for entry in tar.entries()? {
         let mut entry = entry?;
         let path = entry.path()?.to_path_buf();
@@ -392,20 +591,40 @@ fn unpack_payload(archive: &Path, dest: &Path) -> Result<u64, PackError> {
         // is normally produced by this same crate, but an archive is an
         // untrusted input the moment it arrives from elsewhere, and one that
         // carries such an entry is not trustworthy in what remains either.
-        if rel
-            .components()
-            .any(|c| matches!(c, Component::ParentDir | Component::RootDir))
-        {
-            return Err(PackError::EscapingArchivePath(rel.display().to_string()));
+        let rel = Contained::entry(rel)?;
+
+        match entry_plan(entry.header().entry_type()) {
+            EntryPlan::Extract => {}
+            EntryPlan::HardLink => {
+                // The target names a file on *this* machine, not one the pack
+                // carries, so there is nothing to check it against and no
+                // reading of it that makes linking automatically right.
+                let target = entry.link_name()?.map(|t| t.display().to_string());
+                let Some(target) = target.filter(|t| !t.is_empty()) else {
+                    return Err(PackError::UnusableArchiveEntry {
+                        path: rel.as_path().display().to_string(),
+                        kind: "hard link naming no target".to_string(),
+                    });
+                };
+                hard_links.push(HardLinkRecord::new(dest, rel.as_path(), &target));
+                continue;
+            }
+            EntryPlan::Refuse(kind) => {
+                return Err(PackError::UnusableArchiveEntry {
+                    path: rel.as_path().display().to_string(),
+                    kind: kind.to_string(),
+                });
+            }
         }
+
         // The same escape, routed indirectly: an earlier entry plants a
         // symlink and a later one names a path through it, which would land
         // the write wherever the link points. Legitimate packs cannot produce
         // this shape — the scan never descends into a symlinked directory —
         // so it too refuses the archive.
-        ensure_real_ancestors(dest, rel, &mut real_dirs)?;
+        ensure_real_ancestors(dest, rel.as_path(), &mut real_dirs)?;
 
-        let out = dest.join(rel);
+        let out = rel.join_onto(dest);
         if let Some(parent) = out.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -417,7 +636,7 @@ fn unpack_payload(archive: &Path, dest: &Path) -> Result<u64, PackError> {
         written += 1;
     }
 
-    Ok(written)
+    Ok((written, hard_links))
 }
 
 /// Refuse an entry whose ancestors include a symlink.
@@ -495,6 +714,106 @@ struct WorktreePlan {
     missing_parent: Option<String>,
 }
 
+/// The archive's claims about where things go, checked before any of them is
+/// joined onto the destination.
+///
+/// Built once, at the top of both a restore and a dry run, so the two cannot
+/// disagree about which archives are acceptable — and built *before* the first
+/// byte is written, so an archive that lies is refused with the destination
+/// still untouched.
+struct Checked<'a> {
+    /// Registered worktrees, names and locations checked.
+    worktrees: Vec<CheckedWorktree<'a>>,
+    /// The repository this pack belongs to, when the pack is a worktree.
+    origin: Option<CheckedOrigin<'a>>,
+}
+
+/// A registered worktree whose archive-supplied paths have been checked.
+struct CheckedWorktree<'a> {
+    /// Directory name under `.git/worktrees/`.
+    name: Contained,
+    /// Location under the root, when the checkout travels in this pack.
+    ///
+    /// `None` means the checkout is elsewhere on the machine; nothing is joined
+    /// onto the destination for it, and it is looked for beside the new root
+    /// instead.
+    path: Option<Contained>,
+    /// The record as written, for the fields that are not destination paths.
+    record: &'a WorktreeRecord,
+}
+
+/// The repository a packed worktree belongs to, its name checked.
+struct CheckedOrigin<'a> {
+    /// This worktree's name under the repository's `.git/worktrees/`.
+    name: Contained,
+    /// The record as written.
+    origin: &'a WorktreeOrigin,
+}
+
+/// Check every path the archive supplies for a place under the destination.
+///
+/// The payload's entry names were always checked; the manifest's were not, and
+/// they are the same kind of claim — `dest.join(record.path)` writes wherever
+/// `record.path` says, and `Path::join` hands the whole result to an absolute
+/// one. Checking them here rather than at each use is what makes the check
+/// impossible to skip: the wiring code below is handed `Contained` values and
+/// has no access to the raw strings.
+///
+/// # Errors
+///
+/// [`PackError::EscapingManifestPath`] naming the field that carried the path.
+fn check_archive_paths(manifest: &Manifest) -> Result<Checked<'_>, PackError> {
+    let mut worktrees = Vec::with_capacity(manifest.worktrees.len());
+    for record in &manifest.worktrees {
+        worktrees.push(CheckedWorktree {
+            name: Contained::name("worktrees[].name", &record.name)?,
+            path: record
+                .path
+                .as_deref()
+                .map(|raw| Contained::path("worktrees[].path", raw))
+                .transpose()?,
+            record,
+        });
+    }
+
+    let origin = match &manifest.worktree_of {
+        Some(origin) => Some(CheckedOrigin {
+            name: Contained::name("worktree_of.name", &origin.name)?,
+            origin,
+        }),
+        None => None,
+    };
+
+    // Symlink paths are joined onto the destination too — the report asks of
+    // each one whether it landed dangling, which is a question about a path
+    // inside the restored tree and nowhere else.
+    for link in &manifest.symlinks {
+        Contained::path("symlinks[].path", &link.path)?;
+    }
+
+    Ok(Checked { worktrees, origin })
+}
+
+/// What the wiring decision came to for one worktree.
+///
+/// The three layouts used to be three inline branches, and the one that
+/// believed both halves were already inside the destination wrote without
+/// checking anything — an assumption nothing enforced, since the location came
+/// from the manifest. Naming the outcomes makes every branch answer the same
+/// question and makes both callers match exhaustively, so a layout added later
+/// cannot reach [`apply_worktree_plan`] without a case being written for it.
+enum Wiring {
+    /// Both pointer files may be written.
+    Wire(PointerPair),
+    /// The counterpart's place holds something that is not this worktree's
+    /// other half. Nothing is written.
+    Occupied(WorktreeConflict),
+    /// The counterpart is not on this machine.
+    Absent,
+    /// Nothing to repair here.
+    Nothing,
+}
+
 /// Decide what worktree wiring this restore can repair, writing nothing.
 ///
 /// Three layouts occur, and all three are decided from the manifest plus what
@@ -514,128 +833,170 @@ struct WorktreePlan {
 /// Cases 2 and 3 make the operation order-independent: whichever pack is
 /// restored second finds the first and completes the wiring, and re-restoring
 /// with `force` repairs a pair that was incomplete at the time.
-fn plan_worktree_pointers(dest: &Path, manifest: &Manifest, unpacked: bool) -> WorktreePlan {
+fn plan_worktree_pointers(
+    dest: &Path,
+    checked: &Checked<'_>,
+    manifest: &Manifest,
+    unpacked: bool,
+) -> WorktreePlan {
     let mut plan = WorktreePlan::default();
 
-    for record in &manifest.worktrees {
-        let admin = dest.join(".git").join("worktrees").join(&record.name);
-
-        if let Some(rel) = record.path.as_deref() {
-            // Case 1: both halves are in this pack.
-            let worktree_root = dest.join(rel);
-            if unpacked && (!admin.is_dir() || !worktree_root.is_dir()) {
-                // Neither made it into the payload after all; nothing to repair.
-                continue;
-            }
-            plan.pairs.push(PointerPair {
-                name: record.name.clone(),
-                admin,
-                dot_git: worktree_root.join(".git"),
-            });
-            continue;
-        }
-
-        // Case 2: the checkout is not in this pack. It may still be on this
-        // machine — restored from its own pack, or never moved at all.
-        let Some(candidate) = relocate_beside(&manifest.source_root, dest, &record.source_path)
-        else {
-            plan.missing.push(record.name.clone());
-            continue;
-        };
-        let dot_git = candidate.join(".git");
-        if !dot_git.exists() || (unpacked && !admin.is_dir()) {
-            plan.missing.push(record.name.clone());
-            continue;
-        }
-        // Occupancy alone is not identity: whatever sits at the candidate path
-        // has to be confirmed as *this* worktree's checkout before either
-        // pointer is written, or the wiring would break someone else's project
-        // to repair this one.
-        //
-        // A `.git` *directory* there is an independent repository. A `.git`
-        // file is a worktree checkout of *some* repository — ours only if its
-        // pointer names this worktree's admin directory, at the old location
-        // (not yet wired) or the new one (already wired; re-wiring is
-        // idempotent).
-        if dot_git.is_dir() {
-            plan.conflicted.push(WorktreeConflict {
-                name: record.name.clone(),
-                path: candidate.display().to_string(),
-                found: "an independent repository — its `.git` is a directory".to_string(),
-            });
-            continue;
-        }
-        let old_admin = Path::new(&manifest.source_root)
-            .join(".git")
-            .join("worktrees")
-            .join(&record.name);
-        match pointer_target(&dot_git) {
-            Some(claimed) if same_place(&claimed, &old_admin) || same_place(&claimed, &admin) => {
-                plan.pairs.push(PointerPair {
-                    name: record.name.clone(),
-                    admin,
-                    dot_git,
-                });
-            }
-            Some(claimed) => plan.conflicted.push(WorktreeConflict {
-                name: record.name.clone(),
-                path: candidate.display().to_string(),
-                found: format!(
-                    "a worktree of a different repository — its `.git` names {}",
-                    claimed.display()
-                ),
-            }),
-            None => plan.conflicted.push(WorktreeConflict {
-                name: record.name.clone(),
-                path: candidate.display().to_string(),
-                found: "an unreadable or unrecognized `.git` file".to_string(),
-            }),
+    for worktree in &checked.worktrees {
+        match decide_worktree(dest, worktree, manifest, unpacked) {
+            Wiring::Wire(pair) => plan.pairs.push(pair),
+            Wiring::Occupied(conflict) => plan.conflicted.push(conflict),
+            Wiring::Absent => plan.missing.push(worktree.record.name.clone()),
+            Wiring::Nothing => {}
         }
     }
 
-    // Case 3: this pack *is* a worktree; its repository is the other half.
-    // The same identity rule, mirrored: the admin directory found beside the
-    // restored root is ours only if its `gitdir` names this checkout, at the
-    // old location or the new one.
-    if let Some(origin) = &manifest.worktree_of {
-        let dot_git = dest.join(".git");
-        let old_dot_git = Path::new(&manifest.source_root).join(".git");
-        let admin = relocate_beside(&manifest.source_root, dest, &origin.parent_root)
-            .map(|root| root.join(".git").join("worktrees").join(&origin.name))
-            .filter(|admin| admin.is_dir());
-
-        match admin {
-            Some(admin) => match pointer_target(&admin.join("gitdir")) {
-                Some(claimed)
-                    if same_place(&claimed, &old_dot_git) || same_place(&claimed, &dot_git) =>
-                {
-                    if !unpacked || dot_git.is_file() {
-                        plan.pairs.push(PointerPair {
-                            name: origin.name.clone(),
-                            admin,
-                            dot_git,
-                        });
-                    } else {
-                        plan.missing_parent = Some(origin.parent_root.clone());
-                    }
-                }
-                claimed => plan.conflicted.push(WorktreeConflict {
-                    name: origin.name.clone(),
-                    path: admin.display().to_string(),
-                    found: match claimed {
-                        Some(other) => format!(
-                            "a same-named worktree of a different checkout — its `gitdir` names {}",
-                            other.display()
-                        ),
-                        None => "an admin directory with no readable `gitdir`".to_string(),
-                    },
-                }),
-            },
-            None => plan.missing_parent = Some(origin.parent_root.clone()),
+    if let Some(origin) = &checked.origin {
+        match decide_origin(dest, origin, manifest, unpacked) {
+            Wiring::Wire(pair) => plan.pairs.push(pair),
+            Wiring::Occupied(conflict) => plan.conflicted.push(conflict),
+            // A repository that is not beside the restored root leaves the
+            // checkout with no repository at all, which is worth more than a
+            // line in a list of names.
+            Wiring::Absent => plan.missing_parent = Some(origin.origin.parent_root.clone()),
+            Wiring::Nothing => {}
         }
     }
 
     plan
+}
+
+/// Decide one registered worktree's wiring — layouts 1 and 2.
+fn decide_worktree(
+    dest: &Path,
+    worktree: &CheckedWorktree<'_>,
+    manifest: &Manifest,
+    unpacked: bool,
+) -> Wiring {
+    let admin = worktree
+        .name
+        .join_onto(&dest.join(".git").join("worktrees"));
+
+    if let Some(rel) = &worktree.path {
+        // Case 1: both halves are in this pack, so both pointer files are ones
+        // this restore just wrote. That is only true of a location that stays
+        // inside the destination, which is what `rel` being a `Contained`
+        // establishes — an absolute or `..`-bearing location was refused
+        // before the payload was touched, rather than aiming these writes at
+        // whatever occupies it.
+        let worktree_root = rel.join_onto(dest);
+        if unpacked && (!admin.is_dir() || !worktree_root.is_dir()) {
+            // Neither made it into the payload after all; nothing to repair.
+            return Wiring::Nothing;
+        }
+        return Wiring::Wire(PointerPair {
+            name: worktree.record.name.clone(),
+            admin,
+            dot_git: worktree_root.join(".git"),
+        });
+    }
+
+    // Case 2: the checkout is not in this pack. It may still be on this
+    // machine — restored from its own pack, or never moved at all.
+    let Some(candidate) =
+        relocate_beside(&manifest.source_root, dest, &worktree.record.source_path)
+    else {
+        return Wiring::Absent;
+    };
+    let dot_git = candidate.join(".git");
+    if !dot_git.exists() || (unpacked && !admin.is_dir()) {
+        return Wiring::Absent;
+    }
+    // Occupancy alone is not identity: whatever sits at the candidate path
+    // has to be confirmed as *this* worktree's checkout before either
+    // pointer is written, or the wiring would break someone else's project
+    // to repair this one.
+    //
+    // A `.git` *directory* there is an independent repository. A `.git`
+    // file is a worktree checkout of *some* repository — ours only if its
+    // pointer names this worktree's admin directory, at the old location
+    // (not yet wired) or the new one (already wired; re-wiring is
+    // idempotent).
+    if dot_git.is_dir() {
+        return Wiring::Occupied(WorktreeConflict {
+            name: worktree.record.name.clone(),
+            path: candidate.display().to_string(),
+            found: "an independent repository — its `.git` is a directory".to_string(),
+        });
+    }
+    let old_admin = worktree.name.join_onto(
+        &Path::new(&manifest.source_root)
+            .join(".git")
+            .join("worktrees"),
+    );
+    match pointer_target(&dot_git) {
+        Some(claimed) if same_place(&claimed, &old_admin) || same_place(&claimed, &admin) => {
+            Wiring::Wire(PointerPair {
+                name: worktree.record.name.clone(),
+                admin,
+                dot_git,
+            })
+        }
+        Some(claimed) => Wiring::Occupied(WorktreeConflict {
+            name: worktree.record.name.clone(),
+            path: candidate.display().to_string(),
+            found: format!(
+                "a worktree of a different repository — its `.git` names {}",
+                claimed.display()
+            ),
+        }),
+        None => Wiring::Occupied(WorktreeConflict {
+            name: worktree.record.name.clone(),
+            path: candidate.display().to_string(),
+            found: "an unreadable or unrecognized `.git` file".to_string(),
+        }),
+    }
+}
+
+/// Decide the wiring when this pack *is* a worktree — layout 3.
+///
+/// The same identity rule as case 2, mirrored: the admin directory found beside
+/// the restored root is ours only if its `gitdir` names this checkout, at the
+/// old location or the new one.
+fn decide_origin(
+    dest: &Path,
+    origin: &CheckedOrigin<'_>,
+    manifest: &Manifest,
+    unpacked: bool,
+) -> Wiring {
+    let dot_git = dest.join(".git");
+    let old_dot_git = Path::new(&manifest.source_root).join(".git");
+    let admin = relocate_beside(&manifest.source_root, dest, &origin.origin.parent_root)
+        .map(|root| origin.name.join_onto(&root.join(".git").join("worktrees")))
+        .filter(|admin| admin.is_dir());
+
+    let Some(admin) = admin else {
+        return Wiring::Absent;
+    };
+
+    match pointer_target(&admin.join("gitdir")) {
+        Some(claimed) if same_place(&claimed, &old_dot_git) || same_place(&claimed, &dot_git) => {
+            if !unpacked || dot_git.is_file() {
+                Wiring::Wire(PointerPair {
+                    name: origin.origin.name.clone(),
+                    admin,
+                    dot_git,
+                })
+            } else {
+                Wiring::Absent
+            }
+        }
+        claimed => Wiring::Occupied(WorktreeConflict {
+            name: origin.origin.name.clone(),
+            path: admin.display().to_string(),
+            found: match claimed {
+                Some(other) => format!(
+                    "a same-named worktree of a different checkout — its `gitdir` names {}",
+                    other.display()
+                ),
+                None => "an admin directory with no readable `gitdir`".to_string(),
+            },
+        }),
+    }
 }
 
 /// Read a worktree pointer file and return the path it names.
@@ -1452,10 +1813,8 @@ mod tests {
     // input the moment it arrives from elsewhere. These build the bytes by hand.
     // ------------------------------------------------------------------
 
-    /// Write a hand-built archive: a v2 manifest followed by the given
-    /// `(builder)` entries, all under the payload prefix already.
-    fn craft_archive(path: &Path, add_entries: impl FnOnce(&mut tar::Builder<Vec<u8>>)) {
-        let manifest = "\
+    /// The smallest manifest that parses, for archives built by hand.
+    const BARE_MANIFEST: &str = "\
 format_version = 2
 created_at = \"2026-08-10T00:00:00Z\"
 source_root = \"/tmp/proj\"
@@ -1467,6 +1826,20 @@ file_count = 0
 symlink_count = 0
 total_bytes = 0
 ";
+
+    /// Write a hand-built archive: a v2 manifest followed by the given
+    /// `(builder)` entries, all under the payload prefix already.
+    fn craft_archive(path: &Path, add_entries: impl FnOnce(&mut tar::Builder<Vec<u8>>)) {
+        craft_archive_with_manifest(path, BARE_MANIFEST, add_entries);
+    }
+
+    /// The same, with the manifest written out by the caller — which is how an
+    /// archive lies about where its worktrees go.
+    fn craft_archive_with_manifest(
+        path: &Path,
+        manifest: &str,
+        add_entries: impl FnOnce(&mut tar::Builder<Vec<u8>>),
+    ) {
         let mut tar = tar::Builder::new(Vec::new());
         let mut h = tar::Header::new_gnu();
         h.set_size(manifest.len() as u64);
@@ -1527,6 +1900,375 @@ total_bytes = 0
         assert!(
             !outside.join("evil.txt").exists(),
             "the write must not have escaped through the link"
+        );
+    }
+
+    /// A manifest that puts a worktree outside the destination is refused, and
+    /// the file it aimed at is untouched.
+    ///
+    /// The entry names in the payload were always checked; this is the other
+    /// half of the archive making the same claim. `dest.join(path)` with an
+    /// absolute `path` discards the destination entirely, so the wiring would
+    /// have written `gitdir: …` over another project's `.git`.
+    #[test]
+    fn test_restore_refuses_worktree_path_pointing_outside() {
+        let dir = TempDir::new().expect("tempdir");
+        let victim = dir.path().join("victim");
+        fs::create_dir_all(&victim).expect("mkdir");
+        let victim_git = victim.join(".git");
+        fs::write(&victim_git, "gitdir: /somewhere/real\n").expect("write");
+
+        let manifest = format!(
+            "{BARE_MANIFEST}
+[[worktrees]]
+name = \"feature\"
+path = \"{}\"
+source_path = \"/tmp/proj/.worktrees/feature\"
+included = true
+",
+            victim.display()
+        );
+
+        let archive = dir.path().join("evil.pack");
+        craft_archive_with_manifest(&archive, &manifest, |tar| {
+            let mut h = tar::Header::new_gnu();
+            h.set_size(1);
+            h.set_mode(0o644);
+            h.set_cksum();
+            tar.append_data(&mut h, "payload/a.txt", &b"a"[..])
+                .expect("file entry");
+        });
+
+        let dest = dir.path().join("dest");
+        let err = restore(&RestoreOptions::new(&archive, &dest)).expect_err("must refuse");
+        assert!(
+            matches!(err, PackError::EscapingManifestPath { ref field, .. } if field == "worktrees[].path"),
+            "got {err:?}"
+        );
+        assert_eq!(
+            fs::read_to_string(&victim_git).expect("read"),
+            "gitdir: /somewhere/real\n",
+            "the other project's pointer must be exactly as it was"
+        );
+        assert!(
+            !dest.exists(),
+            "the manifest is checked before the payload is touched"
+        );
+    }
+
+    /// A worktree name is one directory under `.git/worktrees/`; one that walks
+    /// out of there is refused.
+    #[test]
+    fn test_restore_refuses_worktree_name_pointing_outside() {
+        let dir = TempDir::new().expect("tempdir");
+        let manifest = format!(
+            "{BARE_MANIFEST}
+[[worktrees]]
+name = \"../../../escape\"
+path = \".worktrees/feature\"
+source_path = \"/tmp/proj/.worktrees/feature\"
+included = true
+"
+        );
+
+        let archive = dir.path().join("evil.pack");
+        craft_archive_with_manifest(&archive, &manifest, |_| {});
+
+        let dest = dir.path().join("dest");
+        let err = restore(&RestoreOptions::new(&archive, &dest)).expect_err("must refuse");
+        assert!(
+            matches!(err, PackError::EscapingManifestPath { ref field, .. } if field == "worktrees[].name"),
+            "got {err:?}"
+        );
+    }
+
+    /// A dry run refuses the same archive a restore would, rather than
+    /// describing an operation that is going to abort.
+    #[test]
+    fn test_dry_run_refuses_what_restore_refuses() {
+        let dir = TempDir::new().expect("tempdir");
+        let manifest = format!(
+            "{BARE_MANIFEST}
+[[worktrees]]
+name = \"feature\"
+path = \"../outside\"
+source_path = \"/tmp/proj/.worktrees/feature\"
+included = true
+"
+        );
+
+        let archive = dir.path().join("evil.pack");
+        craft_archive_with_manifest(&archive, &manifest, |_| {});
+
+        let err = restore(&RestoreOptions {
+            dry_run: true,
+            ..RestoreOptions::new(&archive, dir.path().join("dest"))
+        })
+        .expect_err("must refuse");
+        assert!(
+            matches!(err, PackError::EscapingManifestPath { .. }),
+            "got {err:?}"
+        );
+    }
+
+    /// A hard link is reported with the command that would create it, and is
+    /// not created.
+    ///
+    /// The target names a file on this machine that the pack does not carry, so
+    /// there is nothing to check it against; creating the link would publish
+    /// that file into the restored tree under a name the archive chose.
+    #[cfg(unix)]
+    #[test]
+    fn test_restore_reports_hard_link_without_creating_it() {
+        let dir = TempDir::new().expect("tempdir");
+        let secret = dir.path().join("private.key");
+        fs::write(&secret, "PRIVATE").expect("write");
+
+        let archive = dir.path().join("linky.pack");
+        let secret_for_closure = secret.clone();
+        craft_archive(&archive, |tar| {
+            let mut h = tar::Header::new_gnu();
+            h.set_entry_type(tar::EntryType::Link);
+            h.set_size(0);
+            h.set_mode(0o644);
+            h.set_cksum();
+            tar.append_link(&mut h, "payload/borrowed", &secret_for_closure)
+                .expect("hard link entry");
+        });
+
+        let dest = dir.path().join("dest");
+        let report = restore(&RestoreOptions::new(&archive, &dest)).expect("restore");
+
+        assert!(
+            !dest.join("borrowed").exists(),
+            "the link must not have been created"
+        );
+        assert_eq!(report.hard_links_not_created.len(), 1);
+        let link = &report.hard_links_not_created[0];
+        assert_eq!(link.path, "borrowed");
+        assert_eq!(link.target, secret.display().to_string());
+        assert!(
+            link.command.starts_with("ln '"),
+            "the report has to carry a runnable command, got {}",
+            link.command
+        );
+        assert!(link.command.contains(&secret.display().to_string()));
+        assert!(
+            report.needs_attention(),
+            "a path the archive listed and the restore did not create is not silent"
+        );
+    }
+
+    /// A hard link naming another entry in the same pack — what a tar writer
+    /// produces for a project that contains hard links — gets a command that
+    /// points at where that entry landed, not at the archive-relative path.
+    ///
+    /// Left as written it would read `ln 'payload/b.txt' …`, which resolves
+    /// against whatever directory the operator happens to be in.
+    #[cfg(unix)]
+    #[test]
+    fn test_hard_link_into_the_payload_resolves_to_the_restored_file() {
+        let dir = TempDir::new().expect("tempdir");
+        let archive = dir.path().join("linky.pack");
+        craft_archive(&archive, |tar| {
+            let mut h = tar::Header::new_gnu();
+            h.set_size(2);
+            h.set_mode(0o644);
+            h.set_cksum();
+            tar.append_data(&mut h, "payload/b.txt", &b"b\n"[..])
+                .expect("file entry");
+
+            let mut h = tar::Header::new_gnu();
+            h.set_entry_type(tar::EntryType::Link);
+            h.set_size(0);
+            h.set_mode(0o644);
+            h.set_cksum();
+            tar.append_link(&mut h, "payload/a.txt", "payload/b.txt")
+                .expect("hard link entry");
+        });
+
+        let dest = dir.path().join("dest");
+        let report = restore(&RestoreOptions::new(&archive, &dest)).expect("restore");
+
+        let link = &report.hard_links_not_created[0];
+        assert_eq!(
+            link.target, "payload/b.txt",
+            "the target is reported as the archive wrote it"
+        );
+        assert_eq!(
+            link.command,
+            format!(
+                "ln {} {}",
+                shell_quote(&report.dest.join("b.txt").display().to_string()),
+                shell_quote(&report.dest.join("a.txt").display().to_string())
+            ),
+            "but the command has to name the file that actually landed"
+        );
+        assert!(dest.join("b.txt").is_file(), "the real entry is restored");
+        assert!(!dest.join("a.txt").exists());
+    }
+
+    /// A target that is not in the payload is left exactly as the archive wrote
+    /// it — rewriting it would invent a claim the archive did not make.
+    #[cfg(unix)]
+    #[test]
+    fn test_hard_link_outside_the_payload_keeps_its_target() {
+        let dir = TempDir::new().expect("tempdir");
+        let archive = dir.path().join("linky.pack");
+        craft_archive(&archive, |tar| {
+            let mut h = tar::Header::new_gnu();
+            h.set_entry_type(tar::EntryType::Link);
+            h.set_size(0);
+            h.set_mode(0o644);
+            h.set_cksum();
+            tar.append_link(&mut h, "payload/borrowed", "/etc/hosts")
+                .expect("hard link entry");
+        });
+
+        let dest = dir.path().join("dest");
+        let report = restore(&RestoreOptions::new(&archive, &dest)).expect("restore");
+
+        let link = &report.hard_links_not_created[0];
+        assert_eq!(link.target, "/etc/hosts");
+        assert!(
+            link.command.contains("'/etc/hosts'"),
+            "got {}",
+            link.command
+        );
+    }
+
+    /// The dry run names hard links too — a prediction that omitted them would
+    /// promise a file the restore is not going to create.
+    #[cfg(unix)]
+    #[test]
+    fn test_dry_run_reports_hard_link() {
+        let dir = TempDir::new().expect("tempdir");
+        let target = dir.path().join("elsewhere.txt");
+        fs::write(&target, "x").expect("write");
+
+        let archive = dir.path().join("linky.pack");
+        let target_for_closure = target.clone();
+        craft_archive(&archive, |tar| {
+            let mut h = tar::Header::new_gnu();
+            h.set_entry_type(tar::EntryType::Link);
+            h.set_size(0);
+            h.set_mode(0o644);
+            h.set_cksum();
+            tar.append_link(&mut h, "payload/borrowed", &target_for_closure)
+                .expect("hard link entry");
+        });
+
+        let dest = dir.path().join("dest");
+        let predicted = restore(&RestoreOptions {
+            dry_run: true,
+            ..RestoreOptions::new(&archive, &dest)
+        })
+        .expect("dry run");
+
+        assert_eq!(predicted.hard_links_not_created.len(), 1);
+        assert_eq!(predicted.hard_links_not_created[0].path, "borrowed");
+        assert_eq!(
+            predicted.entries_written, 0,
+            "a hard link is not an entry that will be written"
+        );
+        assert!(!dest.exists());
+    }
+
+    /// An entry type this crate never writes and a restore should not
+    /// materialize refuses the archive rather than falling through to tar's
+    /// "unrecognized means regular file" default.
+    #[test]
+    fn test_restore_refuses_device_entry() {
+        let dir = TempDir::new().expect("tempdir");
+        let archive = dir.path().join("odd.pack");
+        craft_archive(&archive, |tar| {
+            let mut h = tar::Header::new_gnu();
+            h.set_entry_type(tar::EntryType::Fifo);
+            h.set_size(0);
+            h.set_mode(0o644);
+            h.set_cksum();
+            tar.append_data(&mut h, "payload/pipe", &b""[..])
+                .expect("fifo entry");
+        });
+
+        let dest = dir.path().join("dest");
+        let err = restore(&RestoreOptions::new(&archive, &dest)).expect_err("must refuse");
+        assert!(
+            matches!(err, PackError::UnusableArchiveEntry { ref kind, .. } if kind == "named pipe"),
+            "got {err:?}"
+        );
+    }
+
+    /// A dry run and the restore it predicts agree on where the destination is,
+    /// even when the destination does not exist yet and its parent is a link.
+    ///
+    /// The prediction used to canonicalize a directory that was not there, fail,
+    /// and keep the path as written — so it looked for sibling worktrees beside
+    /// a path the restore would never use.
+    #[cfg(unix)]
+    #[test]
+    fn test_dry_run_and_restore_agree_on_the_destination() {
+        let dir = TempDir::new().expect("tempdir");
+        let real = dir.path().join("real");
+        fs::create_dir_all(&real).expect("mkdir");
+        let via_link = dir.path().join("link");
+        std::os::unix::fs::symlink(&real, &via_link).expect("symlink");
+
+        let root = dir.path().join("proj");
+        touch(&root.join("a.txt"), "a");
+        let out = dir.path().join("proj.pack");
+        create(&CreateOptions::new(&root, &out, "0.13.3")).expect("create");
+
+        // Through the link, into a directory that does not exist yet.
+        let dest = via_link.join("restored");
+        let predicted = restore(&RestoreOptions {
+            dry_run: true,
+            ..RestoreOptions::new(&out, &dest)
+        })
+        .expect("dry run");
+
+        // The shape the fix addresses, asserted while it still holds:
+        // canonicalizing a directory that is not there fails, and the old
+        // fallback was the path exactly as the caller typed it.
+        assert!(fs::canonicalize(&dest).is_err());
+        assert_ne!(
+            predicted.dest, dest,
+            "the prediction has to resolve past the path as typed"
+        );
+
+        let actual = restore(&RestoreOptions::new(&out, &dest)).expect("restore");
+
+        assert_eq!(
+            predicted.dest, actual.dest,
+            "a prediction about another directory is not a prediction"
+        );
+        assert_eq!(
+            actual.dest,
+            fs::canonicalize(&real)
+                .expect("canonicalize")
+                .join("restored"),
+            "both must resolve through the link"
+        );
+    }
+
+    /// A manifest larger than the read limit refuses the archive instead of
+    /// allocating whatever the archive asked for.
+    #[test]
+    fn test_inspect_refuses_an_oversized_manifest() {
+        let dir = TempDir::new().expect("tempdir");
+        let archive = dir.path().join("bomb.pack");
+
+        // Compresses to almost nothing and expands past the limit — the shape
+        // of the problem, in miniature.
+        let bloat = "# ".repeat(40 * 1024 * 1024);
+        let manifest = format!("{BARE_MANIFEST}{bloat}");
+        craft_archive_with_manifest(&archive, &manifest, |_| {});
+
+        let err =
+            restore(&RestoreOptions::new(&archive, dir.path().join("dest"))).expect_err("refuse");
+        assert!(
+            matches!(err, PackError::ManifestTooLarge { .. }),
+            "got {err:?}"
         );
     }
 
