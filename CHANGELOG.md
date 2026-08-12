@@ -6,39 +6,7 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
-- **`hard_links_not_created` on the restore report** — hard link entries are
-  reported instead of created, each with the `ln` command that would create it.
-
-  A hard link is a second name for a file that already exists, and the archive
-  says which one. That target is not in the pack: it names whatever sits at that
-  path on the machine doing the restore. Creating the link would publish that
-  file into the restored tree under a name the archive chose, and nothing this
-  crate writes produces one to begin with — the scan stores every file as its
-  own regular entry, so two names for one inode come back as two files.
-
-  Skipping it quietly was not an option either: the restored tree would be
-  missing a path the archive listed, with nothing to say why. So the link is
-  named, the target is shown as the archive wrote it, and the command to create
-  it is there to run once the operator has looked at what the target is. The
-  field joins `needs_attention`, and a dry run lists the same links rather than
-  counting them as entries that are going to appear.
-
-  The command is runnable from anywhere. A target naming another entry in the
-  same pack — what a tar writer produces for a project that genuinely contains
-  hard links — is archive-relative, so it is resolved to where that entry
-  landed; `ln 'payload/b.txt' …` would otherwise aim at whatever the operator's
-  working directory happened to hold, which is also what `tar` itself would have
-  done with it.
-
 ### Changed
-
-- **An archive entry's type decides what happens to it, in one exhaustive
-  match.** `tar`'s own default for a type it does not recognize is to write it
-  out as a regular file, which turns "I do not know what this is" into a write.
-  Directories, regular files and symlinks are what this crate's writer produces
-  and what restore extracts; hard links are reported (above); device nodes,
-  fifos, sparse files, stray extension headers and anything unrecognized refuse
-  the archive.
 
 ### Deprecated
 
@@ -46,61 +14,9 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
-- **`list_payload_paths` and the dry run refuse what a restore refuses.** A
-  prediction that described an operation destined to abort was worse than no
-  prediction, since the point of `dry_run` is to answer "what will happen"
-  before anything is written.
-
-- **A dry run and the restore it predicts now agree on where the destination
-  is.** A restore creates the directory and canonicalizes it; a dry run must not
-  create anything, so it canonicalized a directory that was not there, failed,
-  and kept the path as the caller typed it. A relative destination, or one under
-  a symlinked parent, therefore put the prediction's idea of "beside the root"
-  somewhere the restore would never look — and worktree wiring is decided
-  entirely by what sits beside the root, so the forecast was about a different
-  operation than the one that would run.
-
-  Both now resolve as far as the filesystem allows and no further: the nearest
-  existing ancestor is canonicalized and the missing tail re-attached. Those
-  components can only become real directories, never symlinks, so it is the same
-  path a restore arrives at — reached without creating anything.
-
 ### Security
 
-- **The manifest is read up to a limit rather than to whatever the archive
-  declares.** Reading happens before the archive has been judged, so how much
-  memory that takes cannot be the archive's decision. Compression makes the gap
-  enormous — a few megabytes of filler expand into gigabytes — and `inspect` is
-  the first thing every restore, dry run and listing calls, so one small crafted
-  file could end the process hosting them. Manifests above 64 MiB now refuse the
-  archive with `ManifestTooLarge`; a real project's manifest records what was
-  left behind rather than every file, and does not come close.
-
-- **A manifest can no longer aim a write outside the destination.** `0.15.0`
-  checked the payload's entry names for `..` and absolute components and refused
-  the archive carrying them, but the manifest travelling in the same archive was
-  left unchecked — and restore joins its paths onto the destination too. A
-  `worktrees[].path` of `/opt/other-project` was enough: `Path::join`
-  discards its left side when handed an absolute path, so the worktree wiring
-  would write `gitdir: …` over that project's `.git` file, pointing it at an
-  admin directory of the archive's choosing.
-
-  The identity check `0.15.0` added did not cover it. That check exists for the
-  counterpart that is looked up *outside* the pack, and the branch for a
-  worktree inside the root skipped it — correctly, on the assumption that both
-  pointer files are ones the restore just wrote. Nothing enforced the
-  assumption, which is what the unchecked path broke.
-
-  Entry names and manifest fields are now the same kind of claim, checked by the
-  same rule, and the check is not one a caller can forget: an archive-supplied
-  path becomes a `Contained` or it becomes an error, and `Contained` is the only
-  thing the wiring code is given. The three worktree layouts likewise resolve
-  through one named enum that both callers match exhaustively, so a layout added
-  later cannot reach the write step without a case being written for it.
-  Checking happens before the payload is touched, so a crafted archive is
-  refused with the destination still empty.
-
-## [0.15.0] - 2026-08-11
+## [0.15.0] - 2026-08-12
 
 ### Added
 
@@ -158,6 +74,35 @@ All notable changes to this project will be documented in this file.
   Backed by tests that every listed doc resource actually resolves — a doc
   offered in `list_resources` but missing from `read_lds_resource` appears in a
   client's list and then fails to open, which is worse than not offering it.
+
+- **`conflicting_worktrees` on the restore report** — worktree pairings left
+  unwired because the counterpart's place is occupied by something that is not
+  this worktree's other half. Nothing is written for these, and the field joins
+  `needs_attention`. See the wiring entry under Security.
+
+- **`hard_links_not_created` on the restore report** — hard link entries are
+  reported instead of created, each with the `ln` command that would create it.
+
+  A hard link is a second name for a file that already exists, and the archive
+  says which one. That target is not in the pack: it names whatever sits at that
+  path on the machine doing the restore. Creating the link would publish that
+  file into the restored tree under a name the archive chose, and nothing this
+  crate writes produces one to begin with — the scan stores every file as its
+  own regular entry, so two names for one inode come back as two files.
+
+  Skipping it quietly was not an option either: the restored tree would be
+  missing a path the archive listed, with nothing to say why. So the link is
+  named, the target is shown as the archive wrote it, and the command to create
+  it is there to run once the operator has looked at what the target is. The
+  field joins `needs_attention`, and a dry run lists the same links rather than
+  counting them as entries that are going to appear.
+
+  The command is runnable from anywhere. A target naming another entry in the
+  same pack — what a tar writer produces for a project that genuinely contains
+  hard links — is archive-relative, so it is resolved to where that entry
+  landed; `ln 'payload/b.txt' …` would otherwise aim at whatever the operator's
+  working directory happened to hold, which is also what `tar` itself would have
+  done with it.
 
 ### Changed
 
@@ -257,6 +202,14 @@ All notable changes to this project will be documented in this file.
   so they restore with no summary and an empty `missing_link_roots` — the link
   roots such a pack recorded are not carried over into the new shape.
 
+- **An archive entry's type decides what happens to it, in one exhaustive
+  match.** `tar`'s own default for a type it does not recognize is to write it
+  out as a regular file, which turns "I do not know what this is" into a write.
+  Directories, regular files and symlinks are what this crate's writer produces
+  and what restore extracts; hard links are reported (above); device nodes,
+  fifos, sparse files, stray extension headers and anything unrecognized refuse
+  the archive.
+
 ### Deprecated
 
 ### Removed
@@ -298,7 +251,75 @@ All notable changes to this project will be documented in this file.
   machine" rather than "the checkout was outside the packed root", so a
   worktree sitting right where it belongs is no longer reported as missing.
 
+- **`list_payload_paths` and the dry run refuse what a restore refuses.** A
+  prediction that described an operation destined to abort was worse than no
+  prediction, since the point of `dry_run` is to answer "what will happen"
+  before anything is written.
+
+- **A dry run and the restore it predicts now agree on where the destination
+  is.** A restore creates the directory and canonicalizes it; a dry run must not
+  create anything, so it canonicalized a directory that was not there, failed,
+  and kept the path as the caller typed it. A relative destination, or one under
+  a symlinked parent, therefore put the prediction's idea of "beside the root"
+  somewhere the restore would never look — and worktree wiring is decided
+  entirely by what sits beside the root, so the forecast was about a different
+  operation than the one that would run.
+
+  Both now resolve as far as the filesystem allows and no further: the nearest
+  existing ancestor is canonicalized and the missing tail re-attached. Those
+  components can only become real directories, never symlinks, so it is the same
+  path a restore arrives at — reached without creating anything.
+
 ### Security
+
+- **A restore no longer trusts an archive that arrived from elsewhere.** A pack
+  is normally written by this crate, but an archive is untrusted input the
+  moment it comes from somewhere else, and restore took it at its word in three
+  places.
+
+  An entry naming a path outside the destination (`..`, or an absolute
+  component) was skipped and extraction carried on through the rest of an
+  archive it had just found untrustworthy; it now refuses the whole archive with
+  `EscapingArchivePath`. The same escape routed indirectly — one entry plants a
+  symlink, a later one names a path through it, and the write lands wherever the
+  link points — refuses with `WriteThroughSymlink`. The scan never descends into
+  a symlinked directory, so a legitimate pack has no entries underneath one.
+
+  The manifest travelling in the same archive was left unchecked, and restore
+  joins its paths onto the destination too. A `worktrees[].path` of
+  `/opt/other-project` was enough: `Path::join` discards its left side when
+  handed an absolute path, so the worktree wiring would write `gitdir: …` over
+  that project's `.git` file, aiming it at an admin directory of the archive's
+  choosing. Entry names and manifest fields are the same kind of claim and are
+  now checked by the same rule, before the payload is touched — a crafted
+  archive is refused with the destination still empty. The check is not one a
+  caller can forget: an archive-supplied path becomes a `Contained` or it
+  becomes an error, and `Contained` is the only thing the wiring code is handed.
+  The three worktree layouts likewise resolve through one named enum that both
+  callers match exhaustively, so a layout added later cannot reach the write
+  step without a case written for it.
+
+- **Worktree wiring no longer treats occupancy of a path as proof of identity.**
+  A counterpart path holding a `.git` *directory* was already protected as an
+  independent repository, but a `.git` *file* was wired unconditionally: a
+  same-named worktree belonging to a different repository had its pointer
+  overwritten to name this pack's admin directory, hijacking that repository's
+  worktree — and restore reported it as `rewritten`. The counterpart is now
+  verified before either pointer is written, and anything that cannot be
+  confirmed as this worktree's other half is left untouched and surfaced in
+  `conflicting_worktrees` rather than in `missing_worktrees`, which would have
+  advised restoring a pack on top of the occupant. The mirror case — this pack
+  is a worktree and the repository beside it holds a foreign same-named worktree
+  — is checked the same way.
+
+- **The manifest is read up to a limit rather than to whatever the archive
+  declares.** Reading happens before the archive has been judged, so how much
+  memory that takes cannot be the archive's decision. Compression makes the gap
+  enormous — a few megabytes of filler expand into gigabytes — and `inspect` is
+  the first thing every restore, dry run and listing calls, so one small crafted
+  file could end the process hosting them. Manifests above 64 MiB now refuse the
+  archive with `ManifestTooLarge`; a real project's manifest records what was
+  left behind rather than every file, and does not come close.
 
 ## [0.14.0] - 2026-08-11
 
