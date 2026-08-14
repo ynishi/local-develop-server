@@ -2,7 +2,7 @@ mod cli;
 
 use std::collections::HashMap;
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -876,6 +876,40 @@ fn user_config_path() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("/nonexistent-home/.config/lds/config.toml"))
 }
 
+/// Resolve the outline remote endpoint, if any: `(url, bearer_token)`.
+///
+/// Precedence (low → high), matching the `[recipes]` / `[[route]]`
+/// convention of "user config, overridden by project config, overridden by
+/// env for one-off switches":
+///
+/// 1. unset everywhere → `None` (embed mode, backward-compatible default)
+/// 2. `[remote.outline]` in `~/.config/lds/config.toml`
+/// 3. `[remote.outline]` in `<session_root>/config.toml`
+/// 4. `LDS_OUTLINE_REMOTE_URL` env
+///
+/// The bearer token is never written in config — `token_env` names the env
+/// var that carries it (default `OUTLINE_MCP_HTTP_TOKEN`); unset or empty
+/// means "no token" (fine for loopback daemons).
+fn resolve_outline_remote(session_root: &Path) -> Option<(String, Option<String>)> {
+    let endpoint = {
+        let user = Config::load(&user_config_path()).ok().and_then(|c| c.remote.outline);
+        let project = Config::load(&session_root.join("config.toml"))
+            .ok()
+            .and_then(|c| c.remote.outline);
+        project.or(user)
+    };
+    let url = std::env::var("LDS_OUTLINE_REMOTE_URL")
+        .ok()
+        .filter(|u| !u.is_empty())
+        .or_else(|| endpoint.as_ref().map(|e| e.url.clone()).filter(|u| !u.is_empty()))?;
+    let token_env = endpoint
+        .as_ref()
+        .and_then(|e| e.token_env.clone())
+        .unwrap_or_else(|| "OUTLINE_MCP_HTTP_TOKEN".to_string());
+    let token = std::env::var(&token_env).ok().filter(|t| !t.is_empty());
+    Some((url, token))
+}
+
 /// Build a session and its local (non-network) modules on `inner`.
 ///
 /// This is the fast, synchronous half of session construction: starting the
@@ -932,31 +966,44 @@ fn start_session_locally(
         JournalModule::new(session.root().to_path_buf(), file_projection)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?
     });
-    // Outline module: shelf root defaults to $HOME/.config/outline-mcp/books
-    // (matches the standalone outline-mcp binary — Outline Books are a
-    // global SoT shared across projects, not per-session). Override via
-    // LDS_OUTLINE_SHELF_DIR when a session wants an isolated shelf. Init
-    // failure downgrades to None (`outline_*` tools become unavailable);
-    // this keeps session_start resilient to a filesystem hiccup on the
-    // shelf directory rather than aborting the whole session.
-    inner.outline = {
-        let shelf_dir = std::env::var_os("LDS_OUTLINE_SHELF_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| {
-                std::env::var("HOME")
-                    .map(PathBuf::from)
-                    .unwrap_or_else(|_| PathBuf::from("."))
-                    .join(".config/outline-mcp/books")
-            });
-        match OutlineModule::new(shelf_dir.clone()) {
-            Ok(m) => Some(m),
-            Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    shelf_dir = %shelf_dir.display(),
-                    "OutlineModule init failed; outline_* tools disabled for this session"
-                );
-                None
+    // Outline module: remote mode when a `[remote.outline]` endpoint is
+    // configured (env > project config > user config — see
+    // `resolve_outline_remote`), embed mode otherwise. In embed mode the
+    // shelf root defaults to $HOME/.config/outline-mcp/books (matches the
+    // standalone outline-mcp binary — Outline Books are a global SoT shared
+    // across projects, not per-session); override via LDS_OUTLINE_SHELF_DIR
+    // when a session wants an isolated shelf. Embed init failure downgrades
+    // to None (`outline_*` tools become unavailable); this keeps
+    // session_start resilient to a filesystem hiccup on the shelf directory
+    // rather than aborting the whole session. Remote construction performs
+    // no I/O (lazy connect on first call) so it cannot fail here — and an
+    // unreachable daemon later fails the tool call loudly instead of
+    // silently falling back to a local shelf (that fallback would recreate
+    // the two-writable-copies split this mode exists to remove).
+    inner.outline = match resolve_outline_remote(session.root()) {
+        Some((url, token)) => {
+            tracing::info!(url = %url, "outline module in remote mode (SSOT daemon)");
+            Some(OutlineModule::new_remote(url, token))
+        }
+        None => {
+            let shelf_dir = std::env::var_os("LDS_OUTLINE_SHELF_DIR")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| {
+                    std::env::var("HOME")
+                        .map(PathBuf::from)
+                        .unwrap_or_else(|_| PathBuf::from("."))
+                        .join(".config/outline-mcp/books")
+                });
+            match OutlineModule::new(shelf_dir.clone()) {
+                Ok(m) => Some(m),
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        shelf_dir = %shelf_dir.display(),
+                        "OutlineModule init failed; outline_* tools disabled for this session"
+                    );
+                    None
+                }
             }
         }
     };

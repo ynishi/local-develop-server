@@ -66,6 +66,46 @@ pub struct Config {
     pub paths: Paths,
     /// `lds pack` classification overrides.
     pub pack: Pack,
+    /// Remote data-plane endpoints (`[remote.outline]` / `[remote.journal]`).
+    pub remote: Remote,
+}
+
+/// Remote data-plane endpoints.
+///
+/// When an endpoint is declared, the corresponding lds module forwards to a
+/// central `--mcp-http` daemon (the SSOT host) instead of embedding the
+/// upstream server in-process. Absent sections mean "embed locally"
+/// (backward-compatible default).
+///
+/// Declared in the same `config.toml` as `[recipes]` / `[pack]`:
+/// user-global `~/.config/lds/config.toml`, overridden field-wise by the
+/// project-local `<session_root>/config.toml`, overridden by env
+/// (`LDS_OUTLINE_REMOTE_URL` etc.) for one-off switches.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(default)]
+pub struct Remote {
+    /// Outline books daemon (`outline-mcp --mcp-http`).
+    pub outline: Option<RemoteEndpoint>,
+    /// Journal EventLog daemon (`journal-mcp --mcp-http`, future).
+    pub journal: Option<RemoteEndpoint>,
+}
+
+/// One remote MCP endpoint declaration.
+///
+/// The token itself is never written here — `token_env` names the
+/// environment variable that carries it, because `config.toml` travels
+/// through pack / backup paths where a literal credential must not.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(default)]
+pub struct RemoteEndpoint {
+    /// Endpoint URL, e.g. `http://ssot-host:8486/mcp`.
+    pub url: String,
+    /// Env var name holding the bearer token. `None` falls back to the
+    /// daemon's conventional name (e.g. `OUTLINE_MCP_HTTP_TOKEN`); an unset
+    /// or empty variable means "no token" (loopback daemons allow that).
+    pub token_env: Option<String>,
+    /// Project key sent instead of a local path (journal only, future).
+    pub project_key: Option<String>,
 }
 
 /// Recipe-related configuration.

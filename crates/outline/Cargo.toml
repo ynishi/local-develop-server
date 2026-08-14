@@ -16,3 +16,5 @@ outline-mcp-rmcp = "0.10.0"
 anyhow.workspace = true
 rmcp.workspace = true
 tracing.workspace = true
+tokio = { workspace = true }
+reqwest = { version = "0.13", default-features = false }
