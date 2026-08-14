@@ -16,6 +16,25 @@ All notable changes to this project will be documented in this file.
 
 ### Security
 
+## [0.16.0] - 2026-08-14
+
+### Added
+
+- **`[remote.outline]` — remote mode for the outline module.** Declared in the
+  same `config.toml` as `[recipes]` / `[pack]` (user-global, overridden
+  field-wise by the project-local file, overridden by `LDS_OUTLINE_REMOTE_URL`
+  for one-off switches), it switches `outline_*` from the in-process embed over
+  a local shelf to a streamable-HTTP client against a central
+  `outline-mcp --mcp-http` daemon — one single-writer process owning the books
+  for every device. The bearer token never lives in the file: `token_env` names
+  the environment variable that carries it (default `OUTLINE_MCP_HTTP_TOKEN`).
+  The connection is established lazily on the first outline call and a failed
+  attempt is not cached, so a daemon that comes up later heals on the next
+  call; an unreachable daemon fails that call loudly instead of silently
+  falling back to the local shelf — two writable copies is the split this mode
+  exists to remove. rmcp moves to 1.8 for the
+  `transport-streamable-http-client-reqwest` transport.
+
 ## [0.15.0] - 2026-08-12
 
 ### Added

@@ -892,7 +892,9 @@ fn user_config_path() -> PathBuf {
 /// means "no token" (fine for loopback daemons).
 fn resolve_outline_remote(session_root: &Path) -> Option<(String, Option<String>)> {
     let endpoint = {
-        let user = Config::load(&user_config_path()).ok().and_then(|c| c.remote.outline);
+        let user = Config::load(&user_config_path())
+            .ok()
+            .and_then(|c| c.remote.outline);
         let project = Config::load(&session_root.join("config.toml"))
             .ok()
             .and_then(|c| c.remote.outline);
@@ -901,7 +903,12 @@ fn resolve_outline_remote(session_root: &Path) -> Option<(String, Option<String>
     let url = std::env::var("LDS_OUTLINE_REMOTE_URL")
         .ok()
         .filter(|u| !u.is_empty())
-        .or_else(|| endpoint.as_ref().map(|e| e.url.clone()).filter(|u| !u.is_empty()))?;
+        .or_else(|| {
+            endpoint
+                .as_ref()
+                .map(|e| e.url.clone())
+                .filter(|u| !u.is_empty())
+        })?;
     let token_env = endpoint
         .as_ref()
         .and_then(|e| e.token_env.clone())

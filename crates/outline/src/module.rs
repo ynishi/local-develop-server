@@ -195,9 +195,7 @@ impl OutlineModule {
         context: RequestContext<RoleServer>,
     ) -> Result<ListResourcesResult, McpError> {
         match &self.backend {
-            Backend::Embed(server) => {
-                ServerHandler::list_resources(server, request, context).await
-            }
+            Backend::Embed(server) => ServerHandler::list_resources(server, request, context).await,
             Backend::Remote(remote) => remote
                 .peer()
                 .await?
