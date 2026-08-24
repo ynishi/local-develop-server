@@ -16,6 +16,24 @@ All notable changes to this project will be documented in this file.
 
 ### Security
 
+## [0.16.1] - 2026-08-25
+
+### Fixed
+
+- **`[remote.outline]` can now point at an `https://` endpoint.** 0.16.0
+  introduced remote mode against a daemon reached over a loopback port or a
+  private network, and `crates/outline/Cargo.toml` declared `reqwest` with
+  `default-features = false` and no TLS feature — which builds fine and fails
+  only at connect time, on the first outline tool call, with
+  `hyper_util::client::legacy::Error(Connect, ConnectError("invalid URL, scheme
+  is not http"))`. Nothing in the config path rejects an `https` URL, so the
+  endpoint reads as accepted: `session_start` logs `outline module in remote
+  mode` with the URL, and the failure only surfaces once `list_tools` is
+  forwarded — at which point `outline_*` simply does not appear in the caller's
+  tool list. Hosting the SSOT behind a TLS-terminating provider is the ordinary
+  case for a daemon that is not on the same machine, so `reqwest`'s `rustls`
+  feature (what its own `default-tls` resolves to on 0.13) is now enabled.
+
 ## [0.16.0] - 2026-08-14
 
 ### Added

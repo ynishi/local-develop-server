@@ -11,7 +11,7 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
-lds-core = { path = "../core", version = "0.16.0" }
+lds-core = { path = "../core", version = "0.16.1" }
 journal-mcp-rmcp = "0.6.0"
 anyhow.workspace = true
 rmcp.workspace = true
