@@ -250,6 +250,22 @@ impl LdsServer {
         let cfg = Config::load_or_default();
         let env_var = std::env::var_os("LDS_RECIPE_GLOBAL_DIRS");
         let startup_global_dirs = Arc::new(resolve_startup_global_dirs(cfg, env_var));
+        // Remote journal mode mounts eagerly at server startup (keyed off the
+        // startup cwd — the MCP host launches lds in the project dir), so the
+        // 18 journal_* tools are present in the host's connect-time
+        // `tools/list` — before any session exists. Session-gated mounting
+        // hid them from hosts that only fetch the tool list once (observed:
+        // Claude Code restart with remote mode configured listed zero
+        // journal_* tools). Embed mode stays session-gated: eager embed
+        // would create `workspace/.journal.db` under whatever cwd the host
+        // launched us in. `session_start` re-mounts either way, so the
+        // session root remains authoritative once a session exists.
+        let journal = startup_cwd.as_deref().and_then(|cwd| {
+            resolve_journal_remote(cwd).map(|(url, token, project_key)| {
+                tracing::info!(url = %url, project_key = ?project_key, "journal module in remote mode (eager, startup cwd)");
+                JournalModule::new_remote(url, token, project_key)
+            })
+        });
         Self {
             state: Arc::new(RwLock::new(Inner {
                 lds: LdsState::new(),
@@ -259,7 +275,7 @@ impl LdsServer {
                 recipe: None,
                 sandbox_fs: None,
                 sandbox_python: None,
-                journal: None,
+                journal,
                 outline: None,
                 router: None,
                 export_registry: None,
@@ -922,14 +938,21 @@ fn resolve_outline_remote(session_root: &Path) -> Option<(String, Option<String>
 ///
 /// Same precedence as [`resolve_outline_remote`] (user config < project
 /// config < env). `project_key` is the remote project root injected into
-/// forwarded calls that omit `project_root` (e.g. `/data/journal/<repo>` on
-/// the daemon's volume — the daemon namespaces EventLogs by path, so the
-/// session-local root is meaningless there):
+/// forwarded calls that omit `project_root` (the daemon namespaces
+/// EventLogs by path, so the session-local root is meaningless there):
 ///
 /// 1. unset everywhere → `None` (embed mode, backward-compatible default)
 /// 2. `[remote.journal]` in `~/.config/lds/config.toml`
 /// 3. `[remote.journal]` in `<session_root>/config.toml`
 /// 4. `LDS_JOURNAL_REMOTE_URL` / `LDS_JOURNAL_REMOTE_PROJECT_KEY` env
+///
+/// The normal setup is **one user-global entry forwarding every project**:
+/// when no explicit `project_key` is given (env or config), the key is
+/// derived as `<project_key_prefix>/<session-root-basename>` (prefix
+/// defaults to `/data/journal`, the layout the Fly deploy runbook
+/// provisions), so each repo lands in its own remote EventLog without any
+/// per-project configuration. An explicit `project_key` pins one project to
+/// a fixed remote root (the rare case).
 ///
 /// The bearer token is never written in config — `token_env` names the env
 /// var that carries it (default `JOURNAL_MCP_HTTP_TOKEN`); unset or empty
@@ -957,7 +980,27 @@ fn resolve_journal_remote(session_root: &Path) -> Option<(String, Option<String>
         .as_ref()
         .and_then(|e| e.token_env.clone())
         .unwrap_or_else(|| "JOURNAL_MCP_HTTP_TOKEN".to_string());
-    let token = std::env::var(&token_env).ok().filter(|t| !t.is_empty());
+    let token = std::env::var(&token_env)
+        .ok()
+        .filter(|t| !t.is_empty())
+        .or_else(|| {
+            // MCP hosts spawn lds with an environment the user does not
+            // control per-project (project .mcp.json has no token), so fall
+            // back to a token file the server reads itself: explicit
+            // `token_file`, else the conventional
+            // `~/.config/lds/journal-mcp-token`.
+            let path = endpoint
+                .as_ref()
+                .and_then(|e| e.token_file.clone())
+                .or_else(|| {
+                    lds_core::config::user_config_path()
+                        .and_then(|p| p.parent().map(|d| d.join("journal-mcp-token")))
+                })?;
+            std::fs::read_to_string(path)
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|t| !t.is_empty())
+        });
     let project_key = std::env::var("LDS_JOURNAL_REMOTE_PROJECT_KEY")
         .ok()
         .filter(|k| !k.is_empty())
@@ -966,6 +1009,23 @@ fn resolve_journal_remote(session_root: &Path) -> Option<(String, Option<String>
                 .as_ref()
                 .and_then(|e| e.project_key.clone())
                 .filter(|k| !k.is_empty())
+        })
+        .or_else(|| {
+            // All-projects default: derive the key from the repo name so a
+            // single user-global [remote.journal] entry namespaces every
+            // project on the daemon.
+            let prefix = endpoint
+                .as_ref()
+                .and_then(|e| e.project_key_prefix.clone())
+                .filter(|p| !p.is_empty())
+                .unwrap_or_else(|| "/data/journal".to_string());
+            session_root.file_name().map(|name| {
+                format!(
+                    "{}/{}",
+                    prefix.trim_end_matches('/'),
+                    name.to_string_lossy()
+                )
+            })
         });
     Some((url, token, project_key))
 }

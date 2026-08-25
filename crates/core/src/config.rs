@@ -104,8 +104,25 @@ pub struct RemoteEndpoint {
     /// daemon's conventional name (e.g. `OUTLINE_MCP_HTTP_TOKEN`); an unset
     /// or empty variable means "no token" (loopback daemons allow that).
     pub token_env: Option<String>,
-    /// Project key sent instead of a local path (journal only, future).
+    /// File holding the bearer token (first line, trimmed). Checked when
+    /// the `token_env` variable is unset — MCP hosts spawn lds with an
+    /// environment the user does not control per-project, so a file the
+    /// server reads itself is the reliable path. The journal endpoint
+    /// defaults to `~/.config/lds/journal-mcp-token` when this is unset.
+    /// Keep the file itself out of config.toml (it travels through pack /
+    /// backup paths); mode 0600 recommended.
+    pub token_file: Option<PathBuf>,
+    /// Project key sent instead of a local path (journal only). Explicit
+    /// per-project pin — the normal all-projects setup leaves this unset
+    /// and lets the key be derived as `<project_key_prefix>/<repo-name>`.
     pub project_key: Option<String>,
+    /// Prefix for the derived project key (journal only). When
+    /// `project_key` is unset, the forwarded key becomes
+    /// `<prefix>/<session-root-basename>`, so one user-global
+    /// `[remote.journal]` entry namespaces every project automatically.
+    /// Defaults to `/data/journal` (the layout the Fly deploy runbook
+    /// provisions).
+    pub project_key_prefix: Option<String>,
 }
 
 /// Recipe-related configuration.

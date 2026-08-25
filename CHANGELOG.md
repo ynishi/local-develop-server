@@ -15,11 +15,21 @@ All notable changes to this project will be documented in this file.
   env overrides `LDS_JOURNAL_REMOTE_URL` / `LDS_JOURNAL_REMOTE_PROJECT_KEY`,
   token default env `JOURNAL_MCP_HTTP_TOKEN`) forwards `journal_*` calls to a
   `journal-mcp --mcp-http` daemon over streamable HTTP (bearer auth,
-  rustls). Calls that omit `project_root` get `project_key` injected so the
-  daemon addresses this project's EventLog (`/data/journal/<repo>` style
-  namespacing — one daemon, N EventLogs); embed mode stays the default and
-  an unreachable daemon fails loudly instead of falling back to a local
-  EventLog.
+  rustls). Calls that omit `project_root` get a project key injected so the
+  daemon addresses this project's EventLog (one daemon, N EventLogs). The
+  key is derived automatically as `<project_key_prefix>/<repo-name>`
+  (prefix default `/data/journal`), so **one user-global `[remote.journal]`
+  entry forwards every project** with per-repo namespacing; an explicit
+  `project_key` pins a single project instead. Embed mode stays the default
+  and an unreachable daemon fails loudly instead of falling back to a local
+  EventLog. Remote mode mounts eagerly at server startup (keyed off the
+  startup cwd) so the journal tools appear in a host's connect-time
+  `tools/list`; embed mode stays session-gated to avoid creating
+  `workspace/.journal.db` under an arbitrary launch cwd. Token resolution
+  falls back from the `token_env` variable to a `token_file`
+  (default `~/.config/lds/journal-mcp-token`) — MCP hosts spawn lds with an
+  environment the user does not control per-project, so the server reads
+  the token itself.
 
 ### Changed
 
