@@ -6,7 +6,26 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- `journal_dump` tool now forwarded through the journal module: renders the
+  EventLog to a journal.md-equivalent Markdown string returned as the tool
+  result (no server-side file write) — the client materializes the local
+  file itself.
+- journal module remote mode: `[remote.journal]` endpoint (url / token_env /
+  project_key in `~/.config/lds/config.toml` or `<session_root>/config.toml`,
+  env overrides `LDS_JOURNAL_REMOTE_URL` / `LDS_JOURNAL_REMOTE_PROJECT_KEY`,
+  token default env `JOURNAL_MCP_HTTP_TOKEN`) forwards `journal_*` calls to a
+  `journal-mcp --mcp-http` daemon over streamable HTTP (bearer auth,
+  rustls). Calls that omit `project_root` get `project_key` injected so the
+  daemon addresses this project's EventLog (`/data/journal/<repo>` style
+  namespacing — one daemon, N EventLogs); embed mode stays the default and
+  an unreachable daemon fails loudly instead of falling back to a local
+  EventLog.
+
 ### Changed
+
+- journal module: `journal-mcp-rmcp` 0.6.0 -> 0.7.0 (18 tools; upstream adds
+  `journal_dump` and the streamable-HTTP daemon mode the remote forward
+  targets).
 
 ### Deprecated
 

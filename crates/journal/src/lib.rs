@@ -7,7 +7,7 @@
 //! Thin wrapper around `journal-mcp-rmcp::JournalMcpServer`. Delegates
 //! `list_tools` / `call_tool` / `list_resources` / `read_resource` to the
 //! upstream MCP server. Unlike `lds-outline`, no name-prefix rewriting is
-//! needed — journal-mcp's 17 tools are already namespaced with the
+//! needed — journal-mcp's 18 tools are already namespaced with the
 //! `journal_` prefix in-crate (`journal_open_chapter`,
 //! `journal_append_section`, …), so the wrapper just detects that prefix
 //! on incoming tool calls and forwards verbatim.

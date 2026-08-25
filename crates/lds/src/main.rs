@@ -917,6 +917,59 @@ fn resolve_outline_remote(session_root: &Path) -> Option<(String, Option<String>
     Some((url, token))
 }
 
+/// Resolve the journal remote endpoint, if any:
+/// `(url, bearer_token, project_key)`.
+///
+/// Same precedence as [`resolve_outline_remote`] (user config < project
+/// config < env). `project_key` is the remote project root injected into
+/// forwarded calls that omit `project_root` (e.g. `/data/journal/<repo>` on
+/// the daemon's volume — the daemon namespaces EventLogs by path, so the
+/// session-local root is meaningless there):
+///
+/// 1. unset everywhere → `None` (embed mode, backward-compatible default)
+/// 2. `[remote.journal]` in `~/.config/lds/config.toml`
+/// 3. `[remote.journal]` in `<session_root>/config.toml`
+/// 4. `LDS_JOURNAL_REMOTE_URL` / `LDS_JOURNAL_REMOTE_PROJECT_KEY` env
+///
+/// The bearer token is never written in config — `token_env` names the env
+/// var that carries it (default `JOURNAL_MCP_HTTP_TOKEN`); unset or empty
+/// means "no token" (fine for loopback daemons).
+fn resolve_journal_remote(session_root: &Path) -> Option<(String, Option<String>, Option<String>)> {
+    let endpoint = {
+        let user = Config::load(&user_config_path())
+            .ok()
+            .and_then(|c| c.remote.journal);
+        let project = Config::load(&session_root.join("config.toml"))
+            .ok()
+            .and_then(|c| c.remote.journal);
+        project.or(user)
+    };
+    let url = std::env::var("LDS_JOURNAL_REMOTE_URL")
+        .ok()
+        .filter(|u| !u.is_empty())
+        .or_else(|| {
+            endpoint
+                .as_ref()
+                .map(|e| e.url.clone())
+                .filter(|u| !u.is_empty())
+        })?;
+    let token_env = endpoint
+        .as_ref()
+        .and_then(|e| e.token_env.clone())
+        .unwrap_or_else(|| "JOURNAL_MCP_HTTP_TOKEN".to_string());
+    let token = std::env::var(&token_env).ok().filter(|t| !t.is_empty());
+    let project_key = std::env::var("LDS_JOURNAL_REMOTE_PROJECT_KEY")
+        .ok()
+        .filter(|k| !k.is_empty())
+        .or_else(|| {
+            endpoint
+                .as_ref()
+                .and_then(|e| e.project_key.clone())
+                .filter(|k| !k.is_empty())
+        });
+    Some((url, token, project_key))
+}
+
 /// Build a session and its local (non-network) modules on `inner`.
 ///
 /// This is the fast, synchronous half of session construction: starting the
@@ -947,31 +1000,47 @@ fn start_session_locally(
             .map_err(|e| McpError::internal_error(e.to_string(), None))?,
     );
     inner.sandbox_python = Some(SandboxPython::new(session.root()));
-    inner.journal = Some({
-        // Opt-in file projection: LDS_JOURNAL_FILE_ENABLE turns it on; the
-        // default output path lives under the session root but can be
-        // overridden via LDS_JOURNAL_FILE_OUTPUT_PATH (relative paths
-        // resolve against session.root()). Startup-time attachment is
-        // passed to the upstream journal-mcp-rmcp server via
-        // RunConfig.file_projection; runtime attach/detach continues to
-        // work through the `journal_projection_*` MCP tools.
-        let file_projection = if std::env::var_os("LDS_JOURNAL_FILE_ENABLE").is_some() {
-            match std::env::var_os("LDS_JOURNAL_FILE_OUTPUT_PATH") {
-                Some(raw) => {
-                    let p = PathBuf::from(raw);
-                    Some(if p.is_absolute() {
-                        p
-                    } else {
-                        session.root().join(p)
-                    })
+    // Journal module: remote mode when a `[remote.journal]` endpoint is
+    // configured (env > project config > user config — see
+    // `resolve_journal_remote`), embed mode otherwise. Remote construction
+    // performs no I/O (lazy connect on first call) so it cannot fail here —
+    // and an unreachable daemon later fails the tool call loudly instead of
+    // silently falling back to a local EventLog (that fallback would create
+    // two writable copies of the project's canonical history). Local
+    // `journal.md` materialization in remote mode goes through the
+    // `journal_dump` tool (daemon renders, client writes).
+    inner.journal = Some(match resolve_journal_remote(session.root()) {
+        Some((url, token, project_key)) => {
+            tracing::info!(url = %url, project_key = ?project_key, "journal module in remote mode (SSOT daemon)");
+            JournalModule::new_remote(url, token, project_key)
+        }
+        None => {
+            // Opt-in file projection: LDS_JOURNAL_FILE_ENABLE turns it on;
+            // the default output path lives under the session root but can
+            // be overridden via LDS_JOURNAL_FILE_OUTPUT_PATH (relative
+            // paths resolve against session.root()). Startup-time
+            // attachment is passed to the upstream journal-mcp-rmcp server
+            // via RunConfig.file_projection; runtime attach/detach
+            // continues to work through the `journal_projection_*` MCP
+            // tools.
+            let file_projection = if std::env::var_os("LDS_JOURNAL_FILE_ENABLE").is_some() {
+                match std::env::var_os("LDS_JOURNAL_FILE_OUTPUT_PATH") {
+                    Some(raw) => {
+                        let p = PathBuf::from(raw);
+                        Some(if p.is_absolute() {
+                            p
+                        } else {
+                            session.root().join(p)
+                        })
+                    }
+                    None => Some(session.root().join("workspace").join("journal.md")),
                 }
-                None => Some(session.root().join("workspace").join("journal.md")),
-            }
-        } else {
-            None
-        };
-        JournalModule::new(session.root().to_path_buf(), file_projection)
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?
+            } else {
+                None
+            };
+            JournalModule::new(session.root().to_path_buf(), file_projection)
+                .map_err(|e| McpError::internal_error(e.to_string(), None))?
+        }
     });
     // Outline module: remote mode when a `[remote.outline]` endpoint is
     // configured (env > project config > user config — see
