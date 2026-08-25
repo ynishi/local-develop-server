@@ -11,10 +11,15 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
-lds-core = { path = "../core", version = "0.16.0" }
+lds-core = { path = "../core", version = "0.16.1" }
 outline-mcp-rmcp = "0.10.0"
 anyhow.workspace = true
 rmcp.workspace = true
 tracing.workspace = true
 tokio = { workspace = true }
-reqwest = { version = "0.13", default-features = false }
+# TLS and nothing else: remote mode talks to an https endpoint, and a build
+# without it fails at connect time with `invalid URL, scheme is not http`
+# rather than at compile time. `rustls` is what reqwest's own `default-tls`
+# resolves to on 0.13; the rest of the default set (charset / http2 /
+# system-proxy) stays off, as it was.
+reqwest = { version = "0.13", default-features = false, features = ["rustls"] }

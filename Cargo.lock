@@ -1168,7 +1168,7 @@ checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
 
 [[package]]
 name = "lds-core"
-version = "0.16.0"
+version = "0.16.1"
 dependencies = [
  "dirs",
  "lds-session",
@@ -1183,7 +1183,7 @@ dependencies = [
 
 [[package]]
 name = "lds-gh"
-version = "0.16.0"
+version = "0.16.1"
 dependencies = [
  "anyhow",
  "lds-core",
@@ -1195,7 +1195,7 @@ dependencies = [
 
 [[package]]
 name = "lds-git"
-version = "0.16.0"
+version = "0.16.1"
 dependencies = [
  "anyhow",
  "git2",
@@ -1210,7 +1210,7 @@ dependencies = [
 
 [[package]]
 name = "lds-journal"
-version = "0.16.0"
+version = "0.16.1"
 dependencies = [
  "anyhow",
  "journal-mcp-rmcp",
@@ -1224,7 +1224,7 @@ dependencies = [
 
 [[package]]
 name = "lds-outline"
-version = "0.16.0"
+version = "0.16.1"
 dependencies = [
  "anyhow",
  "lds-core",
@@ -1237,7 +1237,7 @@ dependencies = [
 
 [[package]]
 name = "lds-pack"
-version = "0.16.0"
+version = "0.16.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1254,7 +1254,7 @@ dependencies = [
 
 [[package]]
 name = "lds-publicity"
-version = "0.16.0"
+version = "0.16.1"
 dependencies = [
  "anyhow",
  "lds-core",
@@ -1270,7 +1270,7 @@ dependencies = [
 
 [[package]]
 name = "lds-recipe"
-version = "0.16.0"
+version = "0.16.1"
 dependencies = [
  "anyhow",
  "lds-core",
@@ -1284,7 +1284,7 @@ dependencies = [
 
 [[package]]
 name = "lds-router"
-version = "0.16.0"
+version = "0.16.1"
 dependencies = [
  "futures",
  "rmcp",
@@ -1299,7 +1299,7 @@ dependencies = [
 
 [[package]]
 name = "lds-sandbox"
-version = "0.16.0"
+version = "0.16.1"
 dependencies = [
  "anyhow",
  "lds-core",
@@ -1313,7 +1313,7 @@ dependencies = [
 
 [[package]]
 name = "lds-session"
-version = "0.16.0"
+version = "0.16.1"
 dependencies = [
  "tempfile",
  "thiserror 2.0.18",
@@ -1400,7 +1400,7 @@ checksum = "92daf443525c4cce67b150400bc2316076100ce0b3686209eb8cf3c31612e6f0"
 
 [[package]]
 name = "local-develop-server"
-version = "0.16.0"
+version = "0.16.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1718,9 +1718,9 @@ dependencies = [
 
 [[package]]
 name = "quinn-proto"
-version = "0.11.17"
+version = "0.11.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "04759210543be93709136e28212294a659ef5001836ff4eab4d663e4529bba83"
+checksum = "2f4bfc015262b9df63c8845072ce59068853ff5872180c2ce2f13038b970e560"
 dependencies = [
  "aws-lc-rs",
  "bytes",
@@ -2138,9 +2138,9 @@ checksum = "f87165f0995f63a9fbeea62b64d10b4d9d8e78ec6d7d51fb2125fda7bb36788f"
 
 [[package]]
 name = "rustls-webpki"
-version = "0.103.15"
+version = "0.103.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f3c3cf1d8b1e7d4927e2d154c3fcb02979afb9939629c62cd9048d4f07b60ac2"
+checksum = "0527518605e68109d875e248ea259b6758801cf165e4b2c2733ae3b51f12535a"
 dependencies = [
  "aws-lc-rs",
  "ring",
