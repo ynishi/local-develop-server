@@ -6,6 +6,20 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+### Changed
+
+### Deprecated
+
+### Removed
+
+### Fixed
+
+### Security
+
+## [0.17.0] - 2026-08-25
+
+### Added
+
 - `journal_dump` tool now forwarded through the journal module: renders the
   EventLog to a journal.md-equivalent Markdown string returned as the tool
   result (no server-side file write) — the client materializes the local
