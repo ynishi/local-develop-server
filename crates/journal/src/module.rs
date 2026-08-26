@@ -43,6 +43,16 @@ enum SourceOverride {
     Remote,
 }
 
+impl SourceOverride {
+    /// Wire spelling, for echoing the resolved sides back to the caller.
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Local => "local",
+            Self::Remote => "remote",
+        }
+    }
+}
+
 /// Extract (and strip) the `source` argument from a journal tool call.
 ///
 /// - Tools outside [`SOURCE_OVERRIDE_TOOLS`] must not carry `source` — a
@@ -365,6 +375,123 @@ fn remote_err(url: &str, e: impl std::fmt::Display) -> McpError {
     McpError::internal_error(format!("journal remote call failed ({url}): {e}"), None)
 }
 
+/// lds-native tool that moves history between the two stores this process
+/// already holds, without routing the payload through the caller.
+///
+/// `journal_export_events` → `journal_import_events` works only while the
+/// payload fits in a tool result: real history does not. One markdown
+/// migration collapses an entire `journal.md` into a **single** `import`
+/// event, so neither chapter- nor event-level chunking can split it
+/// [実測: agent-profiles export = 119 chapters in 1 event, 580 KB here;
+/// 199 chapters / 553 events / 1.08 MB with a 556 KB single event on the
+/// other host]. Neither escape hatch helps: `journal_import_events` takes
+/// inline content only, and `journal_import`'s `path` resolves on the
+/// server's filesystem, so a local file cannot reach a remote daemon.
+const TRANSFER_TOOL: &str = "journal_transfer";
+
+/// Static wire definition of [`TRANSFER_TOOL`], merged into `list_tools`.
+///
+/// Built through serde so the struct's non-exhaustive optional fields stay
+/// the upstream crate's business.
+fn transfer_tool() -> Tool {
+    serde_json::from_value(serde_json::json!({
+        "name": TRANSFER_TOOL,
+        "description": "Move journal history between the session-local EventLog and the \
+                        configured [remote.journal] daemon inside lds — the payload never \
+                        passes through the caller, so it is not bounded by tool-result size \
+                        (the usual export/import round-trip is: real history contains single \
+                        events too large to hand back). Both directions are supported. \
+                        Import stays atomic: a same-id/different-content event aborts and \
+                        rolls back the whole batch (re-running is safe — rows dedup by \
+                        event id). Returns {chapters_inserted, chapters_skipped, \
+                        events_inserted, events_skipped, bytes_moved}; with dry_run the \
+                        chapter counts are computed against the destination's chapter list \
+                        and the event counts are null (event-level conflicts are only \
+                        decided inside the destination's import transaction).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "from_source": {
+                    "type": "string",
+                    "description": "Read side: \"local\" (session-local EventLog) or \"remote\" (the configured [remote.journal] daemon)."
+                },
+                "to_source": {
+                    "type": "string",
+                    "description": "Write side: \"local\" or \"remote\"."
+                },
+                "from_project_root": {
+                    "type": ["string", "null"],
+                    "description": "Address of the read side. Omitted: the session root for \"local\", the resolved project_key for \"remote\". Set it when the two sides use different names (e.g. after a repo rename)."
+                },
+                "to_project_root": {
+                    "type": ["string", "null"],
+                    "description": "Address of the write side. Same defaulting as from_project_root."
+                },
+                "dry_run": {
+                    "type": ["boolean", "null"],
+                    "description": "Report what would move without writing (default false)."
+                }
+            },
+            "required": ["from_source", "to_source"]
+        },
+        "annotations": {
+            "readOnlyHint": false,
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": false
+        }
+    }))
+    .expect("static journal_transfer tool definition deserializes")
+}
+
+/// Parsed `journal_transfer` arguments.
+#[derive(Debug)]
+struct TransferArgs {
+    from: SourceOverride,
+    to: SourceOverride,
+    from_project_root: Option<String>,
+    to_project_root: Option<String>,
+    dry_run: bool,
+}
+
+impl TransferArgs {
+    fn parse(
+        arguments: &Option<serde_json::Map<String, serde_json::Value>>,
+    ) -> Result<Self, McpError> {
+        let empty = serde_json::Map::new();
+        let args = arguments.as_ref().unwrap_or(&empty);
+        fn side(
+            args: &serde_json::Map<String, serde_json::Value>,
+            key: &str,
+        ) -> Result<SourceOverride, McpError> {
+            match args.get(key).and_then(|v| v.as_str()) {
+                Some("local") => Ok(SourceOverride::Local),
+                Some("remote") => Ok(SourceOverride::Remote),
+                _ => Err(McpError::invalid_params(
+                    format!("{key} is required and must be \"local\" or \"remote\""),
+                    None,
+                )),
+            }
+        }
+        fn root(args: &serde_json::Map<String, serde_json::Value>, key: &str) -> Option<String> {
+            args.get(key)
+                .and_then(|v| v.as_str())
+                .map(str::to_owned)
+                .filter(|s| !s.is_empty())
+        }
+        Ok(Self {
+            from: side(args, "from_source")?,
+            to: side(args, "to_source")?,
+            from_project_root: root(args, "from_project_root"),
+            to_project_root: root(args, "to_project_root"),
+            dry_run: args
+                .get("dry_run")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+        })
+    }
+}
+
 /// Journal module — either a thin wrapper around
 /// `journal-mcp-rmcp::JournalMcpServer` (embed mode) or a streamable-HTTP
 /// client to a central `journal-mcp --mcp-http` daemon (remote mode).
@@ -474,7 +601,202 @@ impl JournalModule {
         };
         let mut tools = listed.tools;
         augment_source_schema(&mut tools);
+        tools.push(transfer_tool());
         Ok(tools)
+    }
+
+    /// Address of one transfer side: the explicit override, else that side's
+    /// default (session root for `local`, resolved `project_key` for
+    /// `remote`). `remote` in embed mode has no address — and no daemon —
+    /// so it errors instead of silently falling back to the local store.
+    fn side_root(
+        &self,
+        side: SourceOverride,
+        explicit: Option<String>,
+    ) -> Result<String, McpError> {
+        if let Some(root) = explicit {
+            return Ok(root);
+        }
+        match (&self.backend, side) {
+            (Backend::Embed { project_root, .. }, SourceOverride::Local) => {
+                Ok(project_root.display().to_string())
+            }
+            (Backend::Embed { .. }, SourceOverride::Remote) => Err(McpError::invalid_params(
+                "source=\"remote\" requested but no [remote.journal] endpoint is configured",
+                None,
+            )),
+            (Backend::Remote(remote), SourceOverride::Local) => {
+                Ok(remote.local_root.display().to_string())
+            }
+            (Backend::Remote(remote), SourceOverride::Remote) => {
+                remote.project_key.clone().ok_or_else(|| {
+                    McpError::invalid_params(
+                        "remote side has no project_key resolved; pass an explicit project_root",
+                        None,
+                    )
+                })
+            }
+        }
+    }
+
+    /// Run one journal tool against a chosen side and return its text body.
+    ///
+    /// `project_root` is always passed explicitly — the transfer addresses
+    /// both stores by name rather than relying on either side's default.
+    async fn call_side(
+        &self,
+        side: SourceOverride,
+        tool: &'static str,
+        mut args: serde_json::Map<String, serde_json::Value>,
+        project_root: &str,
+        context: RequestContext<RoleServer>,
+    ) -> Result<String, McpError> {
+        args.insert(
+            "project_root".to_string(),
+            serde_json::Value::String(project_root.to_string()),
+        );
+        let request = CallToolRequestParams::new(tool).with_arguments(args);
+        let result = match (&self.backend, side) {
+            (Backend::Embed { server, .. }, SourceOverride::Local) => {
+                ServerHandler::call_tool(server, request, context).await?
+            }
+            (Backend::Embed { .. }, SourceOverride::Remote) => {
+                return Err(McpError::invalid_params(
+                    "source=\"remote\" requested but no [remote.journal] endpoint is configured",
+                    None,
+                ));
+            }
+            (Backend::Remote(remote), SourceOverride::Local) => {
+                let server = remote.local_server().await?;
+                ServerHandler::call_tool(server, request, context).await?
+            }
+            (Backend::Remote(remote), SourceOverride::Remote) => remote
+                .peer()
+                .await?
+                .call_tool(request)
+                .await
+                .map_err(|e| remote_err(&remote.url, e))?,
+        };
+        first_text(&result).ok_or_else(|| {
+            McpError::internal_error(format!("{tool} returned no text content"), None)
+        })
+    }
+
+    /// Execute `journal_transfer`: read one store, write the other, report
+    /// counts only.
+    async fn transfer(
+        &self,
+        args: TransferArgs,
+        context: RequestContext<RoleServer>,
+    ) -> Result<CallToolResult, McpError> {
+        let from_root = self.side_root(args.from, args.from_project_root)?;
+        let to_root = self.side_root(args.to, args.to_project_root)?;
+        if args.from == args.to && from_root == to_root {
+            return Err(McpError::invalid_params(
+                format!(
+                    "transfer source and destination are the same store ({from_root}) — nothing to move"
+                ),
+                None,
+            ));
+        }
+
+        let payload = self
+            .call_side(
+                args.from,
+                "journal_export_events",
+                serde_json::Map::new(),
+                &from_root,
+                context.clone(),
+            )
+            .await?;
+        let bytes_moved = payload.len();
+        let doc: serde_json::Value = serde_json::from_str(&payload).map_err(|e| {
+            McpError::internal_error(format!("export payload is not valid JSON: {e}"), None)
+        })?;
+        let source_chapters: Vec<String> = doc
+            .get("chapter_meta")
+            .and_then(|v| v.as_array())
+            .map(|rows| {
+                rows.iter()
+                    .filter_map(|r| r.get("chapter_id").and_then(|v| v.as_str()))
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let source_events = doc
+            .get("events")
+            .and_then(|v| v.as_array())
+            .map_or(0, |v| v.len());
+
+        let report = if args.dry_run {
+            // Chapter-level only: whether an individual event collides is
+            // decided inside the destination's import transaction, which a
+            // dry run does not open.
+            let listing = self
+                .call_side(
+                    args.to,
+                    "journal_chapter_list",
+                    serde_json::Map::new(),
+                    &to_root,
+                    context,
+                )
+                .await?;
+            let existing: std::collections::HashSet<String> =
+                serde_json::from_str::<serde_json::Value>(&listing)
+                    .ok()
+                    .and_then(|v| v.as_array().cloned())
+                    .map(|rows| {
+                        rows.iter()
+                            .filter_map(|r| r.get("chapter_id").and_then(|v| v.as_str()))
+                            .map(str::to_owned)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+            let skipped = source_chapters
+                .iter()
+                .filter(|id| existing.contains(*id))
+                .count();
+            serde_json::json!({
+                "chapters_inserted": source_chapters.len() - skipped,
+                "chapters_skipped": skipped,
+                "events_inserted": serde_json::Value::Null,
+                "events_skipped": serde_json::Value::Null,
+                "events_in_source": source_events,
+                "note": "dry_run: chapter counts are computed against the destination's \
+                         chapter list; event counts are null because event-level conflicts \
+                         are only decided inside the destination's import transaction",
+            })
+        } else {
+            let mut import_args = serde_json::Map::new();
+            import_args.insert("content".to_string(), serde_json::Value::String(payload));
+            let text = self
+                .call_side(
+                    args.to,
+                    "journal_import_events",
+                    import_args,
+                    &to_root,
+                    context,
+                )
+                .await?;
+            serde_json::from_str::<serde_json::Value>(&text).map_err(|e| {
+                McpError::internal_error(format!("import report is not valid JSON: {e}"), None)
+            })?
+        };
+
+        let mut out = serde_json::json!({
+            "from": { "source": args.from.as_str(), "project_root": from_root },
+            "to": { "source": args.to.as_str(), "project_root": to_root },
+            "dry_run": args.dry_run,
+            "bytes_moved": bytes_moved,
+        });
+        if let (Some(dst), Some(src)) = (out.as_object_mut(), report.as_object()) {
+            for (k, v) in src {
+                dst.insert(k.clone(), v.clone());
+            }
+        }
+        Ok(CallToolResult::success(vec![Content::text(
+            out.to_string(),
+        )]))
     }
 
     /// If `request.name` begins with `journal_`, forward to the backend.
@@ -503,6 +825,10 @@ impl JournalModule {
     ) -> Result<Option<CallToolResult>, McpError> {
         if !request.name.starts_with(JOURNAL_TOOL_PREFIX) {
             return Ok(None);
+        }
+        if request.name.as_ref() == TRANSFER_TOOL {
+            let args = TransferArgs::parse(&request.arguments)?;
+            return self.transfer(args, context).await.map(Some);
         }
         let mut request = request;
         let source = take_source_arg(request.name.as_ref(), &mut request.arguments)?;
@@ -682,6 +1008,91 @@ mod tests {
             let err = take_source_arg(name, &mut args).unwrap_err();
             assert!(err.to_string().contains("only supported"), "{name}: {err}");
         }
+    }
+
+    #[test]
+    fn transfer_args_parse_both_directions() {
+        let args = args_of(serde_json::json!({"from_source": "local", "to_source": "remote"}));
+        let parsed = TransferArgs::parse(&args).unwrap();
+        assert_eq!(parsed.from, SourceOverride::Local);
+        assert_eq!(parsed.to, SourceOverride::Remote);
+        assert!(!parsed.dry_run, "dry_run defaults to false");
+        assert_eq!(parsed.from_project_root, None);
+
+        let args = args_of(serde_json::json!({
+            "from_source": "remote",
+            "to_source": "local",
+            "from_project_root": "/data/journal/old-name",
+            "to_project_root": "/home/u/proj",
+            "dry_run": true
+        }));
+        let parsed = TransferArgs::parse(&args).unwrap();
+        assert_eq!(parsed.from, SourceOverride::Remote);
+        assert_eq!(parsed.to, SourceOverride::Local);
+        assert!(parsed.dry_run);
+        assert_eq!(
+            parsed.from_project_root.as_deref(),
+            Some("/data/journal/old-name")
+        );
+        assert_eq!(parsed.to_project_root.as_deref(), Some("/home/u/proj"));
+    }
+
+    #[test]
+    fn transfer_args_reject_missing_or_bad_sides() {
+        for bad in [
+            serde_json::json!({}),
+            serde_json::json!({"from_source": "local"}),
+            serde_json::json!({"from_source": "local", "to_source": "both"}),
+            serde_json::json!({"from_source": null, "to_source": "remote"}),
+        ] {
+            let args = args_of(bad.clone());
+            let err = TransferArgs::parse(&args)
+                .expect_err(&format!("must reject {bad}"))
+                .to_string();
+            assert!(
+                err.contains("must be \"local\" or \"remote\""),
+                "unexpected error for {bad}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn transfer_rejects_same_store() {
+        let tmp = tempfile::TempDir::new().expect("TempDir::new");
+        let module = JournalModule::new(tmp.path().to_path_buf(), None).expect("embed module");
+        // Same side, no explicit roots → both resolve to the session root.
+        let from = module.side_root(SourceOverride::Local, None).unwrap();
+        let to = module.side_root(SourceOverride::Local, None).unwrap();
+        assert_eq!(from, to, "same side must resolve to the same address");
+        // Remote side is unavailable in embed mode.
+        let err = module
+            .side_root(SourceOverride::Remote, None)
+            .expect_err("embed mode has no remote side")
+            .to_string();
+        assert!(err.contains("[remote.journal]"), "got: {err}");
+    }
+
+    #[test]
+    fn transfer_tool_definition_is_wellformed() {
+        let tool = transfer_tool();
+        assert_eq!(tool.name.as_ref(), "journal_transfer");
+        let props = tool.input_schema["properties"].as_object().unwrap();
+        for key in [
+            "from_source",
+            "to_source",
+            "from_project_root",
+            "to_project_root",
+            "dry_run",
+        ] {
+            assert!(props.contains_key(key), "schema must advertise {key}");
+        }
+        let required: Vec<&str> = tool.input_schema["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert_eq!(required, vec!["from_source", "to_source"]);
     }
 
     #[test]

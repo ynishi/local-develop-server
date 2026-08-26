@@ -21,3 +21,6 @@ tokio = { workspace = true }
 # rustls-tls: the remote daemon is typically reached over https (e.g.
 # Fly.io edge TLS); without a TLS backend reqwest fails at send time.
 reqwest = { version = "0.13", default-features = false, features = ["rustls"] }
+
+[dev-dependencies]
+tempfile.workspace = true

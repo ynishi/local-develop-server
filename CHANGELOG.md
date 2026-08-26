@@ -6,6 +6,21 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- journal: `journal_transfer` — moves history between the session-local
+  EventLog and the `[remote.journal]` daemon **inside lds**, so the payload
+  never passes through the caller. The export/import round-trip only works
+  while the payload fits in a tool result, and real history does not: one
+  markdown migration collapses an entire `journal.md` into a single `import`
+  event that no chapter- or event-level chunking can split. Both directions
+  are supported; each side is addressed by its own optional
+  `from_project_root` / `to_project_root` (filesystem path for `local`,
+  daemon namespace for `remote`), defaulting to the session root and the
+  resolved `project_key`. Import stays atomic (a same-id/different-content
+  event rolls the whole batch back; re-running is safe). `dry_run` reports
+  chapter-level counts against the destination's chapter list and leaves the
+  event counts null — event-level conflicts are only decided inside the
+  destination's import transaction.
+
 ### Changed
 
 ### Deprecated
