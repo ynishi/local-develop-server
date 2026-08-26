@@ -1168,7 +1168,7 @@ checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
 
 [[package]]
 name = "lds-core"
-version = "0.19.0"
+version = "0.20.0"
 dependencies = [
  "dirs",
  "lds-session",
@@ -1183,7 +1183,7 @@ dependencies = [
 
 [[package]]
 name = "lds-gh"
-version = "0.19.0"
+version = "0.20.0"
 dependencies = [
  "anyhow",
  "lds-core",
@@ -1195,7 +1195,7 @@ dependencies = [
 
 [[package]]
 name = "lds-git"
-version = "0.19.0"
+version = "0.20.0"
 dependencies = [
  "anyhow",
  "git2",
@@ -1210,7 +1210,7 @@ dependencies = [
 
 [[package]]
 name = "lds-journal"
-version = "0.19.0"
+version = "0.20.0"
 dependencies = [
  "anyhow",
  "journal-mcp-rmcp",
@@ -1224,7 +1224,7 @@ dependencies = [
 
 [[package]]
 name = "lds-outline"
-version = "0.19.0"
+version = "0.20.0"
 dependencies = [
  "anyhow",
  "lds-core",
@@ -1237,7 +1237,7 @@ dependencies = [
 
 [[package]]
 name = "lds-pack"
-version = "0.19.0"
+version = "0.20.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1254,7 +1254,7 @@ dependencies = [
 
 [[package]]
 name = "lds-publicity"
-version = "0.19.0"
+version = "0.20.0"
 dependencies = [
  "anyhow",
  "lds-core",
@@ -1270,7 +1270,7 @@ dependencies = [
 
 [[package]]
 name = "lds-recipe"
-version = "0.19.0"
+version = "0.20.0"
 dependencies = [
  "anyhow",
  "lds-core",
@@ -1284,7 +1284,7 @@ dependencies = [
 
 [[package]]
 name = "lds-router"
-version = "0.19.0"
+version = "0.20.0"
 dependencies = [
  "futures",
  "rmcp",
@@ -1299,7 +1299,7 @@ dependencies = [
 
 [[package]]
 name = "lds-sandbox"
-version = "0.19.0"
+version = "0.20.0"
 dependencies = [
  "anyhow",
  "lds-core",
@@ -1313,7 +1313,7 @@ dependencies = [
 
 [[package]]
 name = "lds-session"
-version = "0.19.0"
+version = "0.20.0"
 dependencies = [
  "tempfile",
  "thiserror 2.0.18",
@@ -1400,7 +1400,7 @@ checksum = "92daf443525c4cce67b150400bc2316076100ce0b3686209eb8cf3c31612e6f0"
 
 [[package]]
 name = "local-develop-server"
-version = "0.19.0"
+version = "0.20.0"
 dependencies = [
  "anyhow",
  "chrono",
