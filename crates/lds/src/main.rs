@@ -261,9 +261,13 @@ impl LdsServer {
         // launched us in. `session_start` re-mounts either way, so the
         // session root remains authoritative once a session exists.
         let journal = startup_cwd.as_deref().and_then(|cwd| {
-            resolve_journal_remote(cwd).map(|(url, token, project_key)| {
-                tracing::info!(url = %url, project_key = ?project_key, "journal module in remote mode (eager, startup cwd)");
-                JournalModule::new_remote(url, token, project_key, cwd.to_path_buf())
+            resolve_journal_remote(cwd).map(|resolved| {
+                tracing::info!(url = %resolved.url, project_key = ?resolved.project_key, "journal module in remote mode (eager, startup cwd)");
+                JournalModule::new_remote(journal_remote_config(
+                    resolved,
+                    cwd.to_path_buf(),
+                    "eager-startup-cwd",
+                ))
             })
         });
         Self {
@@ -957,33 +961,40 @@ fn resolve_outline_remote(session_root: &Path) -> Option<(String, Option<String>
 /// The bearer token is never written in config — `token_env` names the env
 /// var that carries it (default `JOURNAL_MCP_HTTP_TOKEN`); unset or empty
 /// means "no token" (fine for loopback daemons).
-fn resolve_journal_remote(session_root: &Path) -> Option<(String, Option<String>, Option<String>)> {
-    let endpoint = {
+fn resolve_journal_remote(session_root: &Path) -> Option<ResolvedJournalRemote> {
+    let (endpoint, endpoint_source) = {
         let user = Config::load(&user_config_path())
             .ok()
             .and_then(|c| c.remote.journal);
         let project = Config::load(&session_root.join("config.toml"))
             .ok()
             .and_then(|c| c.remote.journal);
-        project.or(user)
+        match (project, user) {
+            (Some(p), _) => (Some(p), "project config.toml"),
+            (None, Some(u)) => (Some(u), "user config.toml"),
+            (None, None) => (None, ""),
+        }
     };
-    let url = std::env::var("LDS_JOURNAL_REMOTE_URL")
+    let (url, url_source) = match std::env::var("LDS_JOURNAL_REMOTE_URL")
         .ok()
         .filter(|u| !u.is_empty())
-        .or_else(|| {
-            endpoint
+    {
+        Some(u) => (u, "env LDS_JOURNAL_REMOTE_URL".to_string()),
+        None => {
+            let u = endpoint
                 .as_ref()
                 .map(|e| e.url.clone())
-                .filter(|u| !u.is_empty())
-        })?;
+                .filter(|u| !u.is_empty())?;
+            (u, format!("{endpoint_source} [remote.journal] url"))
+        }
+    };
     let token_env = endpoint
         .as_ref()
         .and_then(|e| e.token_env.clone())
         .unwrap_or_else(|| "JOURNAL_MCP_HTTP_TOKEN".to_string());
-    let token = std::env::var(&token_env)
-        .ok()
-        .filter(|t| !t.is_empty())
-        .or_else(|| {
+    let (token, token_source) = match std::env::var(&token_env).ok().filter(|t| !t.is_empty()) {
+        Some(t) => (Some(t), format!("env {token_env}")),
+        None => {
             // MCP hosts spawn lds with an environment the user does not
             // control per-project (project .mcp.json has no token), so fall
             // back to a token file the server reads itself: explicit
@@ -992,42 +1003,98 @@ fn resolve_journal_remote(session_root: &Path) -> Option<(String, Option<String>
             let path = endpoint
                 .as_ref()
                 .and_then(|e| e.token_file.clone())
+                .map(|p| (p, "token_file"))
                 .or_else(|| {
                     lds_core::config::user_config_path()
                         .and_then(|p| p.parent().map(|d| d.join("journal-mcp-token")))
-                })?;
-            std::fs::read_to_string(path)
-                .ok()
-                .map(|s| s.trim().to_string())
-                .filter(|t| !t.is_empty())
-        });
-    let project_key = std::env::var("LDS_JOURNAL_REMOTE_PROJECT_KEY")
+                        .map(|p| (p, "default token_file"))
+                });
+            match path {
+                Some((p, kind)) => {
+                    let token = std::fs::read_to_string(&p)
+                        .ok()
+                        .map(|s| s.trim().to_string())
+                        .filter(|t| !t.is_empty());
+                    match token {
+                        Some(t) => (Some(t), format!("{kind} {}", p.display())),
+                        None => (None, "none".to_string()),
+                    }
+                }
+                None => (None, "none".to_string()),
+            }
+        }
+    };
+    let (project_key, project_key_source) = match std::env::var("LDS_JOURNAL_REMOTE_PROJECT_KEY")
         .ok()
         .filter(|k| !k.is_empty())
-        .or_else(|| {
-            endpoint
-                .as_ref()
-                .and_then(|e| e.project_key.clone())
-                .filter(|k| !k.is_empty())
-        })
-        .or_else(|| {
-            // All-projects default: derive the key from the repo name so a
-            // single user-global [remote.journal] entry namespaces every
-            // project on the daemon.
-            let prefix = endpoint
-                .as_ref()
-                .and_then(|e| e.project_key_prefix.clone())
-                .filter(|p| !p.is_empty())
-                .unwrap_or_else(|| "/data/journal".to_string());
-            session_root.file_name().map(|name| {
-                format!(
-                    "{}/{}",
-                    prefix.trim_end_matches('/'),
-                    name.to_string_lossy()
-                )
-            })
-        });
-    Some((url, token, project_key))
+    {
+        Some(k) => (Some(k), "env LDS_JOURNAL_REMOTE_PROJECT_KEY".to_string()),
+        None => match endpoint
+            .as_ref()
+            .and_then(|e| e.project_key.clone())
+            .filter(|k| !k.is_empty())
+        {
+            Some(k) => (
+                Some(k),
+                format!("{endpoint_source} [remote.journal] project_key"),
+            ),
+            None => {
+                // All-projects default: derive the key from the repo name so a
+                // single user-global [remote.journal] entry namespaces every
+                // project on the daemon.
+                let prefix = endpoint
+                    .as_ref()
+                    .and_then(|e| e.project_key_prefix.clone())
+                    .filter(|p| !p.is_empty())
+                    .unwrap_or_else(|| "/data/journal".to_string());
+                let prefix = prefix.trim_end_matches('/').to_string();
+                let key = session_root
+                    .file_name()
+                    .map(|name| format!("{prefix}/{}", name.to_string_lossy()));
+                (key, format!("auto ({prefix}/<session-root-basename>)"))
+            }
+        },
+    };
+    Some(ResolvedJournalRemote {
+        url,
+        url_source,
+        token,
+        token_source,
+        project_key,
+        project_key_source,
+    })
+}
+
+/// Resolved `[remote.journal]` endpoint plus the provenance label of each
+/// value — the labels feed the `config` section of the layered
+/// `journal_info` (values themselves are never echoed there; token stays a
+/// label like `"default token_file <path>"`).
+struct ResolvedJournalRemote {
+    url: String,
+    url_source: String,
+    token: Option<String>,
+    token_source: String,
+    project_key: Option<String>,
+    project_key_source: String,
+}
+
+/// Bundle a [`ResolvedJournalRemote`] into the journal module's remote
+/// config for one mount site.
+fn journal_remote_config(
+    r: ResolvedJournalRemote,
+    local_root: PathBuf,
+    mount: &str,
+) -> lds_journal::RemoteJournalConfig {
+    lds_journal::RemoteJournalConfig {
+        url: r.url,
+        url_source: r.url_source,
+        token: r.token,
+        token_source: r.token_source,
+        project_key: r.project_key,
+        project_key_source: r.project_key_source,
+        local_root,
+        mount: mount.to_string(),
+    }
 }
 
 /// Build a session and its local (non-network) modules on `inner`.
@@ -1070,9 +1137,13 @@ fn start_session_locally(
     // `journal.md` materialization in remote mode goes through the
     // `journal_dump` tool (daemon renders, client writes).
     inner.journal = Some(match resolve_journal_remote(session.root()) {
-        Some((url, token, project_key)) => {
-            tracing::info!(url = %url, project_key = ?project_key, "journal module in remote mode (SSOT daemon)");
-            JournalModule::new_remote(url, token, project_key, session.root().to_path_buf())
+        Some(resolved) => {
+            tracing::info!(url = %resolved.url, project_key = ?resolved.project_key, "journal module in remote mode (SSOT daemon)");
+            JournalModule::new_remote(journal_remote_config(
+                resolved,
+                session.root().to_path_buf(),
+                "session",
+            ))
         }
         None => {
             // Opt-in file projection: LDS_JOURNAL_FILE_ENABLE turns it on;

@@ -5,8 +5,8 @@ use journal_mcp_rmcp::{JournalMcpServer, RunConfig};
 use rmcp::{
     ErrorData as McpError, RoleServer, ServerHandler, ServiceExt,
     model::{
-        CallToolRequestParams, CallToolResult, ListResourcesResult, PaginatedRequestParams,
-        ReadResourceRequestParams, ReadResourceResult, Tool,
+        CallToolRequestParams, CallToolResult, Content, ListResourcesResult,
+        PaginatedRequestParams, ReadResourceRequestParams, ReadResourceResult, Tool,
     },
     service::{Peer, RequestContext, RoleClient, RunningService},
     transport::streamable_http_client::{
@@ -109,6 +109,120 @@ fn augment_source_schema(tools: &mut [Tool]) {
     }
 }
 
+/// The `journal_info` tool name — intercepted in [`JournalModule::try_call`]
+/// to produce the layered (`mode` / `session` / `config` / `server`)
+/// diagnostic instead of the raw upstream payload. Rationale: the upstream
+/// tool takes no parameters and reports the daemon's **startup default
+/// store**, which in remote all-projects mode reads as "every call lands in
+/// default" even though per-call `project_root` injection targets this
+/// session's own namespace.
+const INFO_TOOL: &str = "journal_info";
+
+/// Assemble the layered `journal_info` payload for remote mode.
+///
+/// - `session` — where THIS lds session's calls actually land.
+/// - `config`  — provenance of the `[remote.journal]` resolution (labels
+///   only, never token values), same spirit as `session_info`'s recipe
+///   `resolve_chain`.
+/// - `server`  — the daemon payload verbatim under `info` (its
+///   `project_root` etc. describe the daemon's startup default store, not
+///   this session's namespace — the nesting is what disambiguates; the
+///   fields themselves are never rewritten).
+#[allow(clippy::too_many_arguments)]
+fn remote_info_json(
+    session_root: &std::path::Path,
+    mount: &str,
+    project_key: Option<&str>,
+    chapters: serde_json::Value,
+    url: &str,
+    url_source: &str,
+    token_source: &str,
+    project_key_source: &str,
+    daemon_info_text: &str,
+) -> String {
+    serde_json::json!({
+        "mode": "remote",
+        "session": {
+            "session_root": session_root.display().to_string(),
+            "mount": mount,
+            "project_key": project_key,
+            "chapters": chapters,
+        },
+        "config": {
+            "url_source": url_source,
+            "token_source": token_source,
+            "project_key_source": project_key_source,
+        },
+        "server": {
+            "url": url,
+            "info": parse_or_raw(daemon_info_text),
+        },
+    })
+    .to_string()
+}
+
+/// Assemble the layered `journal_info` payload for embed mode. The embed
+/// server's own info **is** this session's store state, so it passes through
+/// under `server.info`; `config` only records that no remote is configured.
+fn embed_info_json(session_root: &std::path::Path, info_text: &str) -> String {
+    serde_json::json!({
+        "mode": "embed",
+        "session": {
+            "session_root": session_root.display().to_string(),
+            "mount": "session",
+        },
+        "config": {
+            "note": "[remote.journal] not configured (embed mode)",
+        },
+        "server": {
+            "info": parse_or_raw(info_text),
+        },
+    })
+    .to_string()
+}
+
+/// Parse `text` as JSON, falling back to the raw string (never lose the
+/// upstream payload just because it failed to parse).
+fn parse_or_raw(text: &str) -> serde_json::Value {
+    serde_json::from_str(text).unwrap_or_else(|_| serde_json::Value::String(text.to_string()))
+}
+
+/// First text block of a tool result, if any.
+fn first_text(result: &CallToolResult) -> Option<String> {
+    result
+        .content
+        .first()
+        .and_then(|c| c.as_text())
+        .map(|t| t.text.clone())
+}
+
+/// Configuration for a remote-mode [`JournalModule`] — the resolved
+/// `[remote.journal]` endpoint plus the provenance labels the layered
+/// `journal_info` reports. Built by the caller (lds `main.rs`
+/// `resolve_journal_remote`), which is the only place that knows which
+/// config layer (env / project config / user config / auto-derivation)
+/// produced each value.
+pub struct RemoteJournalConfig {
+    /// Streamable-HTTP MCP endpoint, e.g. `https://my-journal.fly.dev/mcp`.
+    pub url: String,
+    /// Where `url` came from (e.g. `"user config.toml [remote.journal] url"`).
+    pub url_source: String,
+    /// Raw bearer token; the transport adds the `Bearer ` prefix.
+    pub token: Option<String>,
+    /// Where the token came from — a label, never the value
+    /// (e.g. `"default token_file ~/.config/lds/journal-mcp-token"`).
+    pub token_source: String,
+    /// Remote project root injected into calls that omit `project_root`.
+    pub project_key: Option<String>,
+    /// Where `project_key` came from (e.g. `"auto (/data/journal/<session-root-basename>)"`).
+    pub project_key_source: String,
+    /// Session-local root for `source="local"` calls on the migration pair.
+    pub local_root: PathBuf,
+    /// Which mount produced this module: `"session"` (session_start) or
+    /// `"eager-startup-cwd"` (server-startup eager remote mount).
+    pub mount: String,
+}
+
 /// Where journal tool calls actually execute.
 enum Backend {
     /// In-process `JournalMcpServer` over the session-local EventLog
@@ -116,6 +230,7 @@ enum Backend {
     Embed {
         server: JournalMcpServer,
         file_projection_path: Option<PathBuf>,
+        project_root: PathBuf,
     },
     /// Remote `journal-mcp --mcp-http` daemon (the SSOT host).
     Remote(RemoteBackend),
@@ -141,6 +256,12 @@ struct RemoteBackend {
     /// session would land in the daemon's startup default project.
     project_key: Option<String>,
     conn: OnceCell<RunningService<RoleClient, ()>>,
+    /// Provenance labels for the layered `journal_info` (`config` section).
+    url_source: String,
+    token_source: String,
+    project_key_source: String,
+    /// Which mount produced this module (`"session"` / `"eager-startup-cwd"`).
+    mount: String,
     /// Session-local root for `source="local"` calls on the migration pair.
     local_root: PathBuf,
     /// Lazily-built embed server over the session-local EventLog. Built on
@@ -203,6 +324,40 @@ impl RemoteBackend {
             .await
             .map(|b| &**b)
     }
+
+    /// Best-effort chapter count of this session's remote namespace (the
+    /// `session.chapters` field of the layered `journal_info`). Never fails
+    /// the info call — errors degrade to a descriptive string so the
+    /// diagnostic stays readable when the daemon or namespace is unhealthy.
+    async fn session_chapter_count(&self) -> serde_json::Value {
+        let Some(key) = &self.project_key else {
+            return serde_json::Value::Null;
+        };
+        let mut args = serde_json::Map::new();
+        args.insert(
+            "project_root".to_string(),
+            serde_json::Value::String(key.clone()),
+        );
+        let request = CallToolRequestParams::new("journal_chapter_list").with_arguments(args);
+        let outcome = async {
+            let result = self
+                .peer()
+                .await?
+                .call_tool(request)
+                .await
+                .map_err(|e| remote_err(&self.url, e))?;
+            Ok::<_, McpError>(first_text(&result))
+        }
+        .await;
+        match outcome {
+            Ok(Some(text)) => match serde_json::from_str::<serde_json::Value>(&text) {
+                Ok(serde_json::Value::Array(rows)) => serde_json::Value::from(rows.len()),
+                _ => serde_json::Value::String("chapter_list returned non-array payload".into()),
+            },
+            Ok(None) => serde_json::Value::String("chapter_list returned no text content".into()),
+            Err(e) => serde_json::Value::String(format!("chapter_list failed: {e}")),
+        }
+    }
 }
 
 /// Map a client-side transport error onto the MCP error the lds caller sees.
@@ -235,7 +390,7 @@ impl JournalModule {
     /// `journal_projection_*` MCP tools).
     pub fn new(project_root: PathBuf, file_projection: Option<PathBuf>) -> Result<Self> {
         let cfg = RunConfig {
-            project_root,
+            project_root: project_root.clone(),
             file_projection: file_projection.clone(),
         };
         let server = JournalMcpServer::new(cfg).context("failed to construct JournalMcpServer")?;
@@ -243,6 +398,7 @@ impl JournalModule {
             backend: Backend::Embed {
                 server,
                 file_projection_path: file_projection,
+                project_root,
             },
         })
     }
@@ -251,26 +407,21 @@ impl JournalModule {
     /// MCP endpoint, e.g. `https://my-journal.fly.dev/mcp`).
     ///
     /// No I/O happens here — see [`RemoteBackend`] for the lazy-connect
-    /// rationale. `token` is the raw bearer token (usually read from the
-    /// env var named by `[remote.journal] token_env`); `project_key` is the
-    /// remote project root injected into calls that omit `project_root`
-    /// (usually `[remote.journal] project_key`). `local_root` is the
-    /// session-local root that `source="local"` calls on the migration
-    /// pair ([`SOURCE_OVERRIDE_TOOLS`]) address; the embed server over it
-    /// is built lazily on the first such call.
-    pub fn new_remote(
-        url: String,
-        token: Option<String>,
-        project_key: Option<String>,
-        local_root: PathBuf,
-    ) -> Self {
+    /// rationale. See [`RemoteJournalConfig`] for the field contracts
+    /// (endpoint + provenance labels + session-local root for the
+    /// `source="local"` migration-pair override).
+    pub fn new_remote(cfg: RemoteJournalConfig) -> Self {
         Self {
             backend: Backend::Remote(RemoteBackend {
-                url,
-                token,
-                project_key,
+                url: cfg.url,
+                token: cfg.token,
+                project_key: cfg.project_key,
                 conn: OnceCell::new(),
-                local_root,
+                url_source: cfg.url_source,
+                token_source: cfg.token_source,
+                project_key_source: cfg.project_key_source,
+                mount: cfg.mount,
+                local_root: cfg.local_root,
                 embed: OnceCell::new(),
             }),
         }
@@ -355,9 +506,24 @@ impl JournalModule {
         }
         let mut request = request;
         let source = take_source_arg(request.name.as_ref(), &mut request.arguments)?;
+        let is_info = request.name.as_ref() == INFO_TOOL;
         let result = match (&self.backend, source) {
-            (Backend::Embed { server, .. }, None | Some(SourceOverride::Local)) => {
-                ServerHandler::call_tool(server, request, context).await?
+            (
+                Backend::Embed {
+                    server,
+                    project_root,
+                    ..
+                },
+                None | Some(SourceOverride::Local),
+            ) => {
+                let result = ServerHandler::call_tool(server, request, context).await?;
+                match first_text(&result).filter(|_| is_info) {
+                    Some(text) => CallToolResult::success(vec![Content::text(embed_info_json(
+                        project_root,
+                        &text,
+                    ))]),
+                    None => result,
+                }
             }
             (Backend::Embed { .. }, Some(SourceOverride::Remote)) => {
                 return Err(McpError::invalid_params(
@@ -371,7 +537,7 @@ impl JournalModule {
             }
             (Backend::Remote(remote), None | Some(SourceOverride::Remote)) => {
                 if let Some(key) = &remote.project_key
-                    && request.name.as_ref() != "journal_info"
+                    && !is_info
                 {
                     let args = request.arguments.get_or_insert_with(Default::default);
                     if !args.contains_key("project_root") {
@@ -381,12 +547,29 @@ impl JournalModule {
                         );
                     }
                 }
-                remote
+                let result = remote
                     .peer()
                     .await?
                     .call_tool(request)
                     .await
-                    .map_err(|e| remote_err(&remote.url, e))?
+                    .map_err(|e| remote_err(&remote.url, e))?;
+                match first_text(&result).filter(|_| is_info) {
+                    Some(text) => {
+                        let chapters = remote.session_chapter_count().await;
+                        CallToolResult::success(vec![Content::text(remote_info_json(
+                            &remote.local_root,
+                            &remote.mount,
+                            remote.project_key.as_deref(),
+                            chapters,
+                            &remote.url,
+                            &remote.url_source,
+                            &remote.token_source,
+                            &remote.project_key_source,
+                            &text,
+                        ))])
+                    }
+                    None => result,
+                }
             }
         };
         Ok(Some(result))
@@ -490,6 +673,66 @@ mod tests {
             let err = take_source_arg(name, &mut args).unwrap_err();
             assert!(err.to_string().contains("only supported"), "{name}: {err}");
         }
+    }
+
+    #[test]
+    fn remote_info_json_layers_session_config_server() {
+        let daemon = r#"{"project_root":"/data/journal/default","version":"0.8.0"}"#;
+        let out = remote_info_json(
+            std::path::Path::new("/home/u/proj"),
+            "session",
+            Some("/data/journal/proj"),
+            serde_json::Value::from(48),
+            "https://j.example/mcp",
+            "user config.toml [remote.journal] url",
+            "default token_file ~/.config/lds/journal-mcp-token",
+            "auto (/data/journal/<session-root-basename>)",
+            daemon,
+        );
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["mode"], "remote");
+        assert_eq!(v["session"]["session_root"], "/home/u/proj");
+        assert_eq!(v["session"]["mount"], "session");
+        assert_eq!(v["session"]["project_key"], "/data/journal/proj");
+        assert_eq!(v["session"]["chapters"], 48);
+        assert_eq!(v["config"]["url_source"], "user config.toml [remote.journal] url");
+        assert!(v["config"]["token_source"].as_str().unwrap().contains("token_file"));
+        // daemon payload passes through verbatim under server.info
+        assert_eq!(v["server"]["url"], "https://j.example/mcp");
+        assert_eq!(v["server"]["info"]["project_root"], "/data/journal/default");
+        assert_eq!(v["server"]["info"]["version"], "0.8.0");
+    }
+
+    #[test]
+    fn remote_info_json_survives_unparseable_daemon_payload() {
+        let out = remote_info_json(
+            std::path::Path::new("/p"),
+            "eager-startup-cwd",
+            None,
+            serde_json::Value::Null,
+            "https://j.example/mcp",
+            "env LDS_JOURNAL_REMOTE_URL",
+            "none",
+            "env LDS_JOURNAL_REMOTE_PROJECT_KEY",
+            "not json at all",
+        );
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["server"]["info"], "not json at all");
+        assert_eq!(v["session"]["project_key"], serde_json::Value::Null);
+    }
+
+    #[test]
+    fn embed_info_json_wraps_passthrough() {
+        let out = embed_info_json(
+            std::path::Path::new("/home/u/proj"),
+            r#"{"project_root":"/home/u/proj","db_exists":true}"#,
+        );
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["mode"], "embed");
+        assert_eq!(v["session"]["session_root"], "/home/u/proj");
+        assert_eq!(v["session"]["mount"], "session");
+        assert_eq!(v["server"]["info"]["db_exists"], true);
+        assert!(v["config"]["note"].as_str().unwrap().contains("not configured"));
     }
 
     #[test]

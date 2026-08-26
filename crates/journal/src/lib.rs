@@ -28,4 +28,4 @@
 pub mod module;
 
 pub use journal_mcp_rmcp;
-pub use module::JournalModule;
+pub use module::{JournalModule, RemoteJournalConfig};

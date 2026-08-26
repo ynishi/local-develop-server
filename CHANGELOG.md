@@ -8,6 +8,17 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
+- journal: `journal_info` now returns a layered diagnostic —
+  `mode` / `session` (this session's actual target: session_root, mount,
+  resolved project_key, live remote chapter count) / `config` (provenance
+  labels for the `[remote.journal]` url / token / project_key resolution,
+  values never echoed) / `server` (daemon payload verbatim under `info`;
+  its `project_root` is the daemon's startup-default store, which the old
+  flat passthrough made read as "every call lands in default"). Embed mode
+  is wrapped in the same shape for consistency.
+
+### Deprecated
+
 ### Deprecated
 
 ### Removed
