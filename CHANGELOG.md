@@ -6,6 +6,20 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+### Changed
+
+### Deprecated
+
+### Removed
+
+### Fixed
+
+### Security
+
+## [0.19.0] - 2026-08-26
+
+### Added
+
 - journal: per-call `source: "local" | "remote"` override on the migration
   pair (`journal_export_events` / `journal_import_events`). Omitted, every
   call keeps going to the config-selected backend; `source="local"` in
