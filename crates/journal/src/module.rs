@@ -23,6 +23,92 @@ use tokio::sync::OnceCell;
 /// without duplicating the literal.
 pub const JOURNAL_TOOL_PREFIX: &str = "journal_";
 
+/// Tools that accept a per-call `source` override (`"local"` | `"remote"`).
+///
+/// Scope is deliberately the events-native migration pair only: which
+/// backend a session talks to is decided by config (`[remote.journal]`
+/// present → remote, absent → embed), and that default is what every call
+/// uses when `source` is omitted. Export/import are the two calls that
+/// *bridge* the copies — with the override, a local→remote migration is
+/// `journal_export_events(source="local")` → `journal_import_events()` in
+/// one process, zero restarts.
+pub const SOURCE_OVERRIDE_TOOLS: [&str; 2] = ["journal_export_events", "journal_import_events"];
+
+/// Parsed value of the per-call `source` argument.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SourceOverride {
+    /// Session-local EventLog (`{session_root}/workspace/.journal.db`).
+    Local,
+    /// Configured `[remote.journal]` daemon.
+    Remote,
+}
+
+/// Extract (and strip) the `source` argument from a journal tool call.
+///
+/// - Tools outside [`SOURCE_OVERRIDE_TOOLS`] must not carry `source` — a
+///   stray value errors loudly instead of being silently dropped (silently
+///   dropping it would look like the override was honored).
+/// - The key is removed from the arguments in every case: neither backend's
+///   upstream schema knows it.
+/// - An explicit `null` is treated as omitted (schema advertises the
+///   property as nullable).
+fn take_source_arg(
+    name: &str,
+    arguments: &mut Option<serde_json::Map<String, serde_json::Value>>,
+) -> Result<Option<SourceOverride>, McpError> {
+    let Some(args) = arguments.as_mut() else {
+        return Ok(None);
+    };
+    let Some(value) = args.remove("source") else {
+        return Ok(None);
+    };
+    if !SOURCE_OVERRIDE_TOOLS.contains(&name) {
+        return Err(McpError::invalid_params(
+            format!(
+                "source is only supported on {} / {} (got it on {name})",
+                SOURCE_OVERRIDE_TOOLS[0], SOURCE_OVERRIDE_TOOLS[1]
+            ),
+            None,
+        ));
+    }
+    match &value {
+        serde_json::Value::Null => Ok(None),
+        serde_json::Value::String(s) if s == "local" => Ok(Some(SourceOverride::Local)),
+        serde_json::Value::String(s) if s == "remote" => Ok(Some(SourceOverride::Remote)),
+        other => Err(McpError::invalid_params(
+            format!("invalid source {other}: expected \"local\" or \"remote\""),
+            None,
+        )),
+    }
+}
+
+/// Advertise the `source` override on the two migration tools.
+///
+/// The upstream (journal-mcp) schemas don't know the parameter — it is an
+/// lds routing concern — so the listed schemas are patched here to keep the
+/// wire contract discoverable.
+fn augment_source_schema(tools: &mut [Tool]) {
+    for tool in tools.iter_mut() {
+        if !SOURCE_OVERRIDE_TOOLS.contains(&tool.name.as_ref()) {
+            continue;
+        }
+        let schema = std::sync::Arc::make_mut(&mut tool.input_schema);
+        if let Some(props) = schema.get_mut("properties").and_then(|p| p.as_object_mut()) {
+            props.insert(
+                "source".to_string(),
+                serde_json::json!({
+                    "type": ["string", "null"],
+                    "description": "Per-call backend override: \"local\" (session-local \
+                                    EventLog) or \"remote\" (the configured [remote.journal] \
+                                    daemon). Omitted: the backend the config selected. Use \
+                                    source=\"local\" on journal_export_events in remote mode \
+                                    to read the pre-migration local history.",
+                }),
+            );
+        }
+    }
+}
+
 /// Where journal tool calls actually execute.
 enum Backend {
     /// In-process `JournalMcpServer` over the session-local EventLog
@@ -55,6 +141,16 @@ struct RemoteBackend {
     /// session would land in the daemon's startup default project.
     project_key: Option<String>,
     conn: OnceCell<RunningService<RoleClient, ()>>,
+    /// Session-local root for `source="local"` calls on the migration pair.
+    local_root: PathBuf,
+    /// Lazily-built embed server over the session-local EventLog. Built on
+    /// the first `source="local"` call — never eagerly, because
+    /// constructing `JournalMcpServer` creates
+    /// `{local_root}/workspace/.journal.db`, and the eager (startup-cwd)
+    /// remote mount must not scatter DB files under whatever cwd the host
+    /// launched lds in. Boxed to keep `RemoteBackend` (and the `Backend`
+    /// enum) slim — the server is a rarely-populated cold path.
+    embed: OnceCell<Box<JournalMcpServer>>,
 }
 
 impl RemoteBackend {
@@ -81,6 +177,31 @@ impl RemoteBackend {
             })
             .await?;
         Ok(running.peer())
+    }
+
+    /// Embed server over the session-local EventLog, built on first use
+    /// (`source="local"` routing). No file projection is attached —
+    /// EventLog-only is all the migration pair needs.
+    async fn local_server(&self) -> Result<&JournalMcpServer, McpError> {
+        self.embed
+            .get_or_try_init(|| async {
+                JournalMcpServer::new(RunConfig {
+                    project_root: self.local_root.clone(),
+                    file_projection: None,
+                })
+                .map(Box::new)
+                .map_err(|e| {
+                    McpError::internal_error(
+                        format!(
+                            "journal local embed init failed ({}): {e}",
+                            self.local_root.display()
+                        ),
+                        None,
+                    )
+                })
+            })
+            .await
+            .map(|b| &**b)
     }
 }
 
@@ -133,14 +254,24 @@ impl JournalModule {
     /// rationale. `token` is the raw bearer token (usually read from the
     /// env var named by `[remote.journal] token_env`); `project_key` is the
     /// remote project root injected into calls that omit `project_root`
-    /// (usually `[remote.journal] project_key`).
-    pub fn new_remote(url: String, token: Option<String>, project_key: Option<String>) -> Self {
+    /// (usually `[remote.journal] project_key`). `local_root` is the
+    /// session-local root that `source="local"` calls on the migration
+    /// pair ([`SOURCE_OVERRIDE_TOOLS`]) address; the embed server over it
+    /// is built lazily on the first such call.
+    pub fn new_remote(
+        url: String,
+        token: Option<String>,
+        project_key: Option<String>,
+        local_root: PathBuf,
+    ) -> Self {
         Self {
             backend: Backend::Remote(RemoteBackend {
                 url,
                 token,
                 project_key,
                 conn: OnceCell::new(),
+                local_root,
+                embed: OnceCell::new(),
             }),
         }
     }
@@ -190,16 +321,30 @@ impl JournalModule {
                 .await
                 .map_err(|e| remote_err(&remote.url, e))?,
         };
-        Ok(listed.tools)
+        let mut tools = listed.tools;
+        augment_source_schema(&mut tools);
+        Ok(tools)
     }
 
-    /// If `request.name` begins with `journal_`, forward to the backend
-    /// verbatim. Otherwise return `Ok(None)` so the caller can try the
-    /// next dispatch layer.
+    /// If `request.name` begins with `journal_`, forward to the backend.
+    /// Otherwise return `Ok(None)` so the caller can try the next dispatch
+    /// layer.
     ///
-    /// In remote mode, a configured `project_key` is injected as
+    /// The migration pair ([`SOURCE_OVERRIDE_TOOLS`]) accepts a per-call
+    /// `source: "local" | "remote"` override; omitted, every tool goes to
+    /// the config-selected backend. Routing matrix:
+    ///
+    /// | config mode | omitted        | `source="local"` | `source="remote"` |
+    /// |-------------|----------------|------------------|-------------------|
+    /// | embed       | embed          | embed            | error (no remote) |
+    /// | remote      | remote         | lazy local embed | remote            |
+    ///
+    /// In remote-routed calls, a configured `project_key` is injected as
     /// `project_root` when the call omits it (`journal_info` excluded — it
-    /// takes no parameters and reports daemon-level state).
+    /// takes no parameters and reports daemon-level state). Local-routed
+    /// calls get no injection (the daemon-side key is meaningless for the
+    /// session-local EventLog); an explicitly passed `project_root` wins on
+    /// both sides, unchanged.
     pub async fn try_call(
         &self,
         request: CallToolRequestParams,
@@ -208,12 +353,23 @@ impl JournalModule {
         if !request.name.starts_with(JOURNAL_TOOL_PREFIX) {
             return Ok(None);
         }
-        let result = match &self.backend {
-            Backend::Embed { server, .. } => {
+        let mut request = request;
+        let source = take_source_arg(request.name.as_ref(), &mut request.arguments)?;
+        let result = match (&self.backend, source) {
+            (Backend::Embed { server, .. }, None | Some(SourceOverride::Local)) => {
                 ServerHandler::call_tool(server, request, context).await?
             }
-            Backend::Remote(remote) => {
-                let mut request = request;
+            (Backend::Embed { .. }, Some(SourceOverride::Remote)) => {
+                return Err(McpError::invalid_params(
+                    "source=\"remote\" requested but no [remote.journal] endpoint is configured",
+                    None,
+                ));
+            }
+            (Backend::Remote(remote), Some(SourceOverride::Local)) => {
+                let server = remote.local_server().await?;
+                ServerHandler::call_tool(server, request, context).await?
+            }
+            (Backend::Remote(remote), None | Some(SourceOverride::Remote)) => {
                 if let Some(key) = &remote.project_key
                     && request.name.as_ref() != "journal_info"
                 {
@@ -277,5 +433,84 @@ impl JournalModule {
                 .map_err(|e| remote_err(&remote.url, e))?,
         };
         Ok(Some(result))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args_of(v: serde_json::Value) -> Option<serde_json::Map<String, serde_json::Value>> {
+        Some(v.as_object().expect("test args must be an object").clone())
+    }
+
+    #[test]
+    fn take_source_omitted_is_none() {
+        let mut none = None;
+        assert_eq!(take_source_arg("journal_export_events", &mut none).unwrap(), None);
+        let mut args = args_of(serde_json::json!({"project_root": "/p"}));
+        assert_eq!(take_source_arg("journal_export_events", &mut args).unwrap(), None);
+        assert!(args.as_ref().unwrap().contains_key("project_root"));
+    }
+
+    #[test]
+    fn take_source_parses_and_strips() {
+        let mut args = args_of(serde_json::json!({"source": "local", "content": "x"}));
+        assert_eq!(
+            take_source_arg("journal_import_events", &mut args).unwrap(),
+            Some(SourceOverride::Local)
+        );
+        let map = args.as_ref().unwrap();
+        assert!(!map.contains_key("source"), "source must be stripped");
+        assert!(map.contains_key("content"));
+
+        let mut args = args_of(serde_json::json!({"source": "remote"}));
+        assert_eq!(
+            take_source_arg("journal_export_events", &mut args).unwrap(),
+            Some(SourceOverride::Remote)
+        );
+
+        // Explicit null is treated as omitted (nullable in the schema).
+        let mut args = args_of(serde_json::json!({"source": null}));
+        assert_eq!(take_source_arg("journal_export_events", &mut args).unwrap(), None);
+        assert!(!args.as_ref().unwrap().contains_key("source"));
+    }
+
+    #[test]
+    fn take_source_rejects_invalid_value() {
+        let mut args = args_of(serde_json::json!({"source": "both"}));
+        let err = take_source_arg("journal_export_events", &mut args).unwrap_err();
+        assert!(err.to_string().contains("invalid source"), "got: {err}");
+    }
+
+    #[test]
+    fn take_source_rejects_non_override_tools() {
+        for name in ["journal_open_chapter", "journal_tail", "journal_dump"] {
+            let mut args = args_of(serde_json::json!({"source": "local"}));
+            let err = take_source_arg(name, &mut args).unwrap_err();
+            assert!(err.to_string().contains("only supported"), "{name}: {err}");
+        }
+    }
+
+    #[test]
+    fn augment_adds_source_to_migration_pair_only() {
+        let mut tools: Vec<Tool> = serde_json::from_value(serde_json::json!([
+            {
+                "name": "journal_export_events",
+                "description": "d",
+                "inputSchema": {"type": "object", "properties": {"project_root": {"type": ["string", "null"]}}}
+            },
+            {
+                "name": "journal_tail",
+                "description": "d",
+                "inputSchema": {"type": "object", "properties": {"n": {"type": ["integer", "null"]}}}
+            }
+        ]))
+        .expect("tool fixtures deserialize");
+        augment_source_schema(&mut tools);
+        let export_props = tools[0].input_schema["properties"].as_object().unwrap();
+        assert!(export_props.contains_key("source"), "export must advertise source");
+        let tail_props = tools[1].input_schema["properties"].as_object().unwrap();
+        assert!(!tail_props.contains_key("source"), "tail must not advertise source");
     }
 }

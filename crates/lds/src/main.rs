@@ -263,7 +263,7 @@ impl LdsServer {
         let journal = startup_cwd.as_deref().and_then(|cwd| {
             resolve_journal_remote(cwd).map(|(url, token, project_key)| {
                 tracing::info!(url = %url, project_key = ?project_key, "journal module in remote mode (eager, startup cwd)");
-                JournalModule::new_remote(url, token, project_key)
+                JournalModule::new_remote(url, token, project_key, cwd.to_path_buf())
             })
         });
         Self {
@@ -1072,7 +1072,7 @@ fn start_session_locally(
     inner.journal = Some(match resolve_journal_remote(session.root()) {
         Some((url, token, project_key)) => {
             tracing::info!(url = %url, project_key = ?project_key, "journal module in remote mode (SSOT daemon)");
-            JournalModule::new_remote(url, token, project_key)
+            JournalModule::new_remote(url, token, project_key, session.root().to_path_buf())
         }
         None => {
             // Opt-in file projection: LDS_JOURNAL_FILE_ENABLE turns it on;

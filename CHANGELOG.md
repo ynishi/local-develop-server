@@ -6,6 +6,14 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- journal: per-call `source: "local" | "remote"` override on the migration
+  pair (`journal_export_events` / `journal_import_events`). Omitted, every
+  call keeps going to the config-selected backend; `source="local"` in
+  remote mode reaches the session-local EventLog through a lazily-built
+  embed server, so a local→remote history migration is two tool calls with
+  zero restarts. `source` on any other journal tool is rejected loudly;
+  `source="remote"` without a `[remote.journal]` endpoint errors.
+
 ### Changed
 
 ### Deprecated
