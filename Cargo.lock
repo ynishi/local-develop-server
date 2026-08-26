@@ -1089,9 +1089,9 @@ dependencies = [
 
 [[package]]
 name = "journal-mcp-core"
-version = "0.8.0"
+version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5c261e68a404abe42c79101726f10f17c8f934d9b3b8d071427bae075127da34"
+checksum = "7136f0f86aa1f0f54e244bf5f6094fc97ff185ddffbc52d0d063b181fc7d9a4c"
 dependencies = [
  "anyhow",
  "rusqlite",
@@ -1107,9 +1107,9 @@ dependencies = [
 
 [[package]]
 name = "journal-mcp-rmcp"
-version = "0.8.0"
+version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "203334d182bf4430bf2a08ead6c9fff0db8b65a63c76e5e9a62fe7cb9e7f93cd"
+checksum = "92de5e5e4af1ec4aa9afddba604277383bafec2ab4acd70bee08a0ab7dea5342"
 dependencies = [
  "anyhow",
  "axum",

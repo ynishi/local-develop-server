@@ -8,6 +8,17 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
+- journal: bump `journal-mcp-rmcp` 0.8.0 → 0.9.0 — the projection now shows
+  what the EventLog holds. Every append to a section survives rendering
+  (previously only the last one), sections outside the schema render instead
+  of being dropped, untouched sections emit no heading, and bodies are escaped
+  so a line starting with `#` no longer splits a chapter when the projection
+  is read back. Chapter headers carry the written name, a rejected open leaves
+  no orphan event, a duplicate chapter id returns a typed error, an empty body
+  for a non-empty-required section is rejected at append time, and
+  `journal_import_events` reports `schemas_unknown`. Existing stores migrate in
+  place — no re-import needed.
+
 ### Deprecated
 
 ### Removed
