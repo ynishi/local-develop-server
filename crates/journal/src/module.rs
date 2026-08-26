@@ -630,9 +630,15 @@ mod tests {
     #[test]
     fn take_source_omitted_is_none() {
         let mut none = None;
-        assert_eq!(take_source_arg("journal_export_events", &mut none).unwrap(), None);
+        assert_eq!(
+            take_source_arg("journal_export_events", &mut none).unwrap(),
+            None
+        );
         let mut args = args_of(serde_json::json!({"project_root": "/p"}));
-        assert_eq!(take_source_arg("journal_export_events", &mut args).unwrap(), None);
+        assert_eq!(
+            take_source_arg("journal_export_events", &mut args).unwrap(),
+            None
+        );
         assert!(args.as_ref().unwrap().contains_key("project_root"));
     }
 
@@ -655,7 +661,10 @@ mod tests {
 
         // Explicit null is treated as omitted (nullable in the schema).
         let mut args = args_of(serde_json::json!({"source": null}));
-        assert_eq!(take_source_arg("journal_export_events", &mut args).unwrap(), None);
+        assert_eq!(
+            take_source_arg("journal_export_events", &mut args).unwrap(),
+            None
+        );
         assert!(!args.as_ref().unwrap().contains_key("source"));
     }
 
@@ -695,8 +704,16 @@ mod tests {
         assert_eq!(v["session"]["mount"], "session");
         assert_eq!(v["session"]["project_key"], "/data/journal/proj");
         assert_eq!(v["session"]["chapters"], 48);
-        assert_eq!(v["config"]["url_source"], "user config.toml [remote.journal] url");
-        assert!(v["config"]["token_source"].as_str().unwrap().contains("token_file"));
+        assert_eq!(
+            v["config"]["url_source"],
+            "user config.toml [remote.journal] url"
+        );
+        assert!(
+            v["config"]["token_source"]
+                .as_str()
+                .unwrap()
+                .contains("token_file")
+        );
         // daemon payload passes through verbatim under server.info
         assert_eq!(v["server"]["url"], "https://j.example/mcp");
         assert_eq!(v["server"]["info"]["project_root"], "/data/journal/default");
@@ -732,7 +749,12 @@ mod tests {
         assert_eq!(v["session"]["session_root"], "/home/u/proj");
         assert_eq!(v["session"]["mount"], "session");
         assert_eq!(v["server"]["info"]["db_exists"], true);
-        assert!(v["config"]["note"].as_str().unwrap().contains("not configured"));
+        assert!(
+            v["config"]["note"]
+                .as_str()
+                .unwrap()
+                .contains("not configured")
+        );
     }
 
     #[test]
@@ -752,8 +774,14 @@ mod tests {
         .expect("tool fixtures deserialize");
         augment_source_schema(&mut tools);
         let export_props = tools[0].input_schema["properties"].as_object().unwrap();
-        assert!(export_props.contains_key("source"), "export must advertise source");
+        assert!(
+            export_props.contains_key("source"),
+            "export must advertise source"
+        );
         let tail_props = tools[1].input_schema["properties"].as_object().unwrap();
-        assert!(!tail_props.contains_key("source"), "tail must not advertise source");
+        assert!(
+            !tail_props.contains_key("source"),
+            "tail must not advertise source"
+        );
     }
 }
