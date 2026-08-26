@@ -6,6 +6,20 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+### Changed
+
+### Deprecated
+
+### Removed
+
+### Fixed
+
+### Security
+
+## [0.21.0] - 2026-08-26
+
+### Added
+
 - journal: `journal_transfer` — moves history between the session-local
   EventLog and the `[remote.journal]` daemon **inside lds**, so the payload
   never passes through the caller. The export/import round-trip only works
