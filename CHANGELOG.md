@@ -8,6 +8,18 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
+### Deprecated
+
+### Removed
+
+### Fixed
+
+### Security
+
+## [0.22.0] - 2026-08-26
+
+### Changed
+
 - journal: bump `journal-mcp-rmcp` 0.8.0 → 0.9.0 — the projection now shows
   what the EventLog holds. Every append to a section survives rendering
   (previously only the last one), sections outside the schema render instead
