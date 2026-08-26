@@ -1,6 +1,6 @@
 [package]
 name = "lds-journal"
-description = "Journal module for local-develop-server (lds) — journal-mcp-rmcp SDK consumer forwarding 18 journal tools through a lds ServerHandler composition point"
+description = "Journal module for local-develop-server (lds) — journal-mcp-rmcp SDK consumer forwarding 20 journal tools through a lds ServerHandler composition point"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -12,7 +12,7 @@ categories.workspace = true
 
 [dependencies]
 lds-core = { path = "../core", version = "0.17.0" }
-journal-mcp-rmcp = "0.7.0"
+journal-mcp-rmcp = "0.8.0"
 anyhow.workspace = true
 rmcp.workspace = true
 tracing.workspace = true

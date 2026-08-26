@@ -8,6 +8,11 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
+- journal: bump `journal-mcp-rmcp` 0.7.0 → 0.8.0 — the events-native migration
+  pair (`journal_export_events` / `journal_import_events`, tool count 18 → 20)
+  is now exposed in local mode too; remote mode already forwards them by the
+  `journal_` prefix (no wrapper change needed).
+
 ### Deprecated
 
 ### Removed
