@@ -77,6 +77,34 @@ const GH_REMOTE_PAIRS = new Set([
   'run rerun',
 ])
 
+const HEREDOC = /<<-?\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\1/
+
+/**
+ * Removes heredoc bodies (`<<EOF` ... `EOF`, `<<-TAG` with leading tabs
+ * stripped) so a script fed to python / cat / tee is not read as commands.
+ * The line that opens the heredoc stays, so `cat <<EOF > f` is still seen.
+ */
+export function stripHeredocs(command: string): string {
+  const lines = command.split('\n')
+  const out: string[] = []
+  let i = 0
+  while (i < lines.length) {
+    const line = lines[i] ?? ''
+    out.push(line)
+    i++
+    const m = HEREDOC.exec(line)
+    if (m === null) continue
+    const tag = m[2] ?? ''
+    const dash = m[0].startsWith('<<-')
+    while (i < lines.length) {
+      const body = lines[i] ?? ''
+      i++
+      if ((dash ? body.replace(/^\t+/, '') : body) === tag) break
+    }
+  }
+  return out.join('\n')
+}
+
 /** Splits on && || ; | newline outside quotes. */
 function splitSegments(command: string): string[] {
   const segments: string[] = []
@@ -395,7 +423,7 @@ function classifySegment(name: string, args: string[]): Classification {
 /** Pure, synchronous. A `remote` segment wins over a `local-git-write` one. */
 export function classify(command: string): Classification {
   let local: Classification = NONE
-  for (const segment of splitSegments(command)) {
+  for (const segment of splitSegments(stripHeredocs(command))) {
     const found = findCommand(tokenize(segment))
     if (found === undefined) continue
     const c = classifySegment(found.name, found.args)
@@ -471,10 +499,15 @@ function textOf(r: McpToolResult): string | undefined {
 async function lookupPublicity(
   $: Dollar,
   server: string,
+  cwd: string,
 ): Promise<PublicityLevel> {
+  // Ask about the directory the command runs in, not lds's own session root
+  // (they differ after `cd other-repo && git push`). lds 0.23+ reads `root`;
+  // older servers ignore the unknown field and answer for their session root.
+  const args: Record<string, unknown> = cwd.startsWith('/') ? { root: cwd } : {}
   let r: McpToolResult
   try {
-    r = await $.mcp.call(server, 'publicity', {})
+    r = await $.mcp.call(server, 'publicity', args)
   } catch {
     return unknownLevel('lds に接続できません')
   }
@@ -519,7 +552,7 @@ async function publicity($: Dollar, server: string): Promise<PublicityLevel> {
   }
   const hit = cache.get(cwd)
   if (hit !== undefined && now !== undefined && now - hit.at < TTL_MS) return hit.value
-  const value = await lookupPublicity($, server)
+  const value = await lookupPublicity($, server, cwd)
   if (value.level !== 'unknown' && now !== undefined) cache.set(cwd, { at: now, value })
   return value
 }

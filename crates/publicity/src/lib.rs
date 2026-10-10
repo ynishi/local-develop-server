@@ -160,6 +160,11 @@ impl PublicityModule {
         Self { session }
     }
 
+    /// The repository root this module classifies (`session.root()`).
+    pub fn root(&self) -> &Path {
+        self.session.root()
+    }
+
     /// Classify every platform that has any signal in the current session root.
     ///
     /// The github probe always runs — a non-git root returns `NOT_GIT`,

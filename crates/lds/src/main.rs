@@ -359,6 +359,13 @@ struct PublicityReq {
     /// probed (github always; crates when Cargo.toml is present).
     #[serde(default)]
     platform: Option<String>,
+    /// Optional repository root to classify instead of the session root.
+    /// Must be an absolute path to an existing directory. Lets a caller
+    /// whose working directory differs from the lds session (a Claude Code
+    /// mod guarding a `cd other-repo && git push`) ask about the repository
+    /// the command will actually touch.
+    #[serde(default)]
+    root: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -1920,14 +1927,46 @@ when the sha is not stash-shaped (>= 2 parents) or is already in the stash list.
     /// `crates` / `crates.io` / `cargo`. Returns
     /// `{ results: [{ platform, publicity, reason, detail }, ...] }`.
     #[tool(
-        description = "Classify per-platform publicity for the current session root. Returns one result per platform (github / crates) with a canonical value in {PUBLIC, PRIVATE, INTERNAL, LOCAL, FORKED, AMBIGUOUS, UNKNOWN} plus a reason and detail JSON. Pass `platform` (optional: github / crates) to restrict to a single platform; omit to probe all applicable."
+        description = "Classify per-platform publicity for the current session root, or for `root` when given (absolute path to an existing directory). Returns one result per platform (github / crates) with a canonical value in {PUBLIC, PRIVATE, INTERNAL, LOCAL, NOT_GIT, FORKED, AMBIGUOUS, UNKNOWN} plus a reason and detail JSON. Pass `platform` (optional: github / crates) to restrict to a single platform; omit to probe all applicable."
     )]
     async fn publicity(
         &self,
         Parameters(req): Parameters<PublicityReq>,
     ) -> Result<CallToolResult, McpError> {
         let inner = self.state.read().await;
-        let publicity = inner.publicity.as_ref().ok_or_else(no_session_error)?;
+        let session_module = inner.publicity.as_ref().ok_or_else(no_session_error)?;
+        // `root` given: classify that directory with a scratch session that
+        // inherits this session's timeout / output limits. The scratch
+        // session is not registered in the ledger and owns nothing.
+        let scratch;
+        let publicity: &PublicityModule = match req.root.as_deref() {
+            None => session_module,
+            Some(raw) => {
+                let root = PathBuf::from(raw);
+                if !root.is_absolute() {
+                    return Err(McpError::invalid_params(
+                        format!("root must be an absolute path: {raw}"),
+                        None,
+                    ));
+                }
+                if !root.is_dir() {
+                    return Err(McpError::invalid_params(
+                        format!("root is not an existing directory: {raw}"),
+                        None,
+                    ));
+                }
+                let current = inner.lds.session().map_err(|_| no_session_error())?;
+                let session = Session::new(SessionConfig {
+                    root,
+                    timeout_secs: Some(current.timeout().as_secs()),
+                    max_output: Some(current.max_output()),
+                    ..SessionConfig::default()
+                })
+                .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+                scratch = PublicityModule::new(Arc::new(session));
+                &scratch
+            }
+        };
         let results = match req.platform.as_deref() {
             None => publicity.detect_all().await,
             Some(label) => {
@@ -1942,7 +1981,7 @@ when the sha is not stash-shaped (>= 2 parents) or is already in the stash list.
                 vec![publicity.detect(p).await]
             }
         };
-        let body = serde_json::json!({ "results": results });
+        let body = serde_json::json!({ "results": results, "root": publicity.root() });
         let text = serde_json::to_string_pretty(&body)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         Ok(CallToolResult::success(vec![Content::text(text)]))

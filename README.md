@@ -92,6 +92,12 @@ MCP request-response — poll `gh_run_view` instead). Invoke those from a shell.
 | `pack_restore` | Restore a pack, rewriting worktree gitdir wiring for the new location — including worktrees beside the project, wired up once both packs are restored side by side. `dry_run` predicts without writing |
 | `pack_inspect` | Read a pack's manifest without unpacking; `files` also lists every packed path |
 
+### Publicity
+
+| Tool | Description |
+|---|---|
+| `publicity` | Classify the repository as `PUBLIC` / `PRIVATE` / `INTERNAL` / `LOCAL` / `NOT_GIT` / `FORKED` / `AMBIGUOUS` / `UNKNOWN`, one result per platform (github via `gh repo view`, crates via `Cargo.toml` `publish`). `platform` restricts to one; `root` (absolute path) classifies a directory other than the session root |
+
 ### Outline
 
 The upstream [outline-mcp][outline-mcp] surface, forwarded in-process under the
@@ -254,6 +260,29 @@ sections. `config.toml` is read once at startup, so changes need a restart.
 Resolution priority (low → high): `~/.config/lds/justfile` → `config.toml`
 `recipes.dirs` → `LDS_RECIPE_GLOBAL_DIRS` → project `justfile`.
 
+## Claude Code mods
+
+`examples/mods/` holds [Claude Code mods](https://code.claude.com/docs/en/plugins/mods/overview)
+that put lds's judgement in front of Claude's own tool calls. They need Claude
+Code 2.1.287 or later and an lds server that `/mcp` lists as `lds`.
+
+| Mod | What it does |
+|---|---|
+| [`lds-leak-guard`](examples/mods/lds-leak-guard/) | A `tool.check` hook on `Bash`. Before `git push` / `gh ... create` / `cargo publish` / `npm publish` / `docker push` and other remote writes it asks `publicity`: **deny** on a `PUBLIC` repository, **ask** otherwise. Bash `git commit` / `merge` / `worktree` / `branch -d` are denied with a pointer to `mcp__lds__git_*`, so the session ownership guard cannot be bypassed from the shell |
+| [`lds-ops-pane`](examples/mods/lds-ops-pane/) | `/lds` opens a pane with the session root, per-platform publicity (`PUBLIC` in red), worktrees with ownership, and the latest journal chapter; a one-line band above the prompt repeats the publicity |
+
+```sh
+claude --plugin-dir examples/mods/lds-leak-guard      # one session
+claude plugin validate examples/mods/lds-leak-guard
+claude plugin test examples/mods/lds-leak-guard
+```
+
+Or install from this repository's marketplace, inside a session:
+
+```
+/plugin install lds-leak-guard --marketplace ynishi/local-develop-server
+```
+
 ## Further reading
 
 | Document | Contents |
@@ -263,6 +292,7 @@ Resolution priority (low → high): `~/.config/lds/justfile` → `config.toml`
 | [docs/architecture.md](docs/architecture.md) | Internal layout, session model, resolve chain |
 | `lds://docs/pack` | Pack field reference (MCP resource) |
 | `lds://docs/multi-session`, `lds://docs/routing` | Session and routing guides (MCP resources) |
+| [examples/mods/](examples/mods/) | Claude Code mods built on lds (`lds-leak-guard`, `lds-ops-pane`) |
 
 ## License
 

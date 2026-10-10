@@ -1,0 +1,19 @@
+{
+  "name": "lds-mods",
+  "owner": {
+    "name": "Yutaka Nishimura"
+  },
+  "description": "Claude Code mods built on local-develop-server (lds): a publicity-aware guard for Bash remote writes, and a session pane.",
+  "plugins": [
+    {
+      "name": "lds-leak-guard",
+      "source": "./examples/mods/lds-leak-guard",
+      "description": "Deny Bash remote writes (git push / gh create / cargo publish ...) on a PUBLIC repository, ask otherwise, and route local git writes to mcp__lds__git_*."
+    },
+    {
+      "name": "lds-ops-pane",
+      "source": "./examples/mods/lds-ops-pane",
+      "description": "A pane and a band above the prompt showing the lds session: root, publicity, owned worktrees, latest journal chapter."
+    }
+  ]
+}

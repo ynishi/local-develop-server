@@ -13,7 +13,28 @@ All notable changes to this project will be documented in this file.
   `git commit` / `merge` / `worktree` / `branch -d` with a pointer to
   `mcp__lds__git_*`, so the session ownership guard is no longer bypassable
   from the shell. Requires Claude Code 2.1.287+. Validated with
-  `claude plugin validate`, 15 tests under `claude plugin test`.
+  `claude plugin validate`, 17 tests under `claude plugin test`. Heredoc
+  bodies (`python3 - <<'EOF' ... EOF`) are stripped before classification so
+  a script that mentions `git push` is not read as the command itself, and
+  the publicity lookup passes Claude's working directory as `root`.
+- examples: `examples/mods/lds-ops-pane` — a mod whose `/lds` command opens a
+  pane with the lds session root, per-platform publicity (`PUBLIC` in red),
+  worktrees with session ownership, and the latest journal chapter, plus a
+  one-line band above the prompt that repeats the publicity (`show_band`
+  turns it off). Refreshes on `session.start` and every `turn.complete`;
+  every lds call that fails is listed under `errors` instead of breaking the
+  pane. 15 tests under `claude plugin test`.
+
+- publicity: optional `root` argument (absolute path to an existing
+  directory) classifies that repository instead of the session root, and the
+  result now carries `root`. A caller whose working directory differs from
+  the lds session (the `lds-leak-guard` mod after `cd other-repo && git push`)
+  can ask about the repository the command will touch. Relative or missing
+  paths are rejected with `invalid_params`.
+- `.claude-plugin/marketplace.json`: the repository is a Claude Code plugin
+  marketplace listing the mods under `examples/mods/`, so
+  `/plugin install lds-leak-guard --marketplace ynishi/local-develop-server`
+  works in one step.
 
 ### Changed
 

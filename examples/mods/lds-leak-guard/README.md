@@ -29,6 +29,12 @@ claude plugin validate examples/mods/lds-leak-guard
 claude plugin test examples/mods/lds-leak-guard
 ```
 
+Or, inside a session, from this repository's marketplace:
+
+```
+/plugin install lds-leak-guard --marketplace ynishi/local-develop-server
+```
+
 ## Options (`userConfig`)
 
 - `lds_server` (string, default `lds`): the MCP server name used for `$.mcp.call`.
@@ -47,4 +53,4 @@ publicity classifier never gets a say. This mod puts both in front of Claude's t
 - Command parsing is heuristic (quote-aware splitting on `&&`, `||`, `;`, `|`, newline), not a
   shell parser: `bash -c "..."`, `$(...)`, aliases and scripts that push internally are not seen.
 - A publicity answer is cached for 5 minutes per working directory (`unknown` is never cached).
-- lds answers for the project root of its own session, which may differ from Claude's cwd.
+- The lookup passes Claude's working directory as `root`, so lds 0.23+ classifies the repository the command runs in. Older lds ignores `root` and answers for its own session root.

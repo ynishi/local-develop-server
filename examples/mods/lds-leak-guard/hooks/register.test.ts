@@ -27,11 +27,19 @@ const github = (publicity: string, extra: Record<string, unknown> = {}) => ({
  * the toast, and stands in for the engine's own `tool.check` verdict (allow).
  * Each test gets its own cwd so the module-level cache never crosses tests.
  */
-function mockWorld(on: On, cwd: string, answer: McpToolResult): { calls: number } {
-  const counter = { calls: 0 }
+function mockWorld(
+  on: On,
+  cwd: string,
+  answer: McpToolResult,
+): { calls: number; lastArgs: Record<string, unknown> | undefined } {
+  const counter: { calls: number; lastArgs: Record<string, unknown> | undefined } = {
+    calls: 0,
+    lastArgs: undefined,
+  }
   mock.clock(on)
-  on('mcp.call', () => {
+  on('mcp.call', (_$, e) => {
     counter.calls++
+    counter.lastArgs = e.args
     return { value: answer }
   })
   on('session.cwd', () => ({ value: cwd }))
@@ -41,6 +49,18 @@ function mockWorld(on: On, cwd: string, answer: McpToolResult): { calls: number 
 }
 
 // --- classify (pure) --------------------------------------------------------
+
+test('classify: a heredoc body is not read as commands', () => {
+  const script = ["python3 - <<'EOF'", "print('git push origin main')", 'EOF'].join('\n')
+  expect(classify(script)).toEqual({ kind: 'none' })
+  const tabbed = ['cat <<-TAG > out.txt', '\tgit push', '\tTAG'].join('\n')
+  expect(classify(tabbed)).toEqual({ kind: 'none' })
+})
+
+test('classify: a command after a heredoc is still seen', () => {
+  const chain = ['cat <<EOF > notes.txt', 'hello', 'EOF', 'git push origin main'].join('\n')
+  expect(classify(chain).kind).toBe('remote')
+})
 
 test('classify: git push -> remote', () => {
   expect(classify('git push origin main').kind).toBe('remote')
@@ -81,10 +101,12 @@ test('classify: curl GET is none, curl -X POST -d is remote', () => {
 // --- $.tool.check end to end ------------------------------------------------
 
 test('tool.check: git push on a PUBLIC repo is denied', async ($, on) => {
-  mockWorld(on, '/repo/public', ldsResult([github('PUBLIC')]))
+  const world = mockWorld(on, '/repo/public', ldsResult([github('PUBLIC')]))
   const r = await $.tool.check({ tool: 'Bash', input: { command: 'git push origin main' } })
   expect(r.decision).toBe('deny')
   expect(r.reason).toContain('PUBLIC')
+  // lds is asked about the directory the command runs in, not its own root
+  expect(world.lastArgs).toEqual({ root: '/repo/public' })
 })
 
 test('tool.check: git push on a PRIVATE repo asks', async ($, on) => {

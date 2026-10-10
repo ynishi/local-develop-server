@@ -1,0 +1,23 @@
+{
+  "name": "lds-ops-pane",
+  "version": "0.1.0",
+  "description": "A pane and a band above the prompt showing the lds session: root, publicity (PUBLIC in red), owned worktrees, and the latest journal chapter.",
+  "author": {
+    "name": "Yutaka Nishimura"
+  },
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "lds_server": {
+      "type": "string",
+      "title": "lds MCP server name",
+      "description": "The name the lds MCP server is registered under (as /mcp lists it).",
+      "default": "lds"
+    },
+    "show_band": {
+      "type": "boolean",
+      "title": "Show the band above the prompt",
+      "description": "Draw the one-line lds summary above the prompt.",
+      "default": true
+    }
+  }
+}
