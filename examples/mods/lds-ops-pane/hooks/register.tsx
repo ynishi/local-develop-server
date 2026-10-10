@@ -430,7 +430,7 @@ export const register: Register = (on, options) => {
         <Box flexDirection="column">
           <Text dimColor>No lds snapshot yet. Run /lds.</Text>
           <Box>
-            <Button key="refresh" label="Refresh" onPress={() => refresh($, server)} />
+            <Button key="refresh" label="Refresh" hotkey="r" onPress={() => refresh($, server)} />
           </Box>
         </Box>
       )
@@ -451,10 +451,11 @@ export const register: Register = (on, options) => {
         ))}
         <Box flexDirection="row" gap={2}>
           <Text dimColor>{`updated ${formatAge(now - snap.at)} ago`}</Text>
-          <Button key="refresh" label="Refresh" onPress={() => refresh($, server)} />
+          <Button key="refresh" label="Refresh" hotkey="r" onPress={() => refresh($, server)} />
           <Button
             key="toggle-band"
             label={isHidden ? 'Show band' : 'Hide band'}
+            hotkey="b"
             onPress={() => update($, isBandHidden, hidden => !hidden)}
           />
         </Box>
@@ -479,6 +480,7 @@ export const register: Register = (on, options) => {
         <Button
           key="hide"
           label="Hide"
+          hotkey="h"
           onPress={() => update($, isBandHidden, () => true)}
         />
       </Box>

@@ -27,6 +27,19 @@ The data comes from lds `session_info`, `git_worktree_list`, `publicity` and `jo
 fetched together at session start, on `/lds`, on `[ Refresh ]` and after every turn. A source that
 fails is listed under `errors` and never stops the rest.
 
+## Keyboard (SSH, tmux, no mouse)
+
+The buttons are keyboard controls; a mouse is optional and only works where
+the terminal forwards clicks.
+
+| Keys | Effect |
+|---|---|
+| `ctrl+x` then `tab` | Focus the band (or the open pane). `tab` / arrows walk its buttons, `enter` presses, `esc` returns to the prompt |
+| `h` (band focused) | Hide the band |
+| `r` / `b` (pane focused) | Refresh / toggle the band |
+| `ctrl+x ctrl+a` | Collapse the band (Claude Code's own `[-]`) |
+| `ctrl+x x` | Close the pane |
+
 ## Requirements
 
 - Claude Code 2.1.287 or later (function hooks / Mods).
