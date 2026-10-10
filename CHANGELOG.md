@@ -6,6 +6,15 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- examples: `examples/mods/lds-leak-guard` — a Claude Code mod (function hook
+  on `tool.check` for `Bash`) that asks lds `publicity` before a Bash command
+  writes to a remote (`git push` / `gh ... create` / `cargo publish` / ...):
+  `deny` on a PUBLIC repository, `ask` otherwise, and `deny` for Bash
+  `git commit` / `merge` / `worktree` / `branch -d` with a pointer to
+  `mcp__lds__git_*`, so the session ownership guard is no longer bypassable
+  from the shell. Requires Claude Code 2.1.287+. Validated with
+  `claude plugin validate`, 15 tests under `claude plugin test`.
+
 ### Changed
 
 ### Deprecated

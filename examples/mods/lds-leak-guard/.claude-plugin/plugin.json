@@ -1,0 +1,22 @@
+{
+  "name": "lds-leak-guard",
+  "version": "0.1.0",
+  "description": "Blocks Bash commands that publish to a remote (git push / gh create / cargo publish ...) when lds classifies the repository as PUBLIC, and routes local git writes to mcp__lds__git_*.",
+  "author": {
+    "name": "Yutaka Nishimura"
+  },
+  "userConfig": {
+    "lds_server": {
+      "type": "string",
+      "title": "lds MCP server name",
+      "description": "The name the lds MCP server is registered under (as /mcp lists it).",
+      "default": "lds"
+    },
+    "guard_local_git_writes": {
+      "type": "boolean",
+      "title": "Guard local git writes",
+      "description": "Deny Bash git commit/merge/worktree/branch-delete and point to mcp__lds__git_* instead.",
+      "default": true
+    }
+  }
+}
