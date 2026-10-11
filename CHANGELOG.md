@@ -6,6 +6,20 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+### Changed
+
+### Deprecated
+
+### Removed
+
+### Fixed
+
+### Security
+
+## [0.23.0] - 2026-10-10
+
+### Added
+
 - examples: `examples/mods/lds-leak-guard` — a Claude Code mod (function hook
   on `tool.check` for `Bash`) that asks lds `publicity` before a Bash command
   writes to a remote (`git push` / `gh ... create` / `cargo publish` / ...):
@@ -23,7 +37,9 @@ All notable changes to this project will be documented in this file.
   one-line band above the prompt that repeats the publicity (`show_band`
   turns it off). Refreshes on `session.start` and every `turn.complete`;
   every lds call that fails is listed under `errors` instead of breaking the
-  pane. 15 tests under `claude plugin test`.
+  pane. Buttons carry hotkeys for keyboard-only terminals (SSH, tmux): after
+  `ctrl+x tab` focuses the band or pane, `h` hides the band, `r` refreshes,
+  `b` toggles the band. 15 tests under `claude plugin test`.
 
 - publicity: optional `root` argument (absolute path to an existing
   directory) classifies that repository instead of the session root, and the
@@ -35,16 +51,6 @@ All notable changes to this project will be documented in this file.
   marketplace listing the mods under `examples/mods/`, so
   `/plugin install lds-leak-guard --marketplace ynishi/local-develop-server`
   works in one step.
-
-### Changed
-
-### Deprecated
-
-### Removed
-
-### Fixed
-
-### Security
 
 ## [0.22.0] - 2026-08-26
 
