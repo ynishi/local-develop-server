@@ -14,6 +14,10 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- Cargo.lock: `chacha20` 0.10.1 → 0.10.2. The 0.10.1 release is yanked on
+  crates.io (transitive via `rmcp` → `rand`); `cargo publish` warned on every
+  crate that locks it.
+
 ### Security
 
 ## [0.23.0] - 2026-10-10
