@@ -66,63 +66,6 @@ pub struct Config {
     pub paths: Paths,
     /// `lds pack` classification overrides.
     pub pack: Pack,
-    /// Remote data-plane endpoints (`[remote.outline]` / `[remote.journal]`).
-    pub remote: Remote,
-}
-
-/// Remote data-plane endpoints.
-///
-/// When an endpoint is declared, the corresponding lds module forwards to a
-/// central `--mcp-http` daemon (the SSOT host) instead of embedding the
-/// upstream server in-process. Absent sections mean "embed locally"
-/// (backward-compatible default).
-///
-/// Declared in the same `config.toml` as `[recipes]` / `[pack]`:
-/// user-global `~/.config/lds/config.toml`, overridden field-wise by the
-/// project-local `<session_root>/config.toml`, overridden by env
-/// (`LDS_OUTLINE_REMOTE_URL` etc.) for one-off switches.
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
-#[serde(default)]
-pub struct Remote {
-    /// Outline books daemon (`outline-mcp --mcp-http`).
-    pub outline: Option<RemoteEndpoint>,
-    /// Journal EventLog daemon (`journal-mcp --mcp-http`, future).
-    pub journal: Option<RemoteEndpoint>,
-}
-
-/// One remote MCP endpoint declaration.
-///
-/// The token itself is never written here — `token_env` names the
-/// environment variable that carries it, because `config.toml` travels
-/// through pack / backup paths where a literal credential must not.
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
-#[serde(default)]
-pub struct RemoteEndpoint {
-    /// Endpoint URL, e.g. `http://ssot-host:8486/mcp`.
-    pub url: String,
-    /// Env var name holding the bearer token. `None` falls back to the
-    /// daemon's conventional name (e.g. `OUTLINE_MCP_HTTP_TOKEN`); an unset
-    /// or empty variable means "no token" (loopback daemons allow that).
-    pub token_env: Option<String>,
-    /// File holding the bearer token (first line, trimmed). Checked when
-    /// the `token_env` variable is unset — MCP hosts spawn lds with an
-    /// environment the user does not control per-project, so a file the
-    /// server reads itself is the reliable path. The journal endpoint
-    /// defaults to `~/.config/lds/journal-mcp-token` when this is unset.
-    /// Keep the file itself out of config.toml (it travels through pack /
-    /// backup paths); mode 0600 recommended.
-    pub token_file: Option<PathBuf>,
-    /// Project key sent instead of a local path (journal only). Explicit
-    /// per-project pin — the normal all-projects setup leaves this unset
-    /// and lets the key be derived as `<project_key_prefix>/<repo-name>`.
-    pub project_key: Option<String>,
-    /// Prefix for the derived project key (journal only). When
-    /// `project_key` is unset, the forwarded key becomes
-    /// `<prefix>/<session-root-basename>`, so one user-global
-    /// `[remote.journal]` entry namespaces every project automatically.
-    /// Defaults to `/data/journal` (the layout the Fly deploy runbook
-    /// provisions).
-    pub project_key_prefix: Option<String>,
 }
 
 /// Recipe-related configuration.
@@ -529,6 +472,35 @@ tools = ["snapshot_create"]
         .unwrap(); // justification: writing known-good TOML in test
 
         let cfg = Config::load(&path).expect("route/export sections must not fail Config parsing");
+        assert_eq!(cfg.recipes.dirs, vec![PathBuf::from("/opt/shared-recipes")]);
+    }
+
+    /// T2-h: a legacy config that still declares `[remote.outline]` /
+    /// `[remote.journal]` (from before the journal / outline modules were
+    /// removed) keeps loading; the obsolete tables are ignored.
+    #[test]
+    fn test_load_ignores_legacy_remote_sections() {
+        let dir = TempDir::new().unwrap(); // justification: test setup
+        let path = dir.path().join("config.toml");
+        fs::write(
+            &path,
+            r#"
+[recipes]
+dirs = ["/opt/shared-recipes"]
+
+[remote.outline]
+url = "http://ssot-host:8486/mcp"
+token_env = "OUTLINE_MCP_HTTP_TOKEN"
+
+[remote.journal]
+url = "http://ssot-host:8487/mcp"
+token_file = "/home/u/.config/lds/journal-mcp-token"
+project_key_prefix = "/data/journal"
+"#,
+        )
+        .unwrap(); // justification: writing known-good TOML in test
+
+        let cfg = Config::load(&path).expect("legacy [remote.*] sections must not fail parsing");
         assert_eq!(cfg.recipes.dirs, vec![PathBuf::from("/opt/shared-recipes")]);
     }
 

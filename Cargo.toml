@@ -4,8 +4,6 @@ members = [
     "crates/core",
     "crates/gh",
     "crates/git",
-    "crates/journal",
-    "crates/outline",
     "crates/pack",
     "crates/publicity",
     "crates/recipe",
@@ -23,7 +21,7 @@ authors = ["Yutaka Nishimura"]
 repository = "https://github.com/ynishi/local-develop-server"
 homepage = "https://github.com/ynishi/local-develop-server"
 documentation = "https://docs.rs/local-develop-server"
-description = "Local Develop Server — MCP server for git, gh, recipes, sessions, sandbox, journal, outline."
+description = "Local Develop Server — MCP server for git, gh, recipes, sessions, sandbox."
 keywords = ["mcp", "development", "agent", "git", "recipe"]
 categories = ["development-tools"]
 readme = "README.md"
@@ -36,7 +34,7 @@ serde_json = "1"
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-rmcp = { version = "1.8", features = [
+rmcp = { version = "3.5.1", features = [
     "server",
     "transport-io",
     "client",

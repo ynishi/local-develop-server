@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { McpToolResult, Register, StateDollar } from 'claude-code'
 
-import type { JournalHead, PublicityRow, Snapshot, Worktree } from '../types'
+import type { PublicityRow, Snapshot, Worktree } from '../types'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -105,22 +105,6 @@ function parsePublicityResults(v: unknown): unknown[] | undefined {
   return isRecord(v) && Array.isArray(v.results) ? (v.results as unknown[]) : undefined
 }
 
-/** `null` means "no chapter yet"; `undefined` means "could not read it". */
-function parseJournal(v: unknown): JournalHead | null | undefined {
-  const list = isRecord(v) ? v.result : v
-  if (!Array.isArray(list)) return undefined
-  if (list.length === 0) return null
-  const item: unknown = list[list.length - 1]
-  if (!isRecord(item) || typeof item.chapter_id !== 'string') return undefined
-  const closed = typeof item.closed_at === 'number' ? item.closed_at : null
-  const opened = typeof item.opened_at === 'number' ? item.opened_at : null
-  return {
-    chapter: item.chapter_id,
-    state: typeof item.current_state === 'string' ? item.current_state : '',
-    at: closed !== null ? closed : opened,
-  }
-}
-
 const PRIVATE_ISH = new Set(['PRIVATE', 'INTERNAL', 'LOCAL', 'NOT_GIT', 'FORKED'])
 
 /** Folds lds `publicity` results[] into one level. Never throws. */
@@ -192,11 +176,10 @@ export async function refresh($: Dollar, server: string): Promise<void> {
   try {
     const call = async (tool: string, args: Record<string, unknown>): Promise<McpToolResult> =>
       $.mcp.call(server, tool, args)
-    const [info, trees, pub, journal] = await Promise.allSettled([
+    const [info, trees, pub] = await Promise.allSettled([
       call('session_info', {}),
       call('git_worktree_list', {}),
       call('publicity', {}),
-      call('journal_tail', { n: 1 }),
     ])
 
     const errors: string[] = []
@@ -216,7 +199,6 @@ export async function refresh($: Dollar, server: string): Promise<void> {
       interpret('git_worktree_list', trees, r => firstParsed(r, parseWorktrees)),
     )
     const results = take(interpret('publicity', pub, r => firstParsed(r, parsePublicityResults)))
-    const head = take(interpret('journal_tail', journal, r => firstParsed(r, parseJournal)))
 
     let at = 0
     try {
@@ -231,7 +213,6 @@ export async function refresh($: Dollar, server: string): Promise<void> {
       level: foldPublicity(results),
       publicity: results === undefined ? [] : toPublicityRows(results),
       worktrees: worktrees === undefined ? [] : worktrees,
-      journal: head === undefined ? null : head,
       errors,
     }
     await update($, snapshot, () => snap)
@@ -356,17 +337,6 @@ export function paneRows(snap: Snapshot, columns: number): Row[] {
     })
   }
 
-  rows.push({
-    label: 'journal',
-    cells:
-      snap.journal === null
-        ? [{ text: '(none)', tone: 'dim' }]
-        : [
-            { text: headOf(snap.journal.chapter, Math.max(10, room - snap.journal.state.length - 2)), tone: 'plain' },
-            { text: snap.journal.state, tone: 'dim' },
-          ],
-  })
-
   snap.errors.forEach((err, i) => {
     rows.push({
       label: i === 0 ? 'errors' : '',
@@ -396,7 +366,7 @@ export const register: Register = (on, options) => {
     try {
       await $.command.register({
         name: 'lds',
-        description: 'Show the lds session pane (root, publicity, worktrees, journal)',
+        description: 'Show the lds session pane (root, publicity, worktrees)',
       })
     } catch {
       // the typeahead entry is a convenience; the snapshot below still helps the band

@@ -13,7 +13,7 @@
     {
       "name": "lds-ops-pane",
       "source": "./examples/mods/lds-ops-pane",
-      "description": "A pane and a band above the prompt showing the lds session: root, publicity, owned worktrees, latest journal chapter."
+      "description": "A pane and a band above the prompt showing the lds session: root, publicity, owned worktrees."
     }
   ]
 }

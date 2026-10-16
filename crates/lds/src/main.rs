@@ -2,7 +2,7 @@ mod cli;
 
 use std::collections::HashMap;
 use std::ffi::OsString;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -10,8 +10,6 @@ use lds_core::config::Config;
 use lds_core::{LdsState, Session, SessionConfig, check_binaries};
 use lds_gh::GhModule;
 use lds_git::{GitModule, LogFilters, OtherStagedMode, ResetMode};
-use lds_journal::JournalModule;
-use lds_outline::OutlineModule;
 use lds_publicity::{Platform, PublicityModule};
 use lds_recipe::RecipeModule;
 use lds_router::{ExportRegistry, McpRouter, RouteConfig};
@@ -21,10 +19,10 @@ use rmcp::RoleServer;
 use rmcp::handler::server::tool::ToolCallContext;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{
-    Annotated, CallToolRequestParams, CallToolResult, Content, ListResourceTemplatesResult,
-    ListResourcesResult, ListToolsResult, PaginatedRequestParams, RawResource, RawResourceTemplate,
-    ReadResourceRequestParams, ReadResourceResult, Resource, ResourceContents, ResourceTemplate,
-    ServerCapabilities, ServerInfo, Tool,
+    CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock,
+    ListResourceTemplatesResult, ListResourcesResult, ListToolsResult, PaginatedRequestParams,
+    ReadResourceRequestParams, ReadResourceResponse, ReadResourceResult, Resource,
+    ResourceContents, ResourceTemplate, ServerCapabilities, ServerConfig, Tool,
 };
 use rmcp::service::RequestContext;
 use rmcp::{ErrorData as McpError, ServerHandler, ServiceExt, tool, tool_handler, tool_router};
@@ -46,8 +44,6 @@ struct Inner {
     recipe: Option<RecipeModule>,
     sandbox_fs: Option<SandboxFs>,
     sandbox_python: Option<SandboxPython>,
-    journal: Option<JournalModule>,
-    outline: Option<OutlineModule>,
     router: Option<McpRouter>,
     export_registry: Option<ExportRegistry>,
     startup_cwd: Option<PathBuf>,
@@ -242,7 +238,9 @@ impl LdsServer {
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         let json = serde_json::to_string_pretty(&output)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        Ok(Some(CallToolResult::success(vec![Content::text(json)])))
+        Ok(Some(CallToolResult::success(vec![ContentBlock::text(
+            json,
+        )])))
     }
 
     fn new() -> Self {
@@ -250,26 +248,6 @@ impl LdsServer {
         let cfg = Config::load_or_default();
         let env_var = std::env::var_os("LDS_RECIPE_GLOBAL_DIRS");
         let startup_global_dirs = Arc::new(resolve_startup_global_dirs(cfg, env_var));
-        // Remote journal mode mounts eagerly at server startup (keyed off the
-        // startup cwd — the MCP host launches lds in the project dir), so the
-        // 18 journal_* tools are present in the host's connect-time
-        // `tools/list` — before any session exists. Session-gated mounting
-        // hid them from hosts that only fetch the tool list once (observed:
-        // Claude Code restart with remote mode configured listed zero
-        // journal_* tools). Embed mode stays session-gated: eager embed
-        // would create `workspace/.journal.db` under whatever cwd the host
-        // launched us in. `session_start` re-mounts either way, so the
-        // session root remains authoritative once a session exists.
-        let journal = startup_cwd.as_deref().and_then(|cwd| {
-            resolve_journal_remote(cwd).map(|resolved| {
-                tracing::info!(url = %resolved.url, project_key = ?resolved.project_key, "journal module in remote mode (eager, startup cwd)");
-                JournalModule::new_remote(journal_remote_config(
-                    resolved,
-                    cwd.to_path_buf(),
-                    "eager-startup-cwd",
-                ))
-            })
-        });
         Self {
             state: Arc::new(RwLock::new(Inner {
                 lds: LdsState::new(),
@@ -279,8 +257,6 @@ impl LdsServer {
                 recipe: None,
                 sandbox_fs: None,
                 sandbox_python: None,
-                journal,
-                outline: None,
                 router: None,
                 export_registry: None,
                 startup_cwd,
@@ -883,13 +859,13 @@ fn parse_other_staged(mode: Option<&str>) -> Result<OtherStagedMode, McpError> {
 /// is pretty-printed JSON.
 ///
 /// Every typed handler funnels through here so the wire shape is uniform:
-/// `Content::text(serde_json::to_string_pretty(&out)?)`. Inlining this at
+/// `ContentBlock::text(serde_json::to_string_pretty(&out)?)`. Inlining this at
 /// each handler would duplicate the same map_err six lines deep across ~30
 /// call sites and let formatting drift between them.
 fn json_result<T: serde::Serialize>(value: &T) -> Result<CallToolResult, McpError> {
     let text = serde_json::to_string_pretty(value)
         .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-    Ok(CallToolResult::success(vec![Content::text(text)]))
+    Ok(CallToolResult::success(vec![ContentBlock::text(text)]))
 }
 
 /// Resolve the user-global `config.toml` path (`~/.config/lds/config.toml`),
@@ -903,212 +879,11 @@ fn user_config_path() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("/nonexistent-home/.config/lds/config.toml"))
 }
 
-/// Resolve the outline remote endpoint, if any: `(url, bearer_token)`.
-///
-/// Precedence (low → high), matching the `[recipes]` / `[[route]]`
-/// convention of "user config, overridden by project config, overridden by
-/// env for one-off switches":
-///
-/// 1. unset everywhere → `None` (embed mode, backward-compatible default)
-/// 2. `[remote.outline]` in `~/.config/lds/config.toml`
-/// 3. `[remote.outline]` in `<session_root>/config.toml`
-/// 4. `LDS_OUTLINE_REMOTE_URL` env
-///
-/// The bearer token is never written in config — `token_env` names the env
-/// var that carries it (default `OUTLINE_MCP_HTTP_TOKEN`); unset or empty
-/// means "no token" (fine for loopback daemons).
-fn resolve_outline_remote(session_root: &Path) -> Option<(String, Option<String>)> {
-    let endpoint = {
-        let user = Config::load(&user_config_path())
-            .ok()
-            .and_then(|c| c.remote.outline);
-        let project = Config::load(&session_root.join("config.toml"))
-            .ok()
-            .and_then(|c| c.remote.outline);
-        project.or(user)
-    };
-    let url = std::env::var("LDS_OUTLINE_REMOTE_URL")
-        .ok()
-        .filter(|u| !u.is_empty())
-        .or_else(|| {
-            endpoint
-                .as_ref()
-                .map(|e| e.url.clone())
-                .filter(|u| !u.is_empty())
-        })?;
-    let token_env = endpoint
-        .as_ref()
-        .and_then(|e| e.token_env.clone())
-        .unwrap_or_else(|| "OUTLINE_MCP_HTTP_TOKEN".to_string());
-    let token = std::env::var(&token_env).ok().filter(|t| !t.is_empty());
-    Some((url, token))
-}
-
-/// Resolve the journal remote endpoint, if any:
-/// `(url, bearer_token, project_key)`.
-///
-/// Same precedence as [`resolve_outline_remote`] (user config < project
-/// config < env). `project_key` is the remote project root injected into
-/// forwarded calls that omit `project_root` (the daemon namespaces
-/// EventLogs by path, so the session-local root is meaningless there):
-///
-/// 1. unset everywhere → `None` (embed mode, backward-compatible default)
-/// 2. `[remote.journal]` in `~/.config/lds/config.toml`
-/// 3. `[remote.journal]` in `<session_root>/config.toml`
-/// 4. `LDS_JOURNAL_REMOTE_URL` / `LDS_JOURNAL_REMOTE_PROJECT_KEY` env
-///
-/// The normal setup is **one user-global entry forwarding every project**:
-/// when no explicit `project_key` is given (env or config), the key is
-/// derived as `<project_key_prefix>/<session-root-basename>` (prefix
-/// defaults to `/data/journal`, the layout the Fly deploy runbook
-/// provisions), so each repo lands in its own remote EventLog without any
-/// per-project configuration. An explicit `project_key` pins one project to
-/// a fixed remote root (the rare case).
-///
-/// The bearer token is never written in config — `token_env` names the env
-/// var that carries it (default `JOURNAL_MCP_HTTP_TOKEN`); unset or empty
-/// means "no token" (fine for loopback daemons).
-fn resolve_journal_remote(session_root: &Path) -> Option<ResolvedJournalRemote> {
-    let (endpoint, endpoint_source) = {
-        let user = Config::load(&user_config_path())
-            .ok()
-            .and_then(|c| c.remote.journal);
-        let project = Config::load(&session_root.join("config.toml"))
-            .ok()
-            .and_then(|c| c.remote.journal);
-        match (project, user) {
-            (Some(p), _) => (Some(p), "project config.toml"),
-            (None, Some(u)) => (Some(u), "user config.toml"),
-            (None, None) => (None, ""),
-        }
-    };
-    let (url, url_source) = match std::env::var("LDS_JOURNAL_REMOTE_URL")
-        .ok()
-        .filter(|u| !u.is_empty())
-    {
-        Some(u) => (u, "env LDS_JOURNAL_REMOTE_URL".to_string()),
-        None => {
-            let u = endpoint
-                .as_ref()
-                .map(|e| e.url.clone())
-                .filter(|u| !u.is_empty())?;
-            (u, format!("{endpoint_source} [remote.journal] url"))
-        }
-    };
-    let token_env = endpoint
-        .as_ref()
-        .and_then(|e| e.token_env.clone())
-        .unwrap_or_else(|| "JOURNAL_MCP_HTTP_TOKEN".to_string());
-    let (token, token_source) = match std::env::var(&token_env).ok().filter(|t| !t.is_empty()) {
-        Some(t) => (Some(t), format!("env {token_env}")),
-        None => {
-            // MCP hosts spawn lds with an environment the user does not
-            // control per-project (project .mcp.json has no token), so fall
-            // back to a token file the server reads itself: explicit
-            // `token_file`, else the conventional
-            // `~/.config/lds/journal-mcp-token`.
-            let path = endpoint
-                .as_ref()
-                .and_then(|e| e.token_file.clone())
-                .map(|p| (p, "token_file"))
-                .or_else(|| {
-                    lds_core::config::user_config_path()
-                        .and_then(|p| p.parent().map(|d| d.join("journal-mcp-token")))
-                        .map(|p| (p, "default token_file"))
-                });
-            match path {
-                Some((p, kind)) => {
-                    let token = std::fs::read_to_string(&p)
-                        .ok()
-                        .map(|s| s.trim().to_string())
-                        .filter(|t| !t.is_empty());
-                    match token {
-                        Some(t) => (Some(t), format!("{kind} {}", p.display())),
-                        None => (None, "none".to_string()),
-                    }
-                }
-                None => (None, "none".to_string()),
-            }
-        }
-    };
-    let (project_key, project_key_source) = match std::env::var("LDS_JOURNAL_REMOTE_PROJECT_KEY")
-        .ok()
-        .filter(|k| !k.is_empty())
-    {
-        Some(k) => (Some(k), "env LDS_JOURNAL_REMOTE_PROJECT_KEY".to_string()),
-        None => match endpoint
-            .as_ref()
-            .and_then(|e| e.project_key.clone())
-            .filter(|k| !k.is_empty())
-        {
-            Some(k) => (
-                Some(k),
-                format!("{endpoint_source} [remote.journal] project_key"),
-            ),
-            None => {
-                // All-projects default: derive the key from the repo name so a
-                // single user-global [remote.journal] entry namespaces every
-                // project on the daemon.
-                let prefix = endpoint
-                    .as_ref()
-                    .and_then(|e| e.project_key_prefix.clone())
-                    .filter(|p| !p.is_empty())
-                    .unwrap_or_else(|| "/data/journal".to_string());
-                let prefix = prefix.trim_end_matches('/').to_string();
-                let key = session_root
-                    .file_name()
-                    .map(|name| format!("{prefix}/{}", name.to_string_lossy()));
-                (key, format!("auto ({prefix}/<session-root-basename>)"))
-            }
-        },
-    };
-    Some(ResolvedJournalRemote {
-        url,
-        url_source,
-        token,
-        token_source,
-        project_key,
-        project_key_source,
-    })
-}
-
-/// Resolved `[remote.journal]` endpoint plus the provenance label of each
-/// value — the labels feed the `config` section of the layered
-/// `journal_info` (values themselves are never echoed there; token stays a
-/// label like `"default token_file <path>"`).
-struct ResolvedJournalRemote {
-    url: String,
-    url_source: String,
-    token: Option<String>,
-    token_source: String,
-    project_key: Option<String>,
-    project_key_source: String,
-}
-
-/// Bundle a [`ResolvedJournalRemote`] into the journal module's remote
-/// config for one mount site.
-fn journal_remote_config(
-    r: ResolvedJournalRemote,
-    local_root: PathBuf,
-    mount: &str,
-) -> lds_journal::RemoteJournalConfig {
-    lds_journal::RemoteJournalConfig {
-        url: r.url,
-        url_source: r.url_source,
-        token: r.token,
-        token_source: r.token_source,
-        project_key: r.project_key,
-        project_key_source: r.project_key_source,
-        local_root,
-        mount: mount.to_string(),
-    }
-}
-
 /// Build a session and its local (non-network) modules on `inner`.
 ///
 /// This is the fast, synchronous half of session construction: starting the
 /// session and wiring `git` / `gh` / `recipe` / `sandbox_fs` /
-/// `sandbox_python` / `journal` touches only local state (no `.await`, no
+/// `sandbox_python` touches only local state (no `.await`, no
 /// upstream I/O). Callers hold `Inner`'s write lock for the duration of this
 /// call and nothing more; [`wire_router_and_exports`] performs the
 /// network-bound half (route/export config load + upstream `list_tools`
@@ -1134,93 +909,6 @@ fn start_session_locally(
             .map_err(|e| McpError::internal_error(e.to_string(), None))?,
     );
     inner.sandbox_python = Some(SandboxPython::new(session.root()));
-    // Journal module: remote mode when a `[remote.journal]` endpoint is
-    // configured (env > project config > user config — see
-    // `resolve_journal_remote`), embed mode otherwise. Remote construction
-    // performs no I/O (lazy connect on first call) so it cannot fail here —
-    // and an unreachable daemon later fails the tool call loudly instead of
-    // silently falling back to a local EventLog (that fallback would create
-    // two writable copies of the project's canonical history). Local
-    // `journal.md` materialization in remote mode goes through the
-    // `journal_dump` tool (daemon renders, client writes).
-    inner.journal = Some(match resolve_journal_remote(session.root()) {
-        Some(resolved) => {
-            tracing::info!(url = %resolved.url, project_key = ?resolved.project_key, "journal module in remote mode (SSOT daemon)");
-            JournalModule::new_remote(journal_remote_config(
-                resolved,
-                session.root().to_path_buf(),
-                "session",
-            ))
-        }
-        None => {
-            // Opt-in file projection: LDS_JOURNAL_FILE_ENABLE turns it on;
-            // the default output path lives under the session root but can
-            // be overridden via LDS_JOURNAL_FILE_OUTPUT_PATH (relative
-            // paths resolve against session.root()). Startup-time
-            // attachment is passed to the upstream journal-mcp-rmcp server
-            // via RunConfig.file_projection; runtime attach/detach
-            // continues to work through the `journal_projection_*` MCP
-            // tools.
-            let file_projection = if std::env::var_os("LDS_JOURNAL_FILE_ENABLE").is_some() {
-                match std::env::var_os("LDS_JOURNAL_FILE_OUTPUT_PATH") {
-                    Some(raw) => {
-                        let p = PathBuf::from(raw);
-                        Some(if p.is_absolute() {
-                            p
-                        } else {
-                            session.root().join(p)
-                        })
-                    }
-                    None => Some(session.root().join("workspace").join("journal.md")),
-                }
-            } else {
-                None
-            };
-            JournalModule::new(session.root().to_path_buf(), file_projection)
-                .map_err(|e| McpError::internal_error(e.to_string(), None))?
-        }
-    });
-    // Outline module: remote mode when a `[remote.outline]` endpoint is
-    // configured (env > project config > user config — see
-    // `resolve_outline_remote`), embed mode otherwise. In embed mode the
-    // shelf root defaults to $HOME/.config/outline-mcp/books (matches the
-    // standalone outline-mcp binary — Outline Books are a global SoT shared
-    // across projects, not per-session); override via LDS_OUTLINE_SHELF_DIR
-    // when a session wants an isolated shelf. Embed init failure downgrades
-    // to None (`outline_*` tools become unavailable); this keeps
-    // session_start resilient to a filesystem hiccup on the shelf directory
-    // rather than aborting the whole session. Remote construction performs
-    // no I/O (lazy connect on first call) so it cannot fail here — and an
-    // unreachable daemon later fails the tool call loudly instead of
-    // silently falling back to a local shelf (that fallback would recreate
-    // the two-writable-copies split this mode exists to remove).
-    inner.outline = match resolve_outline_remote(session.root()) {
-        Some((url, token)) => {
-            tracing::info!(url = %url, "outline module in remote mode (SSOT daemon)");
-            Some(OutlineModule::new_remote(url, token))
-        }
-        None => {
-            let shelf_dir = std::env::var_os("LDS_OUTLINE_SHELF_DIR")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| {
-                    std::env::var("HOME")
-                        .map(PathBuf::from)
-                        .unwrap_or_else(|_| PathBuf::from("."))
-                        .join(".config/outline-mcp/books")
-                });
-            match OutlineModule::new(shelf_dir.clone()) {
-                Ok(m) => Some(m),
-                Err(e) => {
-                    tracing::warn!(
-                        error = %e,
-                        shelf_dir = %shelf_dir.display(),
-                        "OutlineModule init failed; outline_* tools disabled for this session"
-                    );
-                    None
-                }
-            }
-        }
-    };
     Ok(session)
 }
 
@@ -1831,7 +1519,7 @@ when the sha is not stash-shaped (>= 2 parents) or is already in the stash list.
         let out = gh
             .auth_status()
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        Ok(CallToolResult::success(vec![Content::text(out)]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(out)]))
     }
 
     /// List GitHub pull requests (read-only).
@@ -1847,7 +1535,7 @@ when the sha is not stash-shaped (>= 2 parents) or is already in the stash list.
         let out = gh
             .pr_list(req.limit)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        Ok(CallToolResult::success(vec![Content::text(out)]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(out)]))
     }
 
     /// View a single GitHub pull request as JSON (read-only).
@@ -1861,7 +1549,7 @@ when the sha is not stash-shaped (>= 2 parents) or is already in the stash list.
         let out = gh
             .pr_view(req.number)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        Ok(CallToolResult::success(vec![Content::text(out)]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(out)]))
     }
 
     /// Show diff of a GitHub pull request (read-only).
@@ -1875,7 +1563,7 @@ when the sha is not stash-shaped (>= 2 parents) or is already in the stash list.
         let out = gh
             .pr_diff(req.number)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        Ok(CallToolResult::success(vec![Content::text(out)]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(out)]))
     }
 
     /// List GitHub issues (read-only).
@@ -1891,7 +1579,7 @@ when the sha is not stash-shaped (>= 2 parents) or is already in the stash list.
         let out = gh
             .issue_list(req.limit)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        Ok(CallToolResult::success(vec![Content::text(out)]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(out)]))
     }
 
     /// View a single GitHub issue as JSON (read-only).
@@ -1905,7 +1593,7 @@ when the sha is not stash-shaped (>= 2 parents) or is already in the stash list.
         let out = gh
             .issue_view(req.number)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        Ok(CallToolResult::success(vec![Content::text(out)]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(out)]))
     }
 
     /// View repository metadata as JSON (read-only).
@@ -1916,7 +1604,7 @@ when the sha is not stash-shaped (>= 2 parents) or is already in the stash list.
         let out = gh
             .repo_view()
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        Ok(CallToolResult::success(vec![Content::text(out)]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(out)]))
     }
 
     /// Classify per-platform publicity (PUBLIC/PRIVATE/INTERNAL/LOCAL/FORKED/AMBIGUOUS/UNKNOWN).
@@ -1984,7 +1672,7 @@ when the sha is not stash-shaped (>= 2 parents) or is already in the stash list.
         let body = serde_json::json!({ "results": results, "root": publicity.root() });
         let text = serde_json::to_string_pretty(&body)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        Ok(CallToolResult::success(vec![Content::text(text)]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(text)]))
     }
 
     /// List GitHub Actions workflow runs (read-only).
@@ -2000,7 +1688,7 @@ when the sha is not stash-shaped (>= 2 parents) or is already in the stash list.
         let out = gh
             .run_list(req.limit)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        Ok(CallToolResult::success(vec![Content::text(out)]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(out)]))
     }
 
     #[tool(
@@ -2015,7 +1703,7 @@ when the sha is not stash-shaped (>= 2 parents) or is already in the stash list.
         let out = gh
             .run_view(req.run_id, req.repo)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        Ok(CallToolResult::success(vec![Content::text(out)]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(out)]))
     }
 
     #[tool(
@@ -2030,7 +1718,7 @@ when the sha is not stash-shaped (>= 2 parents) or is already in the stash list.
         let out = gh
             .run_log_failed(req.run_id, req.repo, Some(req.tail_lines))
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        Ok(CallToolResult::success(vec![Content::text(out)]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(out)]))
     }
 
     #[tool(
@@ -2045,7 +1733,7 @@ when the sha is not stash-shaped (>= 2 parents) or is already in the stash list.
         let out = gh
             .run_jobs(req.run_id, req.repo)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        Ok(CallToolResult::success(vec![Content::text(out)]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(out)]))
     }
 
     #[tool(
@@ -2060,7 +1748,7 @@ when the sha is not stash-shaped (>= 2 parents) or is already in the stash list.
         let out = gh
             .release_view(req.tag, req.repo)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        Ok(CallToolResult::success(vec![Content::text(out)]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(out)]))
     }
 
     #[tool(
@@ -2075,7 +1763,7 @@ when the sha is not stash-shaped (>= 2 parents) or is already in the stash list.
         let out = gh
             .release_list(req.limit, req.repo)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        Ok(CallToolResult::success(vec![Content::text(out)]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(out)]))
     }
 
     #[tool(
@@ -2090,7 +1778,7 @@ when the sha is not stash-shaped (>= 2 parents) or is already in the stash list.
         let out = gh
             .workflow_list(req.repo)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        Ok(CallToolResult::success(vec![Content::text(out)]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(out)]))
     }
 
     #[tool(
@@ -2105,7 +1793,7 @@ when the sha is not stash-shaped (>= 2 parents) or is already in the stash list.
         let out = gh
             .workflow_view(req.name_or_id, req.repo)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        Ok(CallToolResult::success(vec![Content::text(out)]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(out)]))
     }
 
     #[tool(
@@ -2120,7 +1808,7 @@ when the sha is not stash-shaped (>= 2 parents) or is already in the stash list.
         let out = gh
             .pr_checks(req.number, req.repo)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        Ok(CallToolResult::success(vec![Content::text(out)]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(out)]))
     }
 
     #[tool(description = "List available justfile recipes")]
@@ -2133,7 +1821,7 @@ when the sha is not stash-shaped (>= 2 parents) or is already in the stash list.
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         let json = serde_json::to_string_pretty(&recipes)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        Ok(CallToolResult::success(vec![Content::text(json)]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
     }
 
     #[tool(description = "Run a justfile recipe")]
@@ -2150,7 +1838,7 @@ when the sha is not stash-shaped (>= 2 parents) or is already in the stash list.
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         let json = serde_json::to_string_pretty(&output)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        Ok(CallToolResult::success(vec![Content::text(json)]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
     }
 
     #[tool(
@@ -2185,7 +1873,7 @@ when the sha is not stash-shaped (>= 2 parents) or is already in the stash list.
         };
 
         let json = json.map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        Ok(CallToolResult::success(vec![Content::text(json)]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
     }
 
     #[tool(
@@ -2202,7 +1890,7 @@ when the sha is not stash-shaped (>= 2 parents) or is already in the stash list.
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         let json = serde_json::to_string_pretty(&result)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        Ok(CallToolResult::success(vec![Content::text(json)]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
     }
 
     #[tool(
@@ -2219,7 +1907,7 @@ when the sha is not stash-shaped (>= 2 parents) or is already in the stash list.
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         let json = serde_json::to_string_pretty(&result)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        Ok(CallToolResult::success(vec![Content::text(json)]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
     }
 
     #[tool(description = "Sandboxed append: add content to end of file. Auto-snapshots pre-state.")]
@@ -2234,7 +1922,7 @@ when the sha is not stash-shaped (>= 2 parents) or is already in the stash list.
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         let json = serde_json::to_string_pretty(&result)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        Ok(CallToolResult::success(vec![Content::text(json)]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
     }
 
     #[tool(description = "Sandboxed read: read file with optional offset (line) and limit.")]
@@ -2247,7 +1935,7 @@ when the sha is not stash-shaped (>= 2 parents) or is already in the stash list.
         let content = fs
             .read(&req.path, req.offset, req.limit)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        Ok(CallToolResult::success(vec![Content::text(content)]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(content)]))
     }
 
     #[tool(description = "Sandboxed head: read first N lines (default 20).")]
@@ -2260,7 +1948,7 @@ when the sha is not stash-shaped (>= 2 parents) or is already in the stash list.
         let content = fs
             .head(&req.path, req.lines)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        Ok(CallToolResult::success(vec![Content::text(content)]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(content)]))
     }
 
     #[tool(description = "Sandboxed tail: read last N lines (default 20).")]
@@ -2273,7 +1961,7 @@ when the sha is not stash-shaped (>= 2 parents) or is already in the stash list.
         let content = fs
             .tail(&req.path, req.lines)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        Ok(CallToolResult::success(vec![Content::text(content)]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(content)]))
     }
 
     #[tool(
@@ -2290,7 +1978,7 @@ when the sha is not stash-shaped (>= 2 parents) or is already in the stash list.
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         let json = serde_json::to_string_pretty(&result)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        Ok(CallToolResult::success(vec![Content::text(json)]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
     }
 
     #[tool(description = "List snapshot history for a file (newest first).")]
@@ -2305,7 +1993,7 @@ when the sha is not stash-shaped (>= 2 parents) or is already in the stash list.
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         let json = serde_json::to_string_pretty(&history)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        Ok(CallToolResult::success(vec![Content::text(json)]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
     }
 
     #[tool(
@@ -2331,7 +2019,7 @@ when the sha is not stash-shaped (>= 2 parents) or is already in the stash list.
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         let json = serde_json::to_string_pretty(&result)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        Ok(CallToolResult::success(vec![Content::text(json)]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
     }
 
     #[tool(
@@ -2357,7 +2045,7 @@ when the sha is not stash-shaped (>= 2 parents) or is already in the stash list.
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         let json = serde_json::to_string_pretty(&result)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        Ok(CallToolResult::success(vec![Content::text(json)]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
     }
 
     #[tool(description = "Show current session state (id, root, mode, justfile paths)")]
@@ -2412,7 +2100,7 @@ when the sha is not stash-shaped (>= 2 parents) or is already in the stash list.
                 .join("\n"),
             binary_lines.join("\n"),
         );
-        Ok(CallToolResult::success(vec![Content::text(info)]))
+        Ok(CallToolResult::success(vec![ContentBlock::text(info)]))
     }
 
     // -----------------------------------------------------------------------
@@ -2928,15 +2616,12 @@ secret rules. Set `files` to also list every packed path, which does read the wh
         }
         json_result(&out)
     }
-
-    // Journal tools (17) are forwarded to journal-mcp-rmcp's OutlineMcpServer
-    // via `JournalModule::list_tools` / `try_call` — see ServerHandler impl below.
 }
 
 #[tool_handler]
 impl ServerHandler for LdsServer {
-    fn get_info(&self) -> ServerInfo {
-        let mut info = ServerInfo::default();
+    fn get_info(&self) -> ServerConfig {
+        let mut info = ServerConfig::default();
         info.instructions = Some("local-develop-server: unified MCP for orch pipeline".into());
         info.capabilities = ServerCapabilities::builder()
             .enable_tools()
@@ -2948,8 +2633,8 @@ impl ServerHandler for LdsServer {
 
     async fn list_tools(
         &self,
-        request: Option<PaginatedRequestParams>,
-        context: RequestContext<RoleServer>,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
         let mut tools = Self::tool_router().list_all();
         let plugins = self.list_plugin_tools().await.unwrap_or_else(|e| {
@@ -2958,46 +2643,15 @@ impl ServerHandler for LdsServer {
         });
         tools.extend(plugins);
         tools.extend(self.list_export_tools().await);
-        // Outline + Journal tools: forwarded verbatim from their upstream
-        // SDK servers. Outline tools carry an `outline_` prefix stamped on
-        // in `list_tools_prefixed`; journal tools already carry the
-        // `journal_` prefix in-crate so no rewriting is needed. Only
-        // available once a session is started (modules live on Inner).
-        {
-            let inner = self.state.read().await;
-            if let Some(outline) = inner.outline.as_ref() {
-                match outline
-                    .list_tools_prefixed(request.clone(), context.clone())
-                    .await
-                {
-                    Ok(mut outline_tools) => tools.append(&mut outline_tools),
-                    Err(e) => {
-                        tracing::warn!(error = %e, "outline.list_tools_prefixed failed");
-                    }
-                }
-            }
-            if let Some(journal) = inner.journal.as_ref() {
-                match journal.list_tools(request.clone(), context.clone()).await {
-                    Ok(mut journal_tools) => tools.append(&mut journal_tools),
-                    Err(e) => {
-                        tracing::warn!(error = %e, "journal.list_tools failed");
-                    }
-                }
-            }
-        }
         tools.sort_by(|a, b| a.name.cmp(&b.name));
-        Ok(ListToolsResult {
-            tools,
-            meta: None,
-            next_cursor: None,
-        })
+        Ok(ListToolsResult::with_all_items(tools))
     }
 
     async fn call_tool(
         &self,
         request: CallToolRequestParams,
         context: RequestContext<RoleServer>,
-    ) -> Result<CallToolResult, McpError> {
+    ) -> Result<CallToolResponse, McpError> {
         // Auto-start: if the server was launched from a ProjectRoot and no
         // session has been started yet, start one automatically. Skip when the
         // tool being called is session_start itself (that handler will start
@@ -3019,7 +2673,7 @@ impl ServerHandler for LdsServer {
                 .try_export_call(&request.name, request.arguments.as_ref())
                 .await?
         {
-            return Ok(result);
+            return Ok(result.into());
         }
 
         // Skip plugin lookup for `session_start` so it can recover after the
@@ -3033,35 +2687,7 @@ impl ServerHandler for LdsServer {
                 .try_plugin_call(&request.name, request.arguments.as_ref())
                 .await?
         {
-            return Ok(result);
-        }
-        // Outline delegation: if the tool name has the `outline_` prefix,
-        // forward to the upstream OutlineMcpServer (which sees the raw
-        // name with the prefix stripped).
-        if request
-            .name
-            .starts_with(lds_outline::module::OUTLINE_TOOL_PREFIX)
-        {
-            let inner = self.state.read().await;
-            if let Some(outline) = inner.outline.as_ref()
-                && let Some(result) = outline.try_call(request.clone(), context.clone()).await?
-            {
-                return Ok(result);
-            }
-        }
-        // Journal delegation: if the tool name has the `journal_` prefix,
-        // forward to the upstream JournalMcpServer verbatim (journal tools
-        // already carry the prefix in-crate, so no rewriting is needed).
-        if request
-            .name
-            .starts_with(lds_journal::module::JOURNAL_TOOL_PREFIX)
-        {
-            let inner = self.state.read().await;
-            if let Some(journal) = inner.journal.as_ref()
-                && let Some(result) = journal.try_call(request.clone(), context.clone()).await?
-            {
-                return Ok(result);
-            }
+            return Ok(result.into());
         }
         let tcc = ToolCallContext::new(self, request, context);
         Self::tool_router().call(tcc).await
@@ -3081,94 +2707,55 @@ impl ServerHandler for LdsServer {
     //   lds://docs/pack             — what a pack carries, and what restore repairs
     async fn list_resources(
         &self,
-        request: Option<PaginatedRequestParams>,
-        context: RequestContext<RoleServer>,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
     ) -> Result<ListResourcesResult, McpError> {
         let inner = self.state.read().await;
         let mut resources: Vec<Resource> = vec![
-            Annotated::new(
-                RawResource::new("lds://sessions", "sessions")
-                    .with_description("Full multi-session ledger as JSON")
-                    .with_mime_type("application/json"),
-                None,
-            ),
-            Annotated::new(
-                RawResource::new("lds://sessions/doctor", "sessions/doctor")
-                    .with_description("Doctor reports for every live session")
-                    .with_mime_type("application/json"),
-                None,
-            ),
-            Annotated::new(
-                RawResource::new("lds://docs/multi-session", "docs/multi-session")
-                    .with_description("Multi-session ledger design + usage doc")
-                    .with_mime_type("text/markdown"),
-                None,
-            ),
-            Annotated::new(
-                RawResource::new("lds://docs/routing", "docs/routing")
-                    .with_description(
-                        "MCP routing + export: config.toml shape, tool contracts, usage examples",
-                    )
-                    .with_mime_type("text/markdown"),
-                None,
-            ),
-            Annotated::new(
-                RawResource::new("lds://docs/pack", "docs/pack")
-                    .with_description(
-                        "pack: what travels, what is deliberately left behind, and what restore \
-                         repairs — including worktrees split across two packs",
-                    )
-                    .with_mime_type("text/markdown"),
-                None,
-            ),
+            Resource::new("lds://sessions", "sessions")
+                .with_description("Full multi-session ledger as JSON")
+                .with_mime_type("application/json"),
+            Resource::new("lds://sessions/doctor", "sessions/doctor")
+                .with_description("Doctor reports for every live session")
+                .with_mime_type("application/json"),
+            Resource::new("lds://docs/multi-session", "docs/multi-session")
+                .with_description("Multi-session ledger design + usage doc")
+                .with_mime_type("text/markdown"),
+            Resource::new("lds://docs/routing", "docs/routing")
+                .with_description(
+                    "MCP routing + export: config.toml shape, tool contracts, usage examples",
+                )
+                .with_mime_type("text/markdown"),
+            Resource::new("lds://docs/pack", "docs/pack")
+                .with_description(
+                    "pack: what travels, what is deliberately left behind, and what restore \
+                     repairs — including worktrees split across two packs",
+                )
+                .with_mime_type("text/markdown"),
         ];
         for entry in inner.lds.list_sessions() {
             let label = entry
                 .alias
                 .clone()
                 .unwrap_or_else(|| entry.session_id.clone());
-            resources.push(Annotated::new(
-                RawResource::new(
+            resources.push(
+                Resource::new(
                     format!("lds://sessions/{label}"),
                     format!("session/{label}"),
                 )
                 .with_description(format!("Session {label} (root={})", entry.root.display()))
                 .with_mime_type("application/json"),
-                None,
-            ));
-            resources.push(Annotated::new(
-                RawResource::new(
+            );
+            resources.push(
+                Resource::new(
                     format!("lds://sessions/{label}/doctor"),
                     format!("session/{label}/doctor"),
                 )
                 .with_description(format!("Doctor report for session {label}"))
                 .with_mime_type("application/json"),
-                None,
-            ));
+            );
         }
-        // Outline + Journal resources: forwarded verbatim from their upstream
-        // MCP servers (outline:// / journal-mcp:// URI schemes are namespaced
-        // by scheme, no rewriting needed).
-        if let Some(outline) = inner.outline.as_ref() {
-            match outline
-                .list_resources(request.clone(), context.clone())
-                .await
-            {
-                Ok(outline_resources) => resources.extend(outline_resources.resources),
-                Err(e) => tracing::warn!(error = %e, "outline.list_resources failed"),
-            }
-        }
-        if let Some(journal) = inner.journal.as_ref() {
-            match journal.list_resources(request, context).await {
-                Ok(journal_resources) => resources.extend(journal_resources.resources),
-                Err(e) => tracing::warn!(error = %e, "journal.list_resources failed"),
-            }
-        }
-        Ok(ListResourcesResult {
-            resources,
-            meta: None,
-            next_cursor: None,
-        })
+        Ok(ListResourcesResult::with_all_items(resources))
     }
 
     async fn list_resource_templates(
@@ -3177,55 +2764,25 @@ impl ServerHandler for LdsServer {
         _context: RequestContext<RoleServer>,
     ) -> Result<ListResourceTemplatesResult, McpError> {
         let templates: Vec<ResourceTemplate> = vec![
-            Annotated::new(
-                RawResourceTemplate::new("lds://sessions/{key}", "session by key")
-                    .with_description("Describe a session by id or alias")
-                    .with_mime_type("application/json"),
-                None,
-            ),
-            Annotated::new(
-                RawResourceTemplate::new("lds://sessions/{key}/doctor", "session doctor by key")
-                    .with_description("Doctor report for a single session")
-                    .with_mime_type("application/json"),
-                None,
-            ),
+            ResourceTemplate::new("lds://sessions/{key}", "session by key")
+                .with_description("Describe a session by id or alias")
+                .with_mime_type("application/json"),
+            ResourceTemplate::new("lds://sessions/{key}/doctor", "session doctor by key")
+                .with_description("Doctor report for a single session")
+                .with_mime_type("application/json"),
         ];
-        Ok(ListResourceTemplatesResult {
-            resource_templates: templates,
-            meta: None,
-            next_cursor: None,
-        })
+        Ok(ListResourceTemplatesResult::with_all_items(templates))
     }
 
     async fn read_resource(
         &self,
         request: ReadResourceRequestParams,
-        context: RequestContext<RoleServer>,
-    ) -> Result<ReadResourceResult, McpError> {
-        // Outline / Journal resources short-circuit lds's own resolver so
-        // consumers can fetch bundled guides through lds.
-        if request.uri.starts_with("outline://") {
-            let inner = self.state.read().await;
-            if let Some(outline) = inner.outline.as_ref()
-                && let Some(result) = outline
-                    .try_read_resource(request.clone(), context.clone())
-                    .await?
-            {
-                return Ok(result);
-            }
-        }
-        if request.uri.starts_with("journal-mcp://") {
-            let inner = self.state.read().await;
-            if let Some(journal) = inner.journal.as_ref()
-                && let Some(result) = journal.try_read_resource(request.clone(), context).await?
-            {
-                return Ok(result);
-            }
-        }
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ReadResourceResponse, McpError> {
         let uri = request.uri;
         let inner = self.state.read().await;
         let body = read_lds_resource(&uri, &inner.lds)?;
-        Ok(ReadResourceResult::new(vec![body]))
+        Ok(ReadResourceResult::new(vec![body]).into())
     }
 }
 

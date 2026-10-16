@@ -53,10 +53,7 @@ fn extract_text(result: &rmcp::model::CallToolResult) -> String {
     result
         .content
         .iter()
-        .filter_map(|c| match &c.raw {
-            rmcp::model::RawContent::Text(t) => Some(t.text.as_str()),
-            _ => None,
-        })
+        .filter_map(|c| c.as_text().map(|t| t.text.as_str()))
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -152,7 +149,6 @@ async fn session_start_returns_id() {
     let client = connect().await;
 
     let result = client
-        .peer()
         .call_tool(call_params(
             "session_start",
             json!({ "root": repo.path_str() }),
@@ -177,7 +173,6 @@ async fn session_start_alias_round_trip() {
     let client = connect().await;
 
     let start = client
-        .peer()
         .call_tool(call_params(
             "session_start",
             json!({ "root": repo.path_str(), "alias": "main-worker" }),
@@ -191,7 +186,6 @@ async fn session_start_alias_round_trip() {
     );
 
     let describe = client
-        .peer()
         .call_tool(call_params(
             "session_describe",
             json!({ "key": "main-worker" }),
@@ -214,7 +208,6 @@ async fn git_status_round_trip() {
     let client = connect().await;
 
     client
-        .peer()
         .call_tool(call_params(
             "session_start",
             json!({ "root": repo.path_str() }),
@@ -228,7 +221,6 @@ async fn git_status_round_trip() {
     // staged + unstaged to be empty. (untracked may include `.worktrees`,
     // which is benign and explicitly allowed.)
     let result_clean = client
-        .peer()
         .call_tool(call_params("git_status", json!({})))
         .await
         .unwrap();
@@ -244,7 +236,6 @@ async fn git_status_round_trip() {
     // form debug-format token. The path must appear verbatim in that array.
     std::fs::write(repo.dir.path().join("dirty.txt"), "content\n").unwrap();
     let result_dirty = client
-        .peer()
         .call_tool(call_params("git_status", json!({})))
         .await
         .unwrap();
@@ -268,7 +259,6 @@ async fn sandbox_write_read_round_trip() {
     let client = connect().await;
 
     client
-        .peer()
         .call_tool(call_params(
             "session_start",
             json!({ "root": repo.path_str() }),
@@ -277,7 +267,6 @@ async fn sandbox_write_read_round_trip() {
         .unwrap();
 
     let write_result = client
-        .peer()
         .call_tool(call_params(
             "sandbox_write",
             json!({ "path": "note.txt", "content": "from e2e\nsecond line\n" }),
@@ -289,7 +278,6 @@ async fn sandbox_write_read_round_trip() {
     assert!(write_text.contains("bytes_written"));
 
     let read_result = client
-        .peer()
         .call_tool(call_params("sandbox_read", json!({ "path": "note.txt" })))
         .await
         .unwrap();
@@ -307,10 +295,7 @@ async fn calling_tool_without_session_errors() {
     // session_start must return an error (crux §3: non-ProjectRoot CWD path).
     let tmpdir = tempfile::tempdir().expect("tempdir");
     let client = connect_in(tmpdir.path()).await;
-    let outcome = client
-        .peer()
-        .call_tool(call_params("git_status", json!({})))
-        .await;
+    let outcome = client.call_tool(call_params("git_status", json!({}))).await;
     assert!(outcome.is_err(), "expected error, got {outcome:?}");
 
     client.cancel().await.unwrap();
@@ -323,10 +308,7 @@ async fn calling_tool_auto_starts_in_project_root() {
     // session_start call (crux §3: ProjectRoot CWD path).
     let repo = TempRepo::new();
     let client = connect_in(repo.dir.path()).await;
-    let outcome = client
-        .peer()
-        .call_tool(call_params("git_status", json!({})))
-        .await;
+    let outcome = client.call_tool(call_params("git_status", json!({}))).await;
     assert!(
         outcome.is_ok(),
         "expected auto-start to succeed, got {outcome:?}"
@@ -345,10 +327,7 @@ async fn no_session_error_has_internal_error_code() {
     // Use a non-ProjectRoot tmpdir so auto-start does NOT fire (crux §3).
     let tmpdir = tempfile::tempdir().expect("tempdir");
     let client = connect_in(tmpdir.path()).await;
-    let outcome = client
-        .peer()
-        .call_tool(call_params("git_status", json!({})))
-        .await;
+    let outcome = client.call_tool(call_params("git_status", json!({}))).await;
 
     match outcome {
         Err(ServiceError::McpError(ref err_data)) => {
@@ -375,7 +354,6 @@ async fn mcp_call_self_loop_rejected() {
     let client = connect_in(repo.dir.path()).await;
 
     let outcome = client
-        .peer()
         .call_tool(call_params(
             "mcp_call",
             json!({ "uri": "lds://git_status", "args": {} }),
@@ -416,7 +394,6 @@ async fn mcp_call_proxies_to_child_lds_server() {
     let repo_b = TempRepo::new();
 
     let register_result = client_a
-        .peer()
         .call_tool(call_params(
             "mcp_route_register",
             json!({ "name": "child_lds", "command": server_bin() }),
@@ -430,7 +407,6 @@ async fn mcp_call_proxies_to_child_lds_server() {
     );
 
     let start_result = client_a
-        .peer()
         .call_tool(call_params(
             "mcp_call",
             json!({
@@ -447,7 +423,6 @@ async fn mcp_call_proxies_to_child_lds_server() {
     );
 
     let status_result = client_a
-        .peer()
         .call_tool(call_params(
             "mcp_call",
             json!({ "uri": "child_lds://git_status", "args": {} }),
@@ -483,7 +458,6 @@ async fn session_start_recovers_after_previous_root_deleted() {
 
     // Step 3: session_start with root = A — must succeed.
     let result = client
-        .peer()
         .call_tool(call_params(
             "session_start",
             json!({ "root": dir_a.path().to_str().unwrap() }),
@@ -498,7 +472,6 @@ async fn session_start_recovers_after_previous_root_deleted() {
 
     // Step 4: recipe_list — sanity check that the session is functional.
     let result = client
-        .peer()
         .call_tool(call_params("recipe_list", json!({})))
         .await
         .unwrap();
@@ -513,7 +486,6 @@ async fn session_start_recovers_after_previous_root_deleted() {
 
     // Step 6: recipe_list must fail with SessionRootGone.
     let outcome = client
-        .peer()
         .call_tool(call_params("recipe_list", json!({})))
         .await;
     match outcome {
@@ -546,7 +518,6 @@ async fn session_start_recovers_after_previous_root_deleted() {
     // Before the fix, try_plugin_call would hit check_session_root on the dead
     // session A and reject session_start entirely.
     let result = client
-        .peer()
         .call_tool(call_params(
             "session_start",
             json!({ "root": dir_b.path().to_str().unwrap() }),
@@ -561,7 +532,6 @@ async fn session_start_recovers_after_previous_root_deleted() {
 
     // Step 9: recipe_list with B — confirm the new session is fully functional.
     let result = client
-        .peer()
         .call_tool(call_params("recipe_list", json!({})))
         .await
         .unwrap();

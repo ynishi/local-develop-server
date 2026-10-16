@@ -1,8 +1,8 @@
 # lds-ops-pane
 
 A Claude Code mod that draws the [local-develop-server (lds)](../../../README.md) session as a
-pane and as a one-line band above the prompt: root, publicity (`PUBLIC` in red), owned
-worktrees and the latest journal chapter.
+pane and as a one-line band above the prompt: root, publicity (`PUBLIC` in red) and owned
+worktrees.
 
 ## What it shows
 
@@ -13,7 +13,6 @@ lds         18dd487a…  /home/u/proj/lds
 publicity   github=PUBLIC  crates=PUBLIC
 worktrees   main  5795a59  (not owned)
             topic/x  1a2b3c4  owned
-journal     2026-10-10 — Claude Code Mods survey  closed
 updated 12s ago  [ Refresh ]  [ Hide band ]
 ```
 
@@ -23,7 +22,7 @@ The band sits above the prompt (red and bold while the repository is public):
 lds  local-develop-server  github=PUBLIC crates=PUBLIC  [ Hide ]
 ```
 
-The data comes from lds `session_info`, `git_worktree_list`, `publicity` and `journal_tail`,
+The data comes from lds `session_info`, `git_worktree_list` and `publicity`,
 fetched together at session start, on `/lds`, on `[ Refresh ]` and after every turn. A source that
 fails is listed under `errors` and never stops the rest.
 

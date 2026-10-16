@@ -7,8 +7,6 @@ export type Worktree = {
   owned: boolean
 }
 
-export type JournalHead = { chapter: string; state: string; at: number | null }
-
 export type Snapshot = {
   /** `$.clock.now()` when the snapshot was taken. */
   at: number
@@ -17,7 +15,6 @@ export type Snapshot = {
   level: 'public' | 'private' | 'unknown'
   publicity: PublicityRow[]
   worktrees: Worktree[]
-  journal: JournalHead | null
   /** One line per source that could not be read ("publicity: lds not connected"). */
   errors: string[]
 }

@@ -52,16 +52,6 @@ const DEFAULTS: Record<string, McpToolResult> = {
     ],
   }),
   publicity: ldsJson({ results: [platform('github', 'PUBLIC'), platform('crates', 'PUBLIC')] }),
-  journal_tail: ldsJson([
-    {
-      chapter_id: '2026-10-10 — Claude Code Mods survey',
-      current_state: 'closed',
-      opened_at: 1791669755221,
-      closed_at: 1791669797543,
-      schema_id: 'ytk-canonical-v1',
-      events: [],
-    },
-  ]),
 }
 
 const START = 1_000_000
@@ -169,22 +159,19 @@ test('pathTail keeps the tail of a long path; formatAge counts s / m / h', () =>
 
 // --- /lds command -------------------------------------------------------------
 
-test('/lds: refreshes from the 4 lds tools, opens the pane, answers { text }', async ($, on) => {
+test('/lds: refreshes from the 3 lds tools, opens the pane, answers { text }', async ($, on) => {
   const world = mockWorld(on)
   const r = await $.command.run(RUN)
   expect(r.text).toBe('lds pane opened.')
   expect(world.opened).toEqual(['lds-ops'])
   expect(world.calls.map(c => c.tool).sort()).toEqual([
     'git_worktree_list',
-    'journal_tail',
     'publicity',
     'session_info',
   ])
   expect(world.calls.every(c => c.server === 'lds')).toBe(true)
   const publicity = world.calls.find(c => c.tool === 'publicity')
   expect(publicity?.args).toEqual({})
-  const journal = world.calls.find(c => c.tool === 'journal_tail')
-  expect(journal?.args).toEqual({ n: 1 })
 })
 
 test('session.start: registers /lds and fills the snapshot, but opens no pane', async ($, on) => {
@@ -192,12 +179,12 @@ test('session.start: registers /lds and fills the snapshot, but opens no pane', 
   await $.session.start({ cwd: '/repo', surface: 'terminal', isInteractive: true })
   expect(world.registered).toEqual(['lds'])
   expect(world.opened).toEqual([])
-  expect(world.calls).toHaveLength(4)
+  expect(world.calls).toHaveLength(3)
 })
 
 // --- Pane ---------------------------------------------------------------------
 
-test('Pane: shows publicity, worktrees and journal on terminal and desktop', async ($, on) => {
+test('Pane: shows publicity and worktrees on terminal and desktop', async ($, on) => {
   mockWorld(on)
   await $.command.run(RUN)
   for (const surface of SURFACES) {
@@ -213,7 +200,6 @@ test('Pane: shows publicity, worktrees and journal on terminal and desktop', asy
     expect(await pane.find({ type: 'Text', text: /github=PUBLIC/ })).toBeDefined()
     expect(await pane.find({ type: 'Text', text: /topic\/x/ })).toBeDefined()
     expect(await pane.find({ type: 'Text', text: /5795a59/ })).toBeDefined()
-    expect(await pane.find({ type: 'Text', text: /Claude Code Mods survey/ })).toBeDefined()
     expect(await pane.find({ type: 'Text', text: /18dd487a/ })).toBeDefined()
     expect(await pane.find({ type: 'Button', key: 'refresh' })).toBeDefined()
     expect(await pane.find({ type: 'Text', text: /errors/ })).toBeUndefined()
@@ -236,7 +222,7 @@ for (const surface of SURFACES) {
     expect(world.calls).toHaveLength(0)
 
     await pane.press({ key: 'refresh' })
-    expect(world.calls).toHaveLength(4)
+    expect(world.calls).toHaveLength(3)
     expect(await pane.find({ type: 'Text', text: /No lds snapshot yet/ })).toBeUndefined()
     expect(await pane.find({ type: 'Text', text: /github=PUBLIC/ })).toBeDefined()
   })
@@ -277,7 +263,6 @@ test('refresh: lds refusing every call still yields a snapshot with errors', asy
     session_info: 'deny',
     git_worktree_list: 'deny',
     publicity: 'deny',
-    journal_tail: 'deny',
   })
   const r = await $.command.run(RUN)
   expect(r.text).toBe('lds pane opened.')
@@ -410,6 +395,6 @@ test('turn.complete: refreshes the snapshot, so its age restarts', async ($, on)
     turnId: 't1',
     reason: 'answer',
   })
-  expect(world.calls.length).toBe(callsBefore + 4)
+  expect(world.calls.length).toBe(callsBefore + 3)
   expect(await pane.find({ type: 'Text', text: /updated 0s ago/ })).toBeDefined()
 })
