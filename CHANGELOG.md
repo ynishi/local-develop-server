@@ -14,6 +14,20 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+### Security
+
+## [0.24.1] - 2026-10-17
+
+### Added
+
+### Changed
+
+### Deprecated
+
+### Removed
+
+### Fixed
+
 - `git_commit` no longer fails with `pathspec '<path>' did not match any
   files` when the index holds a staged deletion (`git rm <path>`) and the
   commit stages paths one by one (a dotfile among the changes, or an explicit
