@@ -1041,6 +1041,121 @@ async fn commit_detects_nested_dotdir_component() {
     );
 }
 
+/// Paths in the HEAD tree (`git ls-tree -r --name-only HEAD`). Test-only helper.
+fn head_tree(dir: &Path) -> Vec<String> {
+    let out = Command::new("git")
+        .args(["ls-tree", "-r", "--name-only", "HEAD"])
+        .current_dir(dir)
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(|l| l.to_string())
+        .collect()
+}
+
+#[tokio::test]
+async fn commit_keeps_staged_deletion_with_tracked_dotfile_change() {
+    // Regression (#3): `git rm a.txt` + an edit to a tracked dotfile, with
+    // paths omitted. The dotfile sends the commit down the classify route,
+    // which used to run `git add -A -- a.txt .x` and fail with
+    // "pathspec 'a.txt' did not match any files".
+    let tmp = tempfile::tempdir().unwrap();
+    init_temp_repo(tmp.path());
+    let session = make_session(tmp.path());
+    let git = GitModule::new(session);
+
+    std::fs::write(tmp.path().join("a.txt"), "a\n").unwrap();
+    std::fs::write(tmp.path().join(".x"), "x\n").unwrap();
+    git_run(tmp.path(), &["add", "a.txt", ".x"]);
+    git_run(tmp.path(), &["commit", "-m", "seed a.txt and .x"]);
+
+    git_run(tmp.path(), &["rm", "-q", "a.txt"]);
+    std::fs::write(tmp.path().join(".x"), "y\n").unwrap();
+
+    let commit = git
+        .commit(
+            tmp.path(),
+            "delete a.txt, edit .x",
+            None,
+            OtherStagedMode::Stop,
+            false,
+        )
+        .await
+        .expect("commit must keep the staged deletion and stage .x");
+
+    assert_eq!(commit.files_changed, 2, "a.txt deletion + .x edit");
+    let tree = head_tree(tmp.path());
+    assert!(
+        !tree.iter().any(|p| p == "a.txt"),
+        "a.txt must be gone from HEAD, got: {tree:?}"
+    );
+    let x_at_head = Command::new("git")
+        .args(["show", "HEAD:.x"])
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&x_at_head.stdout), "y\n");
+    assert!(
+        porcelain_status(tmp.path()).is_empty(),
+        "nothing should be left over, got: {:?}",
+        porcelain_status(tmp.path())
+    );
+}
+
+#[tokio::test]
+async fn commit_only_keeps_explicitly_named_staged_deletion() {
+    // Regression (#3): a staged deletion named in `paths` used to reach
+    // `git add -- a.txt b.txt` and fail on the missing pathspec.
+    let tmp = tempfile::tempdir().unwrap();
+    init_temp_repo(tmp.path());
+    let session = make_session(tmp.path());
+    let git = GitModule::new(session);
+
+    std::fs::write(tmp.path().join("a.txt"), "a\n").unwrap();
+    std::fs::write(tmp.path().join("b.txt"), "b\n").unwrap();
+    git_run(tmp.path(), &["add", "a.txt", "b.txt"]);
+    git_run(tmp.path(), &["commit", "-m", "seed a.txt and b.txt"]);
+
+    git_run(tmp.path(), &["rm", "-q", "a.txt"]);
+    std::fs::write(tmp.path().join("b.txt"), "b2\n").unwrap();
+
+    let commit = git
+        .commit(
+            tmp.path(),
+            "delete a.txt, edit b.txt",
+            Some(&["a.txt".to_string(), "b.txt".to_string()]),
+            OtherStagedMode::Stop,
+            false,
+        )
+        .await
+        .expect("commit must keep the named staged deletion");
+
+    assert_eq!(commit.files_changed, 2, "a.txt deletion + b.txt edit");
+    let deleted = Command::new("git")
+        .args([
+            "show",
+            "--name-only",
+            "--diff-filter=D",
+            "--pretty=format:",
+            "HEAD",
+        ])
+        .current_dir(tmp.path())
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&deleted.stdout).trim(),
+        "a.txt",
+        "the commit must record the a.txt deletion"
+    );
+    let tree = head_tree(tmp.path());
+    assert!(
+        !tree.iter().any(|p| p == "a.txt"),
+        "a.txt must be gone from HEAD, got: {tree:?}"
+    );
+    assert!(tree.iter().any(|p| p == "b.txt"));
+}
+
 // ---------------------------------------------------------------------------
 // Stash transaction (apply / abort / finalize)
 // ---------------------------------------------------------------------------

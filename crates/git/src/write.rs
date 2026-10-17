@@ -259,14 +259,44 @@ async fn detect_other_staged(working_dir: &Path, only: &[String]) -> Result<Vec<
 }
 
 /// `git add -- <paths>`. Ignored when `paths` is empty (no-op is not an error).
+/// Paths that are already staged deletions are left in the index as-is.
 async fn stage(working_dir: &Path, paths: &[String]) -> Result<()> {
+    let paths = drop_staged_deletions(working_dir, paths).await?;
     if paths.is_empty() {
         return Ok(());
     }
     let mut args = vec!["add", "--"];
-    args.extend(paths.iter().map(|s| s.as_str()));
+    args.extend(paths);
     git_cmd(working_dir, &args, TIMEOUT_LOCAL).await?;
     Ok(())
+}
+
+/// Remove from `paths` every path that is already a staged deletion
+/// (`git diff --cached --diff-filter=D`). Such a path exists in neither the
+/// worktree nor the index, so `git add -- <path>` rejects it with "pathspec
+/// did not match any files"; the deletion is already staged for the commit.
+async fn drop_staged_deletions<'a>(
+    working_dir: &Path,
+    paths: &'a [String],
+) -> Result<Vec<&'a str>> {
+    if paths.is_empty() {
+        return Ok(Vec::new());
+    }
+    // `-z` keeps paths unquoted, matching the porcelain `-z` names from
+    // `enumerate_changes`.
+    let raw = git_cmd(
+        working_dir,
+        &["diff", "--cached", "--name-only", "--diff-filter=D", "-z"],
+        TIMEOUT_LOCAL,
+    )
+    .await?;
+    let deleted: std::collections::HashSet<&str> =
+        raw.split('\0').filter(|l| !l.is_empty()).collect();
+    Ok(paths
+        .iter()
+        .map(|s| s.as_str())
+        .filter(|p| !deleted.contains(p))
+        .collect())
 }
 
 /// Unstage `paths` while keeping worktree changes intact. Uses `git reset --`
@@ -452,13 +482,15 @@ async fn is_ignored(working_dir: &Path, path: &str) -> bool {
 }
 
 /// `git add -A -- <paths>`. Handles deletions in addition to
-/// modifications / additions, unlike plain [`stage`].
+/// modifications / additions, unlike plain [`stage`]. Paths that are already
+/// staged deletions are left in the index as-is.
 async fn stage_add_all(working_dir: &Path, paths: &[String]) -> Result<()> {
+    let paths = drop_staged_deletions(working_dir, paths).await?;
     if paths.is_empty() {
         return Ok(());
     }
     let mut args = vec!["add", "-A", "--"];
-    args.extend(paths.iter().map(|s| s.as_str()));
+    args.extend(paths);
     git_cmd(working_dir, &args, TIMEOUT_LOCAL).await?;
     Ok(())
 }
