@@ -8,6 +8,20 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
+### Deprecated
+
+### Removed
+
+### Fixed
+
+### Security
+
+## [0.24.0] - 2026-10-17
+
+### Added
+
+### Changed
+
 - `rmcp` 1.8 → 3.5.1.
 - examples: `lds-ops-pane` no longer shows the journal row or calls
   `journal_tail`; the pane and band read `session_info`, `git_worktree_list`
