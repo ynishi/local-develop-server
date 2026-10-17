@@ -14,6 +14,12 @@ All notable changes to this project will be documented in this file.
 
 ### Fixed
 
+- `git_commit` no longer fails with `pathspec '<path>' did not match any
+  files` when the index holds a staged deletion (`git rm <path>`) and the
+  commit stages paths one by one (a dotfile among the changes, or an explicit
+  `paths` list naming the deleted path). The staged deletion is left in the
+  index and included in the commit (#3).
+
 ### Security
 
 ## [0.24.0] - 2026-10-17
