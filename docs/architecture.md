@@ -35,12 +35,10 @@ crates/
 ├── gh/      lds-gh       GhModule (gh CLI subprocess wrapper, read-only API, auth fail-fast)
 ├── recipe/  lds-recipe   RecipeModule (just CLI, resolve chain, content args)
 ├── sandbox/ lds-sandbox  SandboxModule (file-scoped read/append, snapshot/rollback)
-├── journal/ lds-journal  JournalModule (journal-mcp-rmcp SDK consumer, `journal_*` tools forwarded)
-├── outline/ lds-outline  OutlineModule (outline-mcp-rmcp SDK consumer, prefixed `outline_*` tools)
 ├── pack/    lds-pack     Whole-project archives (`pack_*` MCP tools + `lds pack` CLI)
 ├── router/  lds-router   Upstream MCP routing and re-export
 ├── publicity/ lds-publicity  Repository visibility probing
-└── lds/     lds          MCP binary (rmcp v1.7, stdio transport)
+└── lds/     lds          MCP binary (rmcp v3.5, stdio transport)
 ```
 
 ## Session

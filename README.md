@@ -1,8 +1,8 @@
 # lds — local-develop-server
 
 Unified MCP server for AI-driven coding agents. Bundles git read/write,
-`just`-based recipe execution, file-sandbox operations, journal and outline
-forwarding, and whole-project archives into one process behind a shared
+`just`-based recipe execution, file-sandbox operations, and whole-project
+archives into one process behind a shared
 `Session` — so an agent opens a repository once with `session_start` and then
 runs every tool against the same project root.
 
@@ -97,18 +97,6 @@ MCP request-response — poll `gh_run_view` instead). Invoke those from a shell.
 | Tool | Description |
 |---|---|
 | `publicity` | Classify the repository as `PUBLIC` / `PRIVATE` / `INTERNAL` / `LOCAL` / `NOT_GIT` / `FORKED` / `AMBIGUOUS` / `UNKNOWN`, one result per platform (github via `gh repo view`, crates via `Cargo.toml` `publish`). `platform` restricts to one; `root` (absolute path) classifies a directory other than the session root |
-
-### Outline
-
-The upstream [outline-mcp][outline-mcp] surface, forwarded in-process under the
-`outline_` prefix (`outline_shelf`, `outline_select_book`, `outline_toc`,
-`outline_node_*`, `outline_snapshot_*`, `outline_book_history`, `outline_dump`,
-`outline_import`, `outline_checklist`, `outline_init`, `outline_gen_routing`).
-Shelf root defaults to `$HOME/.config/outline-mcp/books`, overridable via
-`LDS_OUTLINE_SHELF_DIR`. Tool semantics are the upstream ones; bundled guides
-are surfaced verbatim under `outline://guides/*`.
-
-[outline-mcp]: https://github.com/ynishi/outline-mcp
 
 ## `lds pack` — moving a whole project
 
@@ -269,7 +257,7 @@ Code 2.1.287 or later and an lds server that `/mcp` lists as `lds`.
 | Mod | What it does |
 |---|---|
 | [`lds-leak-guard`](examples/mods/lds-leak-guard/) | A `tool.check` hook on `Bash`. Before `git push` / `gh ... create` / `cargo publish` / `npm publish` / `docker push` and other remote writes it asks `publicity`: **deny** on a `PUBLIC` repository, **ask** otherwise. Bash `git commit` / `merge` / `worktree` / `branch -d` are denied with a pointer to `mcp__lds__git_*`, so the session ownership guard cannot be bypassed from the shell |
-| [`lds-ops-pane`](examples/mods/lds-ops-pane/) | `/lds` opens a pane with the session root, per-platform publicity (`PUBLIC` in red), worktrees with ownership, and the latest journal chapter; a one-line band above the prompt repeats the publicity |
+| [`lds-ops-pane`](examples/mods/lds-ops-pane/) | `/lds` opens a pane with the session root, per-platform publicity (`PUBLIC` in red), and worktrees with ownership; a one-line band above the prompt repeats the publicity |
 
 ```sh
 claude --plugin-dir examples/mods/lds-leak-guard      # one session

@@ -8,12 +8,28 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
+- `rmcp` 1.8 → 3.5.1.
+- examples: `lds-ops-pane` no longer shows the journal row or calls
+  `journal_tail`; the pane and band read `session_info`, `git_worktree_list`
+  and `publicity` only.
+
 ### Deprecated
 
 ### Removed
 
+- The journal and outline modules (`lds-journal` / `lds-outline` crates, 44
+  `journal_*` / `outline_*` tools and their `journal-mcp://` / `outline://`
+  resources). Run the standalone journal / outline MCP servers instead, or
+  reach them through an lds `[[route]]`.
+- The `[remote.outline]` / `[remote.journal]` config sections and their env
+  overrides (`LDS_OUTLINE_REMOTE_URL`, `LDS_JOURNAL_REMOTE_URL`,
+  `LDS_JOURNAL_REMOTE_PROJECT_KEY`). A `config.toml` that still contains these
+  tables keeps loading; they are ignored.
+
 ### Fixed
 
+- The stdio server no longer exits when a client sends `server/discover`
+  before `initialize` (#2).
 - Cargo.lock: `chacha20` 0.10.1 → 0.10.2. The 0.10.1 release is yanked on
   crates.io (transitive via `rmcp` → `rand`); `cargo publish` warned on every
   crate that locks it.

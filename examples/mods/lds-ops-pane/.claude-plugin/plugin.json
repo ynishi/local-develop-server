@@ -1,7 +1,7 @@
 {
   "name": "lds-ops-pane",
   "version": "0.1.0",
-  "description": "A pane and a band above the prompt showing the lds session: root, publicity (PUBLIC in red), owned worktrees, and the latest journal chapter.",
+  "description": "A pane and a band above the prompt showing the lds session: root, publicity (PUBLIC in red), and owned worktrees.",
   "author": {
     "name": "Yutaka Nishimura"
   },
